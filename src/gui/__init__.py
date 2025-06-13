@@ -8,7 +8,7 @@ GUI模块
 from .app import Application, create_application
 from .main_window import MainWindow
 from .crawler_widget import CrawlerWidget
-from .video_widget import VideoWidget
+from .video_widget import VideoEditWidget
 from .config_widget import ConfigWidget
 from .log_viewer import LogViewer
 from .progress_dialog import ProgressDialog, MultiTaskProgressDialog
@@ -30,7 +30,7 @@ __all__ = [
     
     # 功能组件
     "CrawlerWidget",
-    "VideoWidget",
+    "VideoEditWidget",
     "ConfigWidget",
     "LogViewer",
     

@@ -117,7 +117,7 @@ class MainWindow(QMainWindow):
         
         # 添加选项卡
         self.tab_widget.addTab(self.crawler_widget, "🕷️ 爬虫")
-        self.tab_widget.addTab(self.video_widget, "🎬 视频处理")
+        self.tab_widget.addTab(self.video_edit_widget, "🎬 视频编辑")
         self.tab_widget.addTab(self.config_widget, "⚙️ 配置")
         
         # 任务管理器
@@ -141,8 +141,9 @@ class MainWindow(QMainWindow):
             # 爬虫模块
             self.crawler_widget = CrawlerWidget(self.config_manager)
             
-            # 视频处理模块
-            self.video_widget = VideoWidget(self.config_manager)
+            # 视频编辑模块
+            from .video_widget import VideoEditWidget
+            self.video_edit_widget = VideoEditWidget(self.config_manager)
             
             # 配置模块
             self.config_widget = ConfigWidget(self.config_manager)

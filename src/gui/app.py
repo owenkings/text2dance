@@ -508,7 +508,7 @@ class Application(QApplication):
                 return
             
             # 恢复窗口几何
-            geometry = self.config_manager.get("ui", "window_geometry", "")
+            geometry = self.config_manager.get("ui.window_geometry", "")
             if geometry:
                 self.main_window.restoreGeometry(geometry.encode())
             else:
@@ -516,7 +516,7 @@ class Application(QApplication):
                 self._center_window()
             
             # 恢复窗口状态
-            state = self.config_manager.get("ui", "window_state", "")
+            state = self.config_manager.get("ui.window_state", "")
             if state:
                 self.main_window.restoreState(state.encode())
             
@@ -549,11 +549,11 @@ class Application(QApplication):
             
             # 保存窗口几何
             geometry = self.main_window.saveGeometry().data().decode()
-            self.config_manager.set("ui", "window_geometry", geometry)
+            self.config_manager.set("ui.window_geometry", geometry)
             
             # 保存窗口状态
             state = self.main_window.saveState().data().decode()
-            self.config_manager.set("ui", "window_state", state)
+            self.config_manager.set("ui.window_state", state)
             
             # 保存配置
             self.config_manager.save()

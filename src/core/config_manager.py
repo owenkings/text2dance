@@ -9,12 +9,17 @@ import yaml
 from pathlib import Path
 from typing import Any, Dict, Optional
 from loguru import logger
+from PyQt5.QtCore import QObject, pyqtSignal
 
 
-class ConfigManager:
+class ConfigManager(QObject):
     """配置管理器类"""
     
+    # 配置变更信号
+    config_changed = pyqtSignal(dict)
+    
     def __init__(self, config_file: str = "config.yaml"):
+        super().__init__()
         self.config_file = Path(config_file)
         self.config_data: Dict[str, Any] = {}
         self.load_config()
@@ -88,6 +93,9 @@ class ConfigManager:
             
             config[keys[-1]] = value
             logger.debug(f"设置配置: {key} = {value}")
+            
+            # 发射配置变更信号
+            self.config_changed.emit(self.config_data)
         except Exception as e:
             logger.error(f"设置配置失败: {e}")
     
