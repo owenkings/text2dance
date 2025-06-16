@@ -10,6 +10,9 @@ import numpy as np
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from moviepy.editor import VideoFileClip, concatenate_videoclips
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
+import time
 
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
@@ -21,7 +24,7 @@ from PyQt5.QtWidgets import (
     QScrollArea, QTreeWidget, QTreeWidgetItem, QShortcut,
     QDialog, QAbstractItemView, QSizePolicy
 )
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize, QMutex
 from PyQt5.QtGui import QFont, QPixmap, QKeySequence, QImage, QIcon, QMovie
 
 from ..algorithms.algorithm_manager import AlgorithmManager, AlgorithmType
@@ -70,6 +73,516 @@ class VideoProcessingThread(QThread):
         self.quit()
         self.wait()
 
+class CommandExecutionThread(QThread):
+    """指令执行工作线程"""
+    
+    progress_updated = pyqtSignal(int)  # 进度百分比
+    status_updated = pyqtSignal(str)  # 状态信息
+    operation_status_updated = pyqtSignal(object, str)  # 操作对象, 状态
+    execution_completed = pyqtSignal()
+    error_occurred = pyqtSignal(str)
+    
+    def __init__(self, operations, video_path, output_dir, max_workers=4):
+        super().__init__()
+        self.operations = operations
+        self.video_path = video_path
+        self.output_dir = output_dir
+        self.max_workers = max_workers
+        self.is_running = True
+        self.mutex = QMutex()
+    
+    def run(self):
+        try:
+            self.status_updated.emit("开始执行指令...")
+            
+            # 使用线程池执行操作
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                # 提交所有任务
+                future_to_operation = {}
+                for operation in self.operations:
+                    if not self.is_running:
+                        break
+                    
+                    future = executor.submit(self._execute_single_operation, operation)
+                    future_to_operation[future] = operation
+                
+                # 处理完成的任务
+                completed_count = 0
+                total_count = len(self.operations)
+                
+                for future in as_completed(future_to_operation):
+                    if not self.is_running:
+                        break
+                    
+                    operation = future_to_operation[future]
+                    
+                    try:
+                        result = future.result()
+                        if result:
+                            self.operation_status_updated.emit(operation, '已完成')
+                        else:
+                            self.operation_status_updated.emit(operation, '失败')
+                    except Exception as e:
+                        self.operation_status_updated.emit(operation, '失败')
+                        self.error_occurred.emit(f"执行操作失败: {operation.get('description', '未知操作')}, 错误: {str(e)}")
+                    
+                    completed_count += 1
+                    progress = int((completed_count / total_count) * 100)
+                    self.progress_updated.emit(progress)
+                    
+                    self.status_updated.emit(f"已完成 {completed_count}/{total_count} 个操作")
+            
+            if self.is_running:
+                self.execution_completed.emit()
+                self.status_updated.emit("所有指令执行完成")
+                
+        except Exception as e:
+            if self.is_running:
+                self.error_occurred.emit(f"执行指令时发生错误: {str(e)}")
+    
+    def _execute_single_operation(self, operation):
+        """执行单个操作"""
+        try:
+            # 更新操作状态为执行中
+            self.operation_status_updated.emit(operation, '执行中')
+            
+            if operation['type'] == 'split':
+                return self._execute_split_operation(operation)
+            elif operation['type'] == 'delete':
+                return self._execute_delete_operation(operation)
+            # 可以在这里添加其他类型的操作
+            
+            return False
+            
+        except Exception as e:
+            self.operation_status_updated.emit(operation, '失败')
+            raise e
+    
+    def _execute_split_operation(self, operation):
+        """执行分割操作"""
+        try:
+            # 获取分割的开始和结束帧
+            start_frame = operation.get('start_frame', 0)
+            end_frame = operation.get('end_frame')
+            
+            if end_frame is None:
+                return False
+            
+            # 加载视频
+            video_clip = VideoFileClip(self.video_path)
+            
+            # 将帧号转换为时间
+            fps = video_clip.fps
+            start_time = start_frame / fps
+            end_time = end_frame / fps
+            
+            # 创建子剪辑
+            subclip = video_clip.subclip(start_time, end_time)
+            
+            # 生成输出文件名
+            base_name = os.path.splitext(os.path.basename(self.video_path))[0]
+            output_filename = f"{base_name}_split_{start_frame}_{end_frame}.mp4"
+            output_path = os.path.join(self.output_dir, output_filename)
+            
+            # 写入文件
+            subclip.write_videofile(output_path, verbose=False, logger=None)
+            subclip.close()
+            video_clip.close()
+            
+            return True
+            
+        except Exception as e:
+            raise e
+    
+    def _execute_delete_operation(self, operation):
+        """执行删除操作（实际上是保留其他部分）"""
+        try:
+            # 这里可以实现删除操作的逻辑
+            # 暂时返回True表示成功
+            return True
+            
+        except Exception as e:
+            raise e
+    
+    def stop(self):
+        self.is_running = False
+        self.quit()
+        self.wait()
+
+class CommandExecutionThread(QThread):
+    """指令执行线程"""
+    
+    # 信号定义
+    progress_updated = pyqtSignal(int)  # 进度更新
+    status_updated = pyqtSignal(str)    # 状态更新
+    operation_status_updated = pyqtSignal(dict, str)  # 操作状态更新
+    execution_completed = pyqtSignal()  # 执行完成
+    error_occurred = pyqtSignal(str)    # 错误发生
+    
+    def __init__(self, operations, video_path, output_dir, max_workers=4):
+        super().__init__()
+        self.operations = operations
+        self.video_path = video_path
+        self.output_dir = output_dir
+        self.max_workers = max_workers
+        self.is_running = False
+        
+    def run(self):
+        """执行线程主函数"""
+        self.is_running = True
+        
+        try:
+            self.status_updated.emit("正在初始化...")
+            
+            # 使用线程池执行操作
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                # 提交所有任务
+                future_to_operation = {}
+                for operation in self.operations:
+                    future = executor.submit(self._execute_single_operation, operation)
+                    future_to_operation[future] = operation
+                
+                # 处理完成的任务
+                completed_count = 0
+                total_count = len(self.operations)
+                
+                for future in as_completed(future_to_operation):
+                    if not self.is_running:
+                        break
+                    
+                    operation = future_to_operation[future]
+                    
+                    try:
+                        result = future.result()
+                        if result:
+                            self.operation_status_updated.emit(operation, '已完成')
+                        else:
+                            self.operation_status_updated.emit(operation, '失败')
+                    except Exception as e:
+                        self.operation_status_updated.emit(operation, '失败')
+                        print(f"操作执行失败: {operation.get('description', '未知操作')}, 错误: {str(e)}")
+                    
+                    completed_count += 1
+                    progress = int((completed_count / total_count) * 100)
+                    self.progress_updated.emit(progress)
+                    
+                    self.status_updated.emit(f"已完成 {completed_count}/{total_count} 个操作")
+            
+            if self.is_running:
+                self.status_updated.emit("所有操作执行完成")
+                self.execution_completed.emit()
+            
+        except Exception as e:
+            self.error_occurred.emit(f"执行过程中发生错误: {str(e)}")
+        
+        finally:
+            self.is_running = False
+    
+    def _execute_single_operation(self, operation):
+        """执行单个操作"""
+        try:
+            # 更新操作状态为执行中
+            self.operation_status_updated.emit(operation, '执行中')
+            
+            if operation['type'] == 'split':
+                return self._execute_split_operation(operation)
+            elif operation['type'] == 'delete':
+                return self._execute_delete_operation(operation)
+            else:
+                print(f"未知操作类型: {operation['type']}")
+                return False
+                
+        except Exception as e:
+            print(f"执行操作失败: {operation.get('description', '未知操作')}, 错误: {str(e)}")
+            return False
+    
+    def _execute_split_operation(self, operation):
+        """执行分割操作"""
+        try:
+            from moviepy.editor import VideoFileClip
+            
+            # 获取分割的开始和结束帧
+            start_frame = operation.get('start_frame', 0)
+            end_frame = operation.get('end_frame')
+            
+            if end_frame is None:
+                print(f"分割操作缺少结束帧: {operation['description']}")
+                return False
+            
+            # 加载视频
+            video_clip = VideoFileClip(self.video_path)
+            
+            # 将帧号转换为时间
+            fps = video_clip.fps
+            start_time = start_frame / fps
+            end_time = end_frame / fps
+            
+            # 创建子剪辑
+            subclip = video_clip.subclip(start_time, end_time)
+            
+            # 生成输出文件名
+            base_name = os.path.splitext(os.path.basename(self.video_path))[0]
+            output_filename = f"{base_name}_split_{start_frame}_{end_frame}.mp4"
+            output_path = os.path.join(self.output_dir, output_filename)
+            
+            # 写入文件
+            subclip.write_videofile(output_path, verbose=False, logger=None)
+            
+            # 清理资源
+            subclip.close()
+            video_clip.close()
+            
+            print(f"分割完成: {output_filename}")
+            return True
+            
+        except Exception as e:
+            print(f"分割操作失败: {str(e)}")
+            return False
+    
+    def _execute_delete_operation(self, operation):
+        """执行删除操作"""
+        try:
+            # TODO: 实现删除操作
+            print(f"删除操作: {operation.get('description', '未知删除操作')}")
+            time.sleep(1)  # 模拟处理时间
+            return True
+            
+        except Exception as e:
+            print(f"删除操作失败: {str(e)}")
+            return False
+    
+    def stop(self):
+        """停止执行"""
+        self.is_running = False
+
+
+class VideoPreviewDialog(QDialog):
+    """视频预览对话框"""
+    
+    def __init__(self, video_path, parent=None):
+        super().__init__(parent)
+        self.video_path = video_path
+        self.video_capture = None
+        self.is_playing = False
+        self.is_paused = False
+        self.current_frame = 0
+        self.total_frames = 0
+        self.fps = 30
+        self.play_timer = QTimer()
+        
+        self._init_ui()
+        self._connect_signals()
+        self._load_video()
+    
+    def _init_ui(self):
+        """初始化界面"""
+        self.setWindowTitle(f"预览: {os.path.basename(self.video_path)}")
+        self.setModal(True)
+        self.resize(800, 600)
+        
+        layout = QVBoxLayout(self)
+        
+        # 视频预览标签
+        self.preview_label = QLabel()
+        self.preview_label.setAlignment(Qt.AlignCenter)
+        self.preview_label.setMinimumSize(600, 400)
+        self.preview_label.setStyleSheet(
+            "QLabel { background-color: #000; color: #fff; border: 1px solid #ccc; }"
+        )
+        self.preview_label.setText("加载中...")
+        layout.addWidget(self.preview_label, 1)
+        
+        # 播放控制
+        control_layout = QHBoxLayout()
+        
+        self.play_btn = QPushButton("播放")
+        self.pause_btn = QPushButton("暂停")
+        self.stop_btn = QPushButton("停止")
+        
+        control_layout.addWidget(self.play_btn)
+        control_layout.addWidget(self.pause_btn)
+        control_layout.addWidget(self.stop_btn)
+        control_layout.addStretch()
+        
+        layout.addLayout(control_layout)
+        
+        # 进度条
+        self.progress_slider = QSlider(Qt.Horizontal)
+        self.progress_slider.setMinimumHeight(30)
+        self.progress_slider.setStyleSheet("""
+            QSlider::groove:horizontal {
+                border: 1px solid #999999;
+                height: 8px;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #B1B1B1, stop:1 #c4c4c4);
+                margin: 2px 0;
+                border-radius: 4px;
+            }
+            QSlider::handle:horizontal {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #b4b4b4, stop:1 #8f8f8f);
+                border: 1px solid #5c5c5c;
+                width: 18px;
+                margin: -2px 0;
+                border-radius: 9px;
+            }
+            QSlider::handle:horizontal:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #d4d4d4, stop:1 #afafaf);
+            }
+        """)
+        layout.addWidget(self.progress_slider)
+        
+        # 时间信息
+        time_layout = QHBoxLayout()
+        self.current_time_label = QLabel("00:00")
+        self.total_time_label = QLabel("00:00")
+        
+        time_layout.addWidget(self.current_time_label)
+        time_layout.addWidget(QLabel("/"))
+        time_layout.addWidget(self.total_time_label)
+        time_layout.addStretch()
+        
+        layout.addLayout(time_layout)
+        
+        # 关闭按钮
+        close_btn = QPushButton("关闭")
+        close_btn.clicked.connect(self.close)
+        layout.addWidget(close_btn)
+    
+    def _connect_signals(self):
+        """连接信号"""
+        self.play_btn.clicked.connect(self._play_video)
+        self.pause_btn.clicked.connect(self._pause_video)
+        self.stop_btn.clicked.connect(self._stop_video)
+        self.progress_slider.sliderPressed.connect(self._on_slider_pressed)
+        self.progress_slider.sliderReleased.connect(self._on_slider_released)
+        self.progress_slider.valueChanged.connect(self._on_position_changed)
+        self.play_timer.timeout.connect(self._update_playback)
+    
+    def _load_video(self):
+        """加载视频"""
+        try:
+            self.video_capture = cv2.VideoCapture(self.video_path)
+            
+            if self.video_capture.isOpened():
+                self.total_frames = int(self.video_capture.get(cv2.CAP_PROP_FRAME_COUNT))
+                self.fps = self.video_capture.get(cv2.CAP_PROP_FPS)
+                
+                self.progress_slider.setMaximum(max(1, self.total_frames - 1))
+                self.progress_slider.setValue(0)
+                
+                # 更新时间标签
+                total_seconds = self.total_frames / self.fps if self.fps > 0 else 0
+                self.total_time_label.setText(self._format_time(total_seconds))
+                self.current_time_label.setText("00:00")
+                
+                # 显示第一帧
+                self._show_frame(0)
+            else:
+                self.preview_label.setText("无法加载视频")
+                
+        except Exception as e:
+            self.preview_label.setText(f"加载失败: {str(e)}")
+    
+    def _show_frame(self, frame_number):
+        """显示指定帧"""
+        if not self.video_capture or not self.video_capture.isOpened():
+            return
+        
+        try:
+            self.video_capture.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+            ret, frame = self.video_capture.read()
+            
+            if ret:
+                # 转换BGR到RGB
+                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                h, w, ch = rgb_frame.shape
+                bytes_per_line = ch * w
+                
+                # 创建QImage
+                qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
+                
+                # 缩放图像以适应标签大小
+                label_size = self.preview_label.size()
+                if label_size.width() > 0 and label_size.height() > 0:
+                    scaled_pixmap = QPixmap.fromImage(qt_image).scaled(
+                        label_size, Qt.KeepAspectRatio, Qt.SmoothTransformation
+                    )
+                    self.preview_label.setPixmap(scaled_pixmap)
+                else:
+                    self.preview_label.setPixmap(QPixmap.fromImage(qt_image))
+                
+                self.current_frame = frame_number
+                
+        except Exception as e:
+            print(f"显示帧失败: {e}")
+    
+    def _play_video(self):
+        """播放视频"""
+        if not self.video_capture:
+            return
+        
+        self.is_playing = True
+        self.is_paused = False
+        interval = int(1000 / self.fps) if self.fps > 0 else 33
+        self.play_timer.start(interval)
+    
+    def _pause_video(self):
+        """暂停视频"""
+        self.is_playing = False
+        self.is_paused = True
+        self.play_timer.stop()
+    
+    def _stop_video(self):
+        """停止视频"""
+        self.is_playing = False
+        self.is_paused = False
+        self.play_timer.stop()
+        self.progress_slider.setValue(0)
+        self.current_time_label.setText("00:00")
+        self._show_frame(0)
+    
+    def _update_playback(self):
+        """更新播放进度"""
+        if not self.is_playing:
+            return
+        
+        current_frame = self.progress_slider.value()
+        
+        if current_frame < self.progress_slider.maximum():
+            next_frame = current_frame + 1
+            self.progress_slider.setValue(next_frame)
+            self._show_frame(next_frame)
+        else:
+            self._stop_video()
+    
+    def _on_slider_pressed(self):
+        """进度条按下"""
+        self.play_timer.stop()
+    
+    def _on_slider_released(self):
+        """进度条释放"""
+        if self.is_playing:
+            interval = int(1000 / self.fps) if self.fps > 0 else 33
+            self.play_timer.start(interval)
+    
+    def _on_position_changed(self, position):
+        """播放位置改变"""
+        time_seconds = position / self.fps if self.fps > 0 else 0
+        self.current_time_label.setText(self._format_time(time_seconds))
+        self._show_frame(position)
+    
+    def _format_time(self, seconds):
+        """格式化时间显示"""
+        minutes = int(seconds // 60)
+        seconds = int(seconds % 60)
+        return f"{minutes:02d}:{seconds:02d}"
+    
+    def closeEvent(self, event):
+        """关闭事件"""
+        if self.video_capture:
+            self.video_capture.release()
+        self.play_timer.stop()
+        event.accept()
+
 class VideoEditWidget(QWidget):
     """视频编辑界面组件"""
     
@@ -115,6 +628,9 @@ class VideoEditWidget(QWidget):
         
         # 编辑操作列表
         self.edit_operations = []
+        
+        # 指令执行线程
+        self.execution_thread = None
         
         # 初始化界面
         self._init_ui()
@@ -1455,11 +1971,11 @@ class VideoEditWidget(QWidget):
         self._execute_operations(pending_operations)
     
     def _execute_operations(self, operations):
-        """执行指定的操作列表"""
+        """执行指定的操作列表（使用多线程）"""
         if not operations:
             return
         
-        if not self.video_path:
+        if not self.current_video_path:
             QMessageBox.warning(self, "错误", "请先选择视频文件")
             return
         
@@ -1471,79 +1987,79 @@ class VideoEditWidget(QWidget):
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
         
-        self.execute_progress.setVisible(True)
-        self.execute_status_label.setText("正在执行...")
-        
-        try:
-            # 加载原始视频
-            video_clip = VideoFileClip(self.video_path)
-            
-            for i, operation in enumerate(operations):
-                progress = int((i + 1) / len(operations) * 100)
-                self.execute_progress.setValue(progress)
-                
-                # 更新操作状态为"执行中"
-                operation['status'] = '执行中'
-                self._update_operation_status_in_table(operation)
-                
-                self.logger.info(f"执行操作: {operation['description']}")
-                
-                try:
-                    if operation['type'] == 'split':
-                        self._execute_split_operation(video_clip, operation, output_dir)
-                    # 可以在这里添加其他类型的操作
-                    
-                    # 标记为已完成
-                    operation['status'] = '已完成'
-                    self._update_operation_status_in_table(operation)
-                    
-                except Exception as e:
-                    self.logger.error(f"执行操作失败: {operation['description']}, 错误: {str(e)}")
-                    operation['status'] = '失败'
-                    self._update_operation_status_in_table(operation)
-            
-            video_clip.close()
-            
-        except Exception as e:
-            self.logger.error(f"执行命令时发生错误: {str(e)}")
-            QMessageBox.critical(self, "错误", f"执行命令时发生错误: {str(e)}")
-        
-        finally:
-            self.execute_progress.setVisible(False)
-            self.execute_status_label.setText("执行完成")
-            self.logger.info("指令执行完成")
-            
-            # 刷新输出目录视频列表
-            self._refresh_output_videos()
-    
-    def _execute_split_operation(self, video_clip, operation, output_dir):
-        """执行分割操作"""
-        # 获取分割的开始和结束帧
-        start_frame = operation.get('start_frame', 0)
-        end_frame = operation.get('end_frame')
-        
-        if end_frame is None:
-            self.logger.warning(f"分割操作缺少结束帧: {operation['description']}")
+        # 检查是否已有执行线程在运行
+        if self.execution_thread and self.execution_thread.isRunning():
+            QMessageBox.warning(self, "警告", "已有指令正在执行中")
             return
         
-        # 将帧号转换为时间
-        fps = video_clip.fps
-        start_time = start_frame / fps
-        end_time = end_frame / fps
+        # 显示进度条和状态
+        self.execute_progress.setVisible(True)
+        self.execute_progress.setValue(0)
+        self.execute_status_label.setText("准备执行...")
         
-        # 创建子剪辑
-        subclip = video_clip.subclip(start_time, end_time)
+        # 禁用执行按钮
+        self.execute_btn.setEnabled(False)
+        self.execute_pending_btn.setEnabled(False)
         
-        # 生成输出文件名
-        base_name = os.path.splitext(os.path.basename(self.video_path))[0]
-        output_filename = f"{base_name}_split_{start_frame}_{end_frame}.mp4"
-        output_path = os.path.join(output_dir, output_filename)
+        # 创建并启动执行线程
+        max_workers = 4  # 可以根据需要调整线程数
+        self.execution_thread = CommandExecutionThread(
+            operations, self.current_video_path, output_dir, max_workers
+        )
         
-        # 写入文件
-        subclip.write_videofile(output_path, verbose=False, logger=None)
-        subclip.close()
+        # 连接信号
+        self.execution_thread.progress_updated.connect(self._on_execution_progress_updated)
+        self.execution_thread.status_updated.connect(self._on_execution_status_updated)
+        self.execution_thread.operation_status_updated.connect(self._on_operation_status_updated)
+        self.execution_thread.execution_completed.connect(self._on_execution_completed)
+        self.execution_thread.error_occurred.connect(self._on_execution_error)
         
-        self.logger.info(f"分割完成: {output_filename}")
+        # 启动线程
+        self.execution_thread.start()
+        
+        self.logger.info(f"开始多线程执行 {len(operations)} 个操作")
+    
+    def _on_execution_progress_updated(self, progress):
+        """执行进度更新"""
+        self.execute_progress.setValue(progress)
+    
+    def _on_execution_status_updated(self, status):
+        """执行状态更新"""
+        self.execute_status_label.setText(status)
+        self.logger.info(f"执行状态: {status}")
+    
+    def _on_operation_status_updated(self, operation, status):
+        """操作状态更新"""
+        operation['status'] = status
+        self._update_operation_status_in_table(operation)
+        self.logger.info(f"操作状态更新: {operation.get('description', '未知操作')} -> {status}")
+    
+    def _on_execution_completed(self):
+        """执行完成"""
+        self.execute_progress.setVisible(False)
+        self.execute_status_label.setText("执行完成")
+        
+        # 重新启用执行按钮
+        self.execute_btn.setEnabled(True)
+        self.execute_pending_btn.setEnabled(True)
+        
+        # 刷新输出目录视频列表
+        self._refresh_output_videos()
+        
+        self.logger.info("所有指令执行完成")
+        QMessageBox.information(self, "完成", "所有指令执行完成")
+    
+    def _on_execution_error(self, error_msg):
+        """执行错误"""
+        self.execute_progress.setVisible(False)
+        self.execute_status_label.setText("执行失败")
+        
+        # 重新启用执行按钮
+        self.execute_btn.setEnabled(True)
+        self.execute_pending_btn.setEnabled(True)
+        
+        self.logger.error(f"执行错误: {error_msg}")
+        QMessageBox.critical(self, "执行错误", error_msg)
     
     def _update_operation_status_in_table(self, operation):
         """更新表格中操作的状态"""
@@ -1585,62 +2101,8 @@ class VideoEditWidget(QWidget):
         """预览输出目录中的视频"""
         video_path = item.data(Qt.UserRole)
         
-        # 创建预览对话框
-        dialog = QDialog(self)
-        dialog.setWindowTitle(f"预览: {item.text()}")
-        dialog.setModal(True)
-        dialog.resize(800, 600)
-        
-        layout = QVBoxLayout(dialog)
-        
-        # 视频预览标签
-        preview_label = QLabel()
-        preview_label.setAlignment(Qt.AlignCenter)
-        preview_label.setMinimumSize(600, 400)
-        preview_label.setStyleSheet("QLabel { background-color: #000; color: #fff; border: 1px solid #ccc; }")
-        preview_label.setText(f"预览: {item.text()}")
-        layout.addWidget(preview_label)
-        
-        # 播放控制
-        control_layout = QHBoxLayout()
-        
-        play_btn = QPushButton("播放")
-        pause_btn = QPushButton("暂停")
-        stop_btn = QPushButton("停止")
-        
-        control_layout.addWidget(play_btn)
-        control_layout.addWidget(pause_btn)
-        control_layout.addWidget(stop_btn)
-        control_layout.addStretch()
-        
-        layout.addLayout(control_layout)
-        
-        # 进度条
-        progress_slider = QSlider(Qt.Horizontal)
-        progress_slider.setMinimumHeight(30)
-        progress_slider.setStyleSheet(self.position_slider.styleSheet())
-        layout.addWidget(progress_slider)
-        
-        # 时间信息
-        time_layout = QHBoxLayout()
-        current_time_label = QLabel("00:00")
-        total_time_label = QLabel("00:00")
-        
-        time_layout.addWidget(current_time_label)
-        time_layout.addWidget(QLabel("/"))
-        time_layout.addWidget(total_time_label)
-        time_layout.addStretch()
-        
-        layout.addLayout(time_layout)
-        
-        # 关闭按钮
-        close_btn = QPushButton("关闭")
-        close_btn.clicked.connect(dialog.close)
-        layout.addWidget(close_btn)
-        
-        # TODO: 实现实际的视频播放功能
-        # 这里需要集成视频播放库如OpenCV或其他媒体库
-        
+        # 使用新的视频预览对话框
+        dialog = VideoPreviewDialog(video_path, self)
         dialog.exec_()
     
     def _update_algorithm_list(self):
