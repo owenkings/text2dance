@@ -19,7 +19,7 @@ from PyQt5.QtGui import QIcon, QPixmap, QFont
 
 from ..core.config_manager import ConfigManager
 from .crawler_widget import CrawlerWidget
-from .video_widget import VideoWidget
+from .video_widget import VideoEditWidget
 from .config_widget import ConfigWidget
 from .log_viewer import LogViewer
 
@@ -72,8 +72,8 @@ class MainWindow(QMainWindow):
         # 更新子组件的配置管理器
         if hasattr(self, 'crawler_widget') and self.crawler_widget:
             self.crawler_widget.config_manager = config_manager
-        if hasattr(self, 'video_widget') and self.video_widget:
-            self.video_widget.config_manager = config_manager
+        if hasattr(self, 'video_edit_widget') and self.video_edit_widget:
+            self.video_edit_widget.config_manager = config_manager
         if hasattr(self, 'config_widget') and self.config_widget:
             self.config_widget.config_manager = config_manager
         if hasattr(self, 'log_widget') and self.log_widget:
@@ -85,8 +85,8 @@ class MainWindow(QMainWindow):
         # 更新子组件的插件管理器
         if hasattr(self, 'crawler_widget') and self.crawler_widget:
             self.crawler_widget.plugin_manager = plugin_manager
-        if hasattr(self, 'video_widget') and self.video_widget:
-            self.video_widget.plugin_manager = plugin_manager
+        if hasattr(self, 'video_edit_widget') and self.video_edit_widget:
+            self.video_edit_widget.plugin_manager = plugin_manager
     
     def _init_ui(self):
         """初始化用户界面"""
