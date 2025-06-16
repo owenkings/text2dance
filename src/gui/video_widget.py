@@ -5,8 +5,11 @@
 """
 
 import os
+import cv2
+import numpy as np
 from pathlib import Path
 from typing import Dict, Any, Optional, List
+from moviepy.editor import VideoFileClip, concatenate_videoclips
 
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
@@ -15,10 +18,11 @@ from PyQt5.QtWidgets import (
     QGroupBox, QTabWidget, QTableWidget, QTableWidgetItem,
     QHeaderView, QFileDialog, QMessageBox, QSplitter,
     QListWidget, QListWidgetItem, QFrame, QSlider,
-    QScrollArea, QTreeWidget, QTreeWidgetItem, QShortcut
+    QScrollArea, QTreeWidget, QTreeWidgetItem, QShortcut,
+    QDialog, QAbstractItemView, QSizePolicy
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize
-from PyQt5.QtGui import QFont, QPixmap, QIcon, QMovie, QKeySequence
+from PyQt5.QtGui import QFont, QPixmap, QKeySequence, QImage, QIcon, QMovie
 
 from ..algorithms.algorithm_manager import AlgorithmManager, AlgorithmType
 from ..video_processing.video_processor import VideoProcessor
@@ -80,6 +84,9 @@ class VideoEditWidget(QWidget):
         self.config_manager = config_manager
         self.logger = Logger().get_logger("VideoEditWidget")
         
+        # 算法管理器
+        self.algorithm_manager = AlgorithmManager(config_manager)
+        
         # 视频处理器
         self.video_processor = VideoProcessor(config_manager)
         
@@ -103,6 +110,12 @@ class VideoEditWidget(QWidget):
         self.play_timer = QTimer()
         self.play_timer.timeout.connect(self._update_playback)
         
+        # 处理结果存储
+        self.processing_results = []
+        
+        # 编辑操作列表
+        self.edit_operations = []
+        
         # 初始化界面
         self._init_ui()
         self._connect_signals()
@@ -112,26 +125,26 @@ class VideoEditWidget(QWidget):
     
     def _init_ui(self):
         """初始化界面"""
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(10)
+        main_layout = QHBoxLayout(self)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+        main_layout.setSpacing(10)
         
         # 左侧：视频列表面板
         left_panel = self._create_video_list_panel()
-        layout.addWidget(left_panel)
+        main_layout.addWidget(left_panel)
         
         # 中间：视频预览面板
         center_panel = self._create_video_preview_panel()
-        layout.addWidget(center_panel)
+        main_layout.addWidget(center_panel)
         
-        # 右侧：编辑操作面板
-        right_panel = self._create_edit_operations_panel()
-        layout.addWidget(right_panel)
+        # 右侧：指令列表面板
+        right_panel = self._create_command_list_panel()
+        main_layout.addWidget(right_panel)
         
         # 设置布局比例 (1:2:1)
-        layout.setStretchFactor(left_panel, 1)
-        layout.setStretchFactor(center_panel, 2)
-        layout.setStretchFactor(right_panel, 1)
+        main_layout.setStretchFactor(left_panel, 1)
+        main_layout.setStretchFactor(center_panel, 2)
+        main_layout.setStretchFactor(right_panel, 1)
     
     def _create_video_list_panel(self) -> QWidget:
         """创建视频列表面板"""
@@ -169,13 +182,21 @@ class VideoEditWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
         
-        # 预览区域
+        # 标题
+        title_label = QLabel("视频预览")
+        title_label.setStyleSheet("font-weight: bold; font-size: 14px;")
+        layout.addWidget(title_label)
+        
+        # 视频预览标签
         self.preview_label = QLabel()
         self.preview_label.setAlignment(Qt.AlignCenter)
-        self.preview_label.setMinimumSize(400, 300)
-        self.preview_label.setStyleSheet("QLabel { background-color: #000; color: #fff; border: 1px solid #ccc; }")
-        self.preview_label.setText("无视频预览")
-        layout.addWidget(self.preview_label)
+        self.preview_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.preview_label.setScaledContents(False)  # 手动控制缩放以保持宽高比
+        self.preview_label.setStyleSheet(
+            "QLabel { background-color: #000; color: #fff; border: 1px solid #ccc; }"
+        )
+        self.preview_label.setText("请选择视频文件")
+        layout.addWidget(self.preview_label, 1)  # 设置拉伸因子
         
         # 播放控制
         control_layout = QHBoxLayout()
@@ -191,77 +212,224 @@ class VideoEditWidget(QWidget):
         
         layout.addLayout(control_layout)
         
+        # 进度条和帧控制
+        progress_group = QGroupBox("播放进度")
+        progress_layout = QVBoxLayout(progress_group)
+        
         # 进度条
         self.position_slider = QSlider(Qt.Horizontal)
-        layout.addWidget(self.position_slider)
+        self.position_slider.setMinimum(0)
+        self.position_slider.setMaximum(100)
+        self.position_slider.setValue(0)
+        self.position_slider.setMinimumHeight(30)  # 增加高度
+        self.position_slider.setStyleSheet("""
+            QSlider::groove:horizontal {
+                border: 1px solid #999999;
+                height: 8px;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #B1B1B1, stop:1 #c4c4c4);
+                margin: 2px 0;
+                border-radius: 4px;
+            }
+            QSlider::handle:horizontal {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #b4b4b4, stop:1 #8f8f8f);
+                border: 1px solid #5c5c5c;
+                width: 18px;
+                margin: -2px 0;
+                border-radius: 9px;
+            }
+            QSlider::handle:horizontal:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #d4d4d4, stop:1 #afafaf);
+            }
+        """)
+        # 添加点击跳转功能
+        self.position_slider.mousePressEvent = self._slider_mouse_press_event
+        progress_layout.addWidget(self.position_slider)
         
-        # 时间信息
-        time_layout = QHBoxLayout()
+        # 时间和帧信息
+        info_layout = QHBoxLayout()
         self.current_time_label = QLabel("00:00")
         self.total_time_label = QLabel("00:00")
+        self.current_frame_label = QLabel("帧: 0")
+        self.total_frame_label = QLabel("总帧: 0")
         
-        time_layout.addWidget(self.current_time_label)
-        time_layout.addStretch()
-        time_layout.addWidget(self.total_time_label)
-        layout.addLayout(time_layout)
+        info_layout.addWidget(self.current_time_label)
+        info_layout.addWidget(QLabel("/"))
+        info_layout.addWidget(self.total_time_label)
+        info_layout.addStretch()
+        info_layout.addWidget(self.current_frame_label)
+        info_layout.addWidget(QLabel("/"))
+        info_layout.addWidget(self.total_frame_label)
+        progress_layout.addLayout(info_layout)
+        
+        # 帧跳转控制
+        frame_control_layout = QHBoxLayout()
+        
+        self.prev_frame_btn = QPushButton("上一帧")
+        self.next_frame_btn = QPushButton("下一帧")
+        
+        frame_control_layout.addWidget(QLabel("跳转到帧:"))
+        self.frame_input = QSpinBox()
+        self.frame_input.setMinimum(0)
+        self.frame_input.setMaximum(0)
+        frame_control_layout.addWidget(self.frame_input)
+        
+        self.goto_frame_btn = QPushButton("跳转")
+        frame_control_layout.addWidget(self.goto_frame_btn)
+        
+        frame_control_layout.addStretch()
+        
+        # 批量帧跳转控制
+        frame_control_layout.addWidget(QLabel("步长:"))
+        self.frame_step_input = QSpinBox()
+        self.frame_step_input.setMinimum(1)
+        self.frame_step_input.setMaximum(1000)
+        self.frame_step_input.setValue(30)  # 默认30帧
+        frame_control_layout.addWidget(self.frame_step_input)
+        
+        self.prev_x_frame_btn = QPushButton("上X帧")
+        self.next_x_frame_btn = QPushButton("下X帧")
+        frame_control_layout.addWidget(self.prev_x_frame_btn)
+        frame_control_layout.addWidget(self.next_x_frame_btn)
+        
+        frame_control_layout.addStretch()
+        frame_control_layout.addWidget(self.prev_frame_btn)
+        frame_control_layout.addWidget(self.next_frame_btn)
+        
+        progress_layout.addLayout(frame_control_layout)
+        layout.addWidget(progress_group)
+        
+        # 编辑操作
+        edit_group = QGroupBox("编辑操作")
+        edit_layout = QHBoxLayout(edit_group)
+        
+        self.split_btn = QPushButton("分割开始")
+        self.split_state = "start"  # 记录分割状态: start 或 end
+        self.delete_btn = QPushButton("删除当前片段")
+        
+        edit_layout.addWidget(self.split_btn)
+        edit_layout.addWidget(self.delete_btn)
+        edit_layout.addStretch()
+        
+        layout.addWidget(edit_group)
         
         return panel
     
-    def _create_edit_operations_panel(self) -> QWidget:
-        """创建编辑操作面板"""
+    def _create_command_list_panel(self) -> QWidget:
+        """创建指令列表面板"""
         panel = QWidget()
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
         
         # 标题
-        title_label = QLabel("编辑操作")
+        title_label = QLabel("编辑指令列表")
         title_label.setStyleSheet("font-weight: bold; font-size: 14px;")
         layout.addWidget(title_label)
         
-        # 基本编辑操作
-        basic_group = QGroupBox("基本操作")
-        basic_layout = QVBoxLayout(basic_group)
+        # 指令列表（表格形式）
+        self.command_table_widget = QTableWidget()
+        self.command_table_widget.setColumnCount(4)
+        self.command_table_widget.setHorizontalHeaderLabels(["操作", "开始位置", "结束位置", "执行状态"])
+        self.command_table_widget.setAlternatingRowColors(True)
+        self.command_table_widget.setSelectionBehavior(QAbstractItemView.SelectRows)
         
-        self.cut_btn = QPushButton("剪切")
-        self.copy_btn = QPushButton("复制")
-        self.paste_btn = QPushButton("粘贴")
-        self.delete_btn = QPushButton("删除")
+        # 设置列宽
+        header = self.command_table_widget.horizontalHeader()
+        header.setStretchLastSection(True)
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         
-        basic_layout.addWidget(self.cut_btn)
-        basic_layout.addWidget(self.copy_btn)
-        basic_layout.addWidget(self.paste_btn)
-        basic_layout.addWidget(self.delete_btn)
+        layout.addWidget(self.command_table_widget)
         
-        layout.addWidget(basic_group)
+        # 指令操作按钮
+        command_btn_layout = QHBoxLayout()
         
-        # 时间轴操作
-        timeline_group = QGroupBox("时间轴")
-        timeline_layout = QVBoxLayout(timeline_group)
+        self.clear_commands_btn = QPushButton("清空列表")
+        self.remove_command_btn = QPushButton("删除选中")
+        self.remove_command_btn.setEnabled(False)
         
-        self.split_btn = QPushButton("分割")
-        self.merge_btn = QPushButton("合并")
-        self.trim_btn = QPushButton("修剪")
+        command_btn_layout.addWidget(self.clear_commands_btn)
+        command_btn_layout.addWidget(self.remove_command_btn)
         
-        timeline_layout.addWidget(self.split_btn)
-        timeline_layout.addWidget(self.merge_btn)
-        timeline_layout.addWidget(self.trim_btn)
+        layout.addLayout(command_btn_layout)
         
-        layout.addWidget(timeline_group)
+        # 执行控制
+        execute_group = QGroupBox("执行控制")
+        execute_layout = QVBoxLayout(execute_group)
         
-        # 效果操作
-        effects_group = QGroupBox("效果")
-        effects_layout = QVBoxLayout(effects_group)
+        # 执行按钮
+        execute_btn_layout = QHBoxLayout()
         
-        self.fade_in_btn = QPushButton("淡入")
-        self.fade_out_btn = QPushButton("淡出")
-        self.speed_btn = QPushButton("变速")
+        self.execute_btn = QPushButton("执行所有指令")
+        self.execute_btn.setEnabled(False)
+        self.execute_btn.setStyleSheet("QPushButton { background-color: #4CAF50; color: white; font-weight: bold; }")
+        execute_btn_layout.addWidget(self.execute_btn)
         
-        effects_layout.addWidget(self.fade_in_btn)
-        effects_layout.addWidget(self.fade_out_btn)
-        effects_layout.addWidget(self.speed_btn)
+        self.execute_pending_btn = QPushButton("执行未执行命令")
+        self.execute_pending_btn.setEnabled(False)
+        self.execute_pending_btn.setStyleSheet("QPushButton { background-color: #FF9800; color: white; font-weight: bold; }")
+        execute_btn_layout.addWidget(self.execute_pending_btn)
         
-        layout.addWidget(effects_group)
+        execute_layout.addLayout(execute_btn_layout)
+        
+        # 执行进度
+        self.execute_progress = QProgressBar()
+        self.execute_progress.setVisible(False)
+        execute_layout.addWidget(self.execute_progress)
+        
+        # 当前执行状态
+        self.execute_status_label = QLabel("就绪")
+        self.execute_status_label.setAlignment(Qt.AlignCenter)
+        execute_layout.addWidget(self.execute_status_label)
+        
+        layout.addWidget(execute_group)
+        
+        # 输出设置
+        output_group = QGroupBox("输出设置")
+        output_layout = QVBoxLayout(output_group)
+        
+        # 输出目录
+        output_dir_layout = QHBoxLayout()
+        output_dir_layout.addWidget(QLabel("输出目录:"))
+        
+        self.output_dir_input = QLineEdit()
+        self.output_dir_input.setText("./output")
+        output_dir_layout.addWidget(self.output_dir_input)
+        
+        self.browse_output_btn = QPushButton("浏览")
+        output_dir_layout.addWidget(self.browse_output_btn)
+        
+        output_layout.addLayout(output_dir_layout)
+        
+        # 输出文件名
+        filename_layout = QHBoxLayout()
+        filename_layout.addWidget(QLabel("文件名:"))
+        
+        self.output_filename_input = QLineEdit()
+        self.output_filename_input.setPlaceholderText("自动生成")
+        filename_layout.addWidget(self.output_filename_input)
+        
+        output_layout.addLayout(filename_layout)
+        
+        layout.addWidget(output_group)
+        
+        # 输出目录视频列表
+        output_videos_group = QGroupBox("输出目录视频")
+        output_videos_layout = QVBoxLayout(output_videos_group)
+        
+        # 刷新按钮
+        refresh_output_btn = QPushButton("刷新列表")
+        output_videos_layout.addWidget(refresh_output_btn)
+        
+        # 输出视频列表
+        self.output_video_list = QListWidget()
+        self.output_video_list.setAlternatingRowColors(True)
+        output_videos_layout.addWidget(self.output_video_list)
+        
+        layout.addWidget(output_videos_group)
+        
+        # 连接刷新按钮
+        refresh_output_btn.clicked.connect(self._refresh_output_videos)
         
         layout.addStretch()
         
@@ -597,26 +765,40 @@ class VideoEditWidget(QWidget):
         self.position_slider.sliderReleased.connect(self._on_slider_released)
         self.position_slider.valueChanged.connect(self._on_position_changed)
         
+        # 帧控制信号
+        self.prev_frame_btn.clicked.connect(self._prev_frame)
+        self.next_frame_btn.clicked.connect(self._next_frame)
+        self.prev_x_frame_btn.clicked.connect(self._prev_x_frames)
+        self.next_x_frame_btn.clicked.connect(self._next_x_frames)
+        self.goto_frame_btn.clicked.connect(self._goto_frame)
+        
         # 编辑操作信号
-        self.cut_btn.clicked.connect(self._cut_video)
-        self.copy_btn.clicked.connect(self._copy_video)
-        self.paste_btn.clicked.connect(self._paste_video)
-        self.delete_btn.clicked.connect(self._delete_video)
         self.split_btn.clicked.connect(self._split_video)
-        self.merge_btn.clicked.connect(self._merge_video)
-        self.trim_btn.clicked.connect(self._trim_video)
-        self.fade_in_btn.clicked.connect(self._fade_in)
-        self.fade_out_btn.clicked.connect(self._fade_out)
-        self.speed_btn.clicked.connect(self._change_speed)
+        self.delete_btn.clicked.connect(self._delete_segment)
+        
+        # 指令列表信号
+        self.command_table_widget.itemSelectionChanged.connect(self._on_command_selection_changed)
+        self.clear_commands_btn.clicked.connect(self._clear_commands)
+        self.remove_command_btn.clicked.connect(self._remove_selected_command)
+        self.execute_btn.clicked.connect(self._execute_commands)
+        self.execute_pending_btn.clicked.connect(self._execute_pending_commands)
+        
+        # 输出视频列表信号
+        self.output_video_list.itemDoubleClicked.connect(self._preview_output_video)
+        
+        # 输出目录
+        self.browse_output_btn.clicked.connect(self._browse_output_dir)
         
         # 快捷键
         self._setup_shortcuts()
         
         # 视频路径变化
-        self.video_path_input.textChanged.connect(self._on_video_path_changed)
+        if hasattr(self, 'video_path_input'):
+            self.video_path_input.textChanged.connect(self._on_video_path_changed)
         
         # 多线程选项变化
-        self.multithread_check.toggled.connect(self._on_multithread_toggled)
+        if hasattr(self, 'multithread_check'):
+            self.multithread_check.toggled.connect(self._on_multithread_toggled)
     
     def _setup_shortcuts(self):
         """设置快捷键"""
@@ -625,40 +807,55 @@ class VideoEditWidget(QWidget):
         QShortcut(QKeySequence(Qt.Key_Space), self, self._toggle_play_pause)
         QShortcut(QKeySequence(Qt.Key_Left), self, self._seek_backward)
         QShortcut(QKeySequence(Qt.Key_Right), self, self._seek_forward)
-        QShortcut(QKeySequence(Qt.Key_Home), self, self._seek_to_start)
-        QShortcut(QKeySequence(Qt.Key_End), self, self._seek_to_end)
         
-        # 编辑快捷键
-        QShortcut(QKeySequence.Cut, self, self._cut_video)
-        QShortcut(QKeySequence.Copy, self, self._copy_video)
-        QShortcut(QKeySequence.Paste, self, self._paste_video)
-        QShortcut(QKeySequence.Delete, self, self._delete_video)
-    
+        # 帧控制快捷键
+        QShortcut(QKeySequence(Qt.Key_Comma), self, self._prev_frame)
+        QShortcut(QKeySequence(Qt.Key_Period), self, self._next_frame)
+        
     def _toggle_play_pause(self):
         """切换播放/暂停"""
         if self.is_playing:
             self._pause_video()
         else:
             self._play_video()
-    
+            
     def _seek_backward(self):
-        """向后跳转"""
+        """快退"""
         if self.current_video_info:
             current_pos = self.position_slider.value()
-            new_pos = max(0, current_pos - 30)  # 向后30帧
+            new_pos = max(0, current_pos - 30)  # 快退30帧
             self.position_slider.setValue(new_pos)
-    
+            
     def _seek_forward(self):
-        """向前跳转"""
+        """快进"""
         if self.current_video_info:
             current_pos = self.position_slider.value()
             max_pos = self.position_slider.maximum()
-            new_pos = min(max_pos, current_pos + 30)  # 向前30帧
+            new_pos = min(max_pos, current_pos + 30)  # 快进30帧
             self.position_slider.setValue(new_pos)
-    
+            
+    def _jump_to_frame(self):
+        """跳转到指定帧"""
+        if self.current_video_info:
+            frame_num = self.frame_input.value()
+            self.position_slider.setValue(frame_num)
+            self._on_position_changed(frame_num)
+             
     def _seek_to_start(self):
         """跳转到开始"""
-        self.position_slider.setValue(0)
+        if self.current_video_info:
+            self.position_slider.setValue(0)
+            
+    def _seek_to_end(self):
+        """跳转到结束"""
+        if self.current_video_info:
+            self.position_slider.setValue(self.position_slider.maximum())
+            
+    def _setup_edit_shortcuts(self):
+        """设置编辑快捷键"""
+        # 分割和删除快捷键
+        QShortcut(QKeySequence(Qt.Key_S), self, self._split_video)
+        QShortcut(QKeySequence(Qt.Key_Delete), self, self._delete_segment)
     
     def _seek_to_end(self):
         """跳转到结束"""
@@ -674,7 +871,12 @@ class VideoEditWidget(QWidget):
                     self._add_video_to_list(video_path)
             
             # 加载输出目录设置
-            self.output_dir = self.config_manager.get('video_edit.output_dir', './output')
+            output_dir = self.config_manager.get('video_edit.output_dir', './output')
+            if hasattr(self, 'output_dir_input'):
+                self.output_dir_input.setText(output_dir)
+            
+            # 更新算法列表
+            self._update_algorithm_list()
             
         except Exception as e:
             self.logger.error(f"加载设置失败: {e}")
@@ -749,42 +951,103 @@ class VideoEditWidget(QWidget):
             self.current_video_path = video_path
             self.current_video_info = self.video_processor.get_video_info(video_path)
             
-            if self.current_video_info:
+            # 初始化OpenCV视频捕获对象
+            if hasattr(self, 'video_capture'):
+                self.video_capture.release()
+            self.video_capture = cv2.VideoCapture(video_path)
+            
+            if self.current_video_info and self.video_capture.isOpened():
                 # 更新预览标签
                 filename = Path(video_path).name
-                self.preview_label.setText(f"预览: {filename}")
                 
                 # 设置进度条
                 duration = self.current_video_info.get('duration', 0)
                 fps = self.current_video_info.get('fps', 30)
-                total_frames = int(duration * fps)
+                total_frames = int(self.video_capture.get(cv2.CAP_PROP_FRAME_COUNT))
                 
-                self.position_slider.setMaximum(total_frames)
+                self.position_slider.setMaximum(max(1, total_frames - 1))
                 self.position_slider.setValue(0)
                 
                 # 更新时间标签
                 self.current_time_label.setText("00:00")
                 self.total_time_label.setText(self._format_time(duration))
                 
+                # 更新帧信息
+                self.current_frame_label.setText("帧: 0")
+                self.total_frame_label.setText(f"总帧: {total_frames}")
+                
+                # 设置帧输入范围
+                self.frame_input.setMaximum(max(0, total_frames - 1))
+                self.frame_input.setValue(0)
+                
                 # 重置播放状态
                 self.current_position = 0.0
                 self.is_playing = False
                 self.is_paused = False
                 
+                # 显示第一帧
+                self._show_frame(0)
+                    
                 self.logger.info(f"加载视频: {filename}")
-                
+                    
         except Exception as e:
             self.logger.error(f"加载视频失败: {e}")
             self._clear_preview()
+    
+    def _show_frame(self, frame_number):
+        """显示指定帧"""
+        if not hasattr(self, 'video_capture') or not self.video_capture.isOpened():
+            return
+            
+        try:
+            # 设置视频位置到指定帧
+            self.video_capture.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+            ret, frame = self.video_capture.read()
+            
+            if ret:
+                # 转换BGR到RGB
+                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                h, w, ch = rgb_frame.shape
+                bytes_per_line = ch * w
+                
+                # 创建QImage
+                qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
+                
+                # 获取预览标签的实际大小
+                label_size = self.preview_label.size()
+                if label_size.width() > 0 and label_size.height() > 0:
+                    # 缩放图像以适应标签大小，保持宽高比
+                    scaled_pixmap = QPixmap.fromImage(qt_image).scaled(
+                        label_size, Qt.KeepAspectRatio, Qt.SmoothTransformation
+                    )
+                    
+                    # 显示图像
+                    self.preview_label.setPixmap(scaled_pixmap)
+                else:
+                    # 如果标签尺寸无效，使用原始尺寸
+                    self.preview_label.setPixmap(QPixmap.fromImage(qt_image))
+                
+        except Exception as e:
+            self.logger.error(f"显示帧失败: {e}")
     
     def _clear_preview(self):
         """清空预览"""
         self.current_video_path = None
         self.current_video_info = None
+        
+        # 释放视频捕获对象
+        if hasattr(self, 'video_capture'):
+            self.video_capture.release()
+            
+        self.preview_label.clear()
         self.preview_label.setText("无视频预览")
         self.position_slider.setValue(0)
         self.current_time_label.setText("00:00")
         self.total_time_label.setText("00:00")
+        self.current_frame_label.setText("帧: 0")
+        self.total_frame_label.setText("总帧: 0")
+        self.frame_input.setMaximum(0)
+        self.frame_input.setValue(0)
         self.is_playing = False
         self.is_paused = False
         self.play_timer.stop()
@@ -821,12 +1084,13 @@ class VideoEditWidget(QWidget):
         if not self.is_playing or not self.current_video_info:
             return
         
-        fps = self.current_video_info.get('fps', 30)
         current_frame = self.position_slider.value()
         
-        # 模拟播放进度
+        # 播放进度
         if current_frame < self.position_slider.maximum():
-            self.position_slider.setValue(current_frame + 1)
+            next_frame = current_frame + 1
+            self.position_slider.setValue(next_frame)
+            self._show_frame(next_frame)
         else:
             self._stop_video()
     
@@ -845,63 +1109,539 @@ class VideoEditWidget(QWidget):
             fps = self.current_video_info.get('fps', 30)
             time_seconds = position / fps if fps > 0 else 0
             self.current_time_label.setText(self._format_time(time_seconds))
+            self.current_frame_label.setText(f"帧: {position}")
+            self.frame_input.setValue(position)
             self.current_position = time_seconds
+            
+            # 显示对应帧（拖拽时也更新预览）
+            self._show_frame(position)
     
     def _format_time(self, seconds):
         """格式化时间显示"""
         minutes = int(seconds // 60)
         seconds = int(seconds % 60)
         return f"{minutes:02d}:{seconds:02d}"
+        
+    def _slider_mouse_press_event(self, event):
+        """处理进度条鼠标点击事件，实现点击跳转"""
+        if event.button() == Qt.LeftButton:
+            # 获取滑块的几何信息
+            slider_rect = self.position_slider.rect()
+            slider_height = slider_rect.height()
+            
+            # 检查点击是否在滑块的有效区域内（垂直方向）
+            click_y = event.y()
+            if click_y < 0 or click_y > slider_height:
+                return  # 点击在滑块外部，不处理
+            
+            # 计算点击位置对应的值
+            slider_width = self.position_slider.width()
+            click_pos = event.x()
+            
+            # 确保点击位置在水平范围内
+            if click_pos < 0 or click_pos > slider_width:
+                return
+            
+            # 计算目标帧号
+            if hasattr(self, 'current_video_info') and self.current_video_info:
+                total_frames = self.current_video_info.get('frame_count', 0)
+                if total_frames > 0:
+                    target_frame = int((click_pos / slider_width) * total_frames)
+                    target_frame = max(0, min(target_frame, total_frames - 1))
+                    
+                    # 设置滑块值和跳转
+                    self.position_slider.setValue(target_frame)
+                    self.frame_input.setValue(target_frame)
+                    self._goto_frame()
+        
+        # 调用原始的鼠标按下事件
+        QSlider.mousePressEvent(self.position_slider, event)
     
-    def _cut_video(self):
-        """剪切视频"""
-        # TODO: 实现视频剪切功能
-        self.logger.info("执行视频剪切操作")
+    def _prev_frame(self):
+        """上一帧"""
+        if self.current_video_info:
+            current_frame = self.frame_input.value()
+            if current_frame > 0:
+                new_frame = current_frame - 1
+                self.frame_input.setValue(new_frame)
+                self.position_slider.setValue(new_frame)
+                self._show_frame(new_frame)
+                
+                # 更新时间显示
+                fps = self.current_video_info.get('fps', 30)
+                time_seconds = new_frame / fps if fps > 0 else 0
+                self.current_time_label.setText(self._format_time(time_seconds))
+                self.current_frame_label.setText(f"帧: {new_frame}")
+                self.current_position = time_seconds
     
-    def _copy_video(self):
-        """复制视频"""
-        # TODO: 实现视频复制功能
-        self.logger.info("执行视频复制操作")
+    def _next_frame(self):
+        """下一帧"""
+        if self.current_video_info:
+            current_frame = self.frame_input.value()
+            max_frame = self.frame_input.maximum()
+            if current_frame < max_frame:
+                new_frame = current_frame + 1
+                self.frame_input.setValue(new_frame)
+                self.position_slider.setValue(new_frame)
+                self._show_frame(new_frame)
+                
+                # 更新时间显示
+                fps = self.current_video_info.get('fps', 30)
+                time_seconds = new_frame / fps if fps > 0 else 0
+                self.current_time_label.setText(self._format_time(time_seconds))
+                self.current_frame_label.setText(f"帧: {new_frame}")
+                self.current_position = time_seconds
     
-    def _paste_video(self):
-        """粘贴视频"""
-        # TODO: 实现视频粘贴功能
-        self.logger.info("执行视频粘贴操作")
+    def _prev_x_frames(self):
+        """上X帧"""
+        if self.current_video_info:
+            current_frame = self.frame_input.value()
+            step = self.frame_step_input.value()
+            new_frame = max(0, current_frame - step)
+            
+            self.frame_input.setValue(new_frame)
+            self.position_slider.setValue(new_frame)
+            self._show_frame(new_frame)
+            
+            # 更新时间显示
+            fps = self.current_video_info.get('fps', 30)
+            time_seconds = new_frame / fps if fps > 0 else 0
+            self.current_time_label.setText(self._format_time(time_seconds))
+            self.current_frame_label.setText(f"帧: {new_frame}")
+            self.current_position = time_seconds
     
-    def _delete_video(self):
-        """删除视频片段"""
-        # TODO: 实现视频删除功能
-        self.logger.info("执行视频删除操作")
+    def _next_x_frames(self):
+        """下X帧"""
+        if self.current_video_info:
+            current_frame = self.frame_input.value()
+            step = self.frame_step_input.value()
+            max_frame = self.frame_input.maximum()
+            new_frame = min(max_frame, current_frame + step)
+            
+            self.frame_input.setValue(new_frame)
+            self.position_slider.setValue(new_frame)
+            self._show_frame(new_frame)
+            
+            # 更新时间显示
+            fps = self.current_video_info.get('fps', 30)
+            time_seconds = new_frame / fps if fps > 0 else 0
+            self.current_time_label.setText(self._format_time(time_seconds))
+            self.current_frame_label.setText(f"帧: {new_frame}")
+            self.current_position = time_seconds
+    
+    def _goto_frame(self):
+        """跳转到指定帧"""
+        if self.current_video_info:
+            frame_num = self.frame_input.value()
+            self.position_slider.setValue(frame_num)
+            
+            fps = self.current_video_info.get('fps', 30)
+            time_seconds = frame_num / fps if fps > 0 else 0
+            self.current_time_label.setText(self._format_time(time_seconds))
+            self.current_frame_label.setText(f"帧: {frame_num}")
+            self.current_position = time_seconds
+            
+            # 显示指定帧
+            self._show_frame(frame_num)
+            self.logger.info(f"跳转到第{frame_num}帧")
     
     def _split_video(self):
         """分割视频"""
-        # TODO: 实现视频分割功能
-        self.logger.info("执行视频分割操作")
+        if not self.current_video_path:
+            return
+        
+        current_frame = self.frame_input.value()
+        
+        if self.split_state == "start":
+            # 开始分割操作
+            operation = {
+                'type': 'split',
+                'start_frame': current_frame,
+                'description': f'分割开始: 帧{current_frame}'
+            }
+            
+            self.edit_operations.append(operation)
+            self._add_command_to_table(operation)
+            self.logger.info(f"开始分割操作: {operation['description']}")
+            
+            # 切换到结束状态
+            self.split_state = "end"
+            self.split_btn.setText("分割结束")
+            
+        else:  # split_state == "end"
+            # 优先更新选中的条目
+            current_row = self.command_table_widget.currentRow()
+            target_operation = None
+            
+            if current_row >= 0:
+                # 获取选中的操作
+                item = self.command_table_widget.item(current_row, 0)
+                if item:
+                    selected_op = item.data(Qt.UserRole)
+                    if selected_op and selected_op['type'] == 'split' and 'end_frame' not in selected_op:
+                        target_operation = selected_op
+            
+            # 如果没有选中合适的条目，查找最后一个未完成的分割操作
+            if not target_operation:
+                for op in reversed(self.edit_operations):
+                    if op['type'] == 'split' and 'end_frame' not in op:
+                        target_operation = op
+                        break
+            
+            # 完成分割操作
+            if target_operation:
+                target_operation['end_frame'] = current_frame
+                target_operation['description'] = f'分割片段 帧{target_operation["start_frame"]} - 帧{current_frame}'
+                self._update_command_in_table(target_operation)
+                self.logger.info(f"完成分割操作: {target_operation['description']}")
+            
+            # 切换回开始状态
+            self.split_state = "start"
+            self.split_btn.setText("分割开始")
     
-    def _merge_video(self):
-        """合并视频"""
-        # TODO: 实现视频合并功能
-        self.logger.info("执行视频合并操作")
+    def _delete_segment(self):
+        """删除当前片段"""
+        if not self.current_video_path:
+            return
+        
+        current_time = self.current_position
+        
+        # 检查是否已有未完成的删除操作
+        for op in self.edit_operations:
+            if op['type'] == 'delete' and 'end_time' not in op:
+                # 完成之前的删除操作
+                op['end_time'] = current_time
+                op['description'] = f'删除片段 {self._format_time(op["start_time"])} - {self._format_time(current_time)}'
+                self._update_command_in_table(op)
+                self.logger.info(f"完成删除操作: {op['description']}")
+                return
+        
+        # 开始新的删除操作
+        operation = {
+            'type': 'delete',
+            'start_time': current_time,
+            'description': f'删除开始: {self._format_time(current_time)}'
+        }
+        
+        self.edit_operations.append(operation)
+        self._add_command_to_table(operation)
+        self.logger.info(f"开始删除操作: {operation['description']}")
     
-    def _trim_video(self):
-        """修剪视频"""
-        # TODO: 实现视频修剪功能
-        self.logger.info("执行视频修剪操作")
+    def _add_command_to_table(self, operation):
+        """添加指令到表格"""
+        row = self.command_table_widget.rowCount()
+        self.command_table_widget.insertRow(row)
+        
+        # 操作类型
+        operation_item = QTableWidgetItem(operation['description'])
+        operation_item.setData(Qt.UserRole, operation)
+        self.command_table_widget.setItem(row, 0, operation_item)
+        
+        # 开始帧号/时间
+        if 'start_frame' in operation:
+            start_item = QTableWidgetItem(f"帧{operation['start_frame']}")
+        else:
+            start_time = operation.get('start_time', operation.get('time', 0))
+            start_item = QTableWidgetItem(self._format_time(start_time))
+        self.command_table_widget.setItem(row, 1, start_item)
+        
+        # 结束帧号/时间
+        if 'end_frame' in operation:
+            end_item = QTableWidgetItem(f"帧{operation['end_frame']}")
+        elif 'end_time' in operation:
+            end_item = QTableWidgetItem(self._format_time(operation['end_time']))
+        else:
+            end_item = QTableWidgetItem('待定')
+        self.command_table_widget.setItem(row, 2, end_item)
+        
+        # 执行状态
+        status_item = QTableWidgetItem(operation.get('status', '未执行'))
+        self.command_table_widget.setItem(row, 3, status_item)
+        
+        # 启用执行按钮
+        self.execute_btn.setEnabled(True)
+        self.execute_pending_btn.setEnabled(True)
+        
+    def _update_command_in_table(self, operation):
+        """更新表格中的指令"""
+        # 先尝试通过对象引用匹配
+        for row in range(self.command_table_widget.rowCount()):
+            item = self.command_table_widget.item(row, 0)
+            if item and item.data(Qt.UserRole) is operation:
+                self._update_table_row(row, operation)
+                return
+        
+        # 如果对象引用匹配失败，通过操作内容匹配
+        for row in range(self.command_table_widget.rowCount()):
+            item = self.command_table_widget.item(row, 0)
+            if item:
+                stored_op = item.data(Qt.UserRole)
+                if (stored_op and stored_op['type'] == operation['type'] and 
+                    stored_op.get('start_frame') == operation.get('start_frame') and
+                    stored_op.get('start_time') == operation.get('start_time')):
+                    # 更新存储的操作对象
+                    item.setData(Qt.UserRole, operation)
+                    self._update_table_row(row, operation)
+                    return
     
-    def _fade_in(self):
-        """淡入效果"""
-        # TODO: 实现淡入效果
-        self.logger.info("添加淡入效果")
+    def _update_table_row(self, row, operation):
+        """更新表格行"""
+        # 更新操作描述
+        desc_item = self.command_table_widget.item(row, 0)
+        if desc_item:
+            desc_item.setText(operation['description'])
+        
+        # 更新结束帧号/时间
+        end_item = self.command_table_widget.item(row, 2)
+        if end_item:
+            if 'end_frame' in operation:
+                end_item.setText(f"帧{operation['end_frame']}")
+            elif 'end_time' in operation:
+                end_item.setText(self._format_time(operation['end_time']))
+            else:
+                end_item.setText('待定')
+        
+        # 更新执行状态
+        status_item = self.command_table_widget.item(row, 3)
+        if status_item:
+            status_item.setText(operation.get('status', '未执行'))
     
-    def _fade_out(self):
-        """淡出效果"""
-        # TODO: 实现淡出效果
-        self.logger.info("添加淡出效果")
+    def _on_command_selection_changed(self):
+        """指令选择变化"""
+        current_row = self.command_table_widget.currentRow()
+        self.remove_command_btn.setEnabled(current_row >= 0)
+     
+    def _clear_commands(self):
+        """清空指令列表"""
+        self.command_table_widget.setRowCount(0)
+        self.edit_operations.clear()
+        self.execute_btn.setEnabled(False)
+        self.execute_pending_btn.setEnabled(False)
+        self.remove_command_btn.setEnabled(False)
+        self.logger.info("清空指令列表")
+     
+    def _remove_selected_command(self):
+        """删除选中的指令"""
+        current_row = self.command_table_widget.currentRow()
+        if current_row >= 0:
+            item = self.command_table_widget.item(current_row, 0)
+            if item:
+                operation = item.data(Qt.UserRole)
+                if operation in self.edit_operations:
+                    self.edit_operations.remove(operation)
+            
+            self.command_table_widget.removeRow(current_row)
+            
+            # 检查是否还有指令
+            has_commands = self.command_table_widget.rowCount() > 0
+            self.execute_btn.setEnabled(has_commands)
+            self.execute_pending_btn.setEnabled(has_commands)
+            self.logger.info("删除选中的指令")
     
-    def _change_speed(self):
-        """变速效果"""
-        # TODO: 实现变速效果
-        self.logger.info("添加变速效果")
+    def _execute_commands(self):
+        """执行所有指令"""
+        if not self.edit_operations:
+            return
+        
+        self._execute_operations(self.edit_operations)
+    
+    def _execute_pending_commands(self):
+        """执行未执行的指令"""
+        pending_operations = [op for op in self.edit_operations if op.get('status', '未执行') == '未执行']
+        if not pending_operations:
+            QMessageBox.information(self, "提示", "没有未执行的命令")
+            return
+        
+        self._execute_operations(pending_operations)
+    
+    def _execute_operations(self, operations):
+        """执行指定的操作列表"""
+        if not operations:
+            return
+        
+        if not self.video_path:
+            QMessageBox.warning(self, "错误", "请先选择视频文件")
+            return
+        
+        output_dir = self.output_dir_input.text()
+        if not output_dir:
+            QMessageBox.warning(self, "错误", "请先设置输出目录")
+            return
+        
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+        
+        self.execute_progress.setVisible(True)
+        self.execute_status_label.setText("正在执行...")
+        
+        try:
+            # 加载原始视频
+            video_clip = VideoFileClip(self.video_path)
+            
+            for i, operation in enumerate(operations):
+                progress = int((i + 1) / len(operations) * 100)
+                self.execute_progress.setValue(progress)
+                
+                # 更新操作状态为"执行中"
+                operation['status'] = '执行中'
+                self._update_operation_status_in_table(operation)
+                
+                self.logger.info(f"执行操作: {operation['description']}")
+                
+                try:
+                    if operation['type'] == 'split':
+                        self._execute_split_operation(video_clip, operation, output_dir)
+                    # 可以在这里添加其他类型的操作
+                    
+                    # 标记为已完成
+                    operation['status'] = '已完成'
+                    self._update_operation_status_in_table(operation)
+                    
+                except Exception as e:
+                    self.logger.error(f"执行操作失败: {operation['description']}, 错误: {str(e)}")
+                    operation['status'] = '失败'
+                    self._update_operation_status_in_table(operation)
+            
+            video_clip.close()
+            
+        except Exception as e:
+            self.logger.error(f"执行命令时发生错误: {str(e)}")
+            QMessageBox.critical(self, "错误", f"执行命令时发生错误: {str(e)}")
+        
+        finally:
+            self.execute_progress.setVisible(False)
+            self.execute_status_label.setText("执行完成")
+            self.logger.info("指令执行完成")
+            
+            # 刷新输出目录视频列表
+            self._refresh_output_videos()
+    
+    def _execute_split_operation(self, video_clip, operation, output_dir):
+        """执行分割操作"""
+        # 获取分割的开始和结束帧
+        start_frame = operation.get('start_frame', 0)
+        end_frame = operation.get('end_frame')
+        
+        if end_frame is None:
+            self.logger.warning(f"分割操作缺少结束帧: {operation['description']}")
+            return
+        
+        # 将帧号转换为时间
+        fps = video_clip.fps
+        start_time = start_frame / fps
+        end_time = end_frame / fps
+        
+        # 创建子剪辑
+        subclip = video_clip.subclip(start_time, end_time)
+        
+        # 生成输出文件名
+        base_name = os.path.splitext(os.path.basename(self.video_path))[0]
+        output_filename = f"{base_name}_split_{start_frame}_{end_frame}.mp4"
+        output_path = os.path.join(output_dir, output_filename)
+        
+        # 写入文件
+        subclip.write_videofile(output_path, verbose=False, logger=None)
+        subclip.close()
+        
+        self.logger.info(f"分割完成: {output_filename}")
+    
+    def _update_operation_status_in_table(self, operation):
+        """更新表格中操作的状态"""
+        for row in range(self.command_table_widget.rowCount()):
+            item = self.command_table_widget.item(row, 0)
+            if item and item.data(Qt.UserRole) == operation:
+                status_item = self.command_table_widget.item(row, 3)
+                if status_item:
+                    status_item.setText(operation.get('status', '未执行'))
+                break
+         
+    def _refresh_output_videos(self):
+        """刷新输出目录视频列表"""
+        self.output_video_list.clear()
+        
+        output_dir = self.output_dir_input.text()
+        if not output_dir or not os.path.exists(output_dir):
+            return
+            
+        try:
+            # 支持的视频格式
+            video_extensions = ['.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm']
+            
+            for file_name in os.listdir(output_dir):
+                file_path = os.path.join(output_dir, file_name)
+                if os.path.isfile(file_path):
+                    _, ext = os.path.splitext(file_name)
+                    if ext.lower() in video_extensions:
+                        item = QListWidgetItem(file_name)
+                        item.setData(Qt.UserRole, file_path)
+                        self.output_video_list.addItem(item)
+                        
+            self.logger.info(f"刷新输出目录视频列表，找到 {self.output_video_list.count()} 个视频文件")
+            
+        except Exception as e:
+            self.logger.error(f"刷新输出目录视频列表失败: {e}")
+            
+    def _preview_output_video(self, item):
+        """预览输出目录中的视频"""
+        video_path = item.data(Qt.UserRole)
+        
+        # 创建预览对话框
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"预览: {item.text()}")
+        dialog.setModal(True)
+        dialog.resize(800, 600)
+        
+        layout = QVBoxLayout(dialog)
+        
+        # 视频预览标签
+        preview_label = QLabel()
+        preview_label.setAlignment(Qt.AlignCenter)
+        preview_label.setMinimumSize(600, 400)
+        preview_label.setStyleSheet("QLabel { background-color: #000; color: #fff; border: 1px solid #ccc; }")
+        preview_label.setText(f"预览: {item.text()}")
+        layout.addWidget(preview_label)
+        
+        # 播放控制
+        control_layout = QHBoxLayout()
+        
+        play_btn = QPushButton("播放")
+        pause_btn = QPushButton("暂停")
+        stop_btn = QPushButton("停止")
+        
+        control_layout.addWidget(play_btn)
+        control_layout.addWidget(pause_btn)
+        control_layout.addWidget(stop_btn)
+        control_layout.addStretch()
+        
+        layout.addLayout(control_layout)
+        
+        # 进度条
+        progress_slider = QSlider(Qt.Horizontal)
+        progress_slider.setMinimumHeight(30)
+        progress_slider.setStyleSheet(self.position_slider.styleSheet())
+        layout.addWidget(progress_slider)
+        
+        # 时间信息
+        time_layout = QHBoxLayout()
+        current_time_label = QLabel("00:00")
+        total_time_label = QLabel("00:00")
+        
+        time_layout.addWidget(current_time_label)
+        time_layout.addWidget(QLabel("/"))
+        time_layout.addWidget(total_time_label)
+        time_layout.addStretch()
+        
+        layout.addLayout(time_layout)
+        
+        # 关闭按钮
+        close_btn = QPushButton("关闭")
+        close_btn.clicked.connect(dialog.close)
+        layout.addWidget(close_btn)
+        
+        # TODO: 实现实际的视频播放功能
+        # 这里需要集成视频播放库如OpenCV或其他媒体库
+        
+        dialog.exec_()
     
     def _update_algorithm_list(self):
         """更新算法列表"""

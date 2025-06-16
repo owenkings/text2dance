@@ -33,14 +33,83 @@ from pathlib import Path
 project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
 
+# NumPy兼容性检查和修复
+# NumPy兼容性检查和修复
+import os
+import sys
+import subprocess
+
+# 设置OpenCV兼容性环境变量
+os.environ['OPENCV_DISABLE_EIGEN_TENSOR_SUPPORT'] = '1'
+os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '0'
+
+try:
+    import numpy
+    numpy_version = numpy.__version__
+    major_version = int(numpy_version.split('.')[0])
+    
+    if major_version >= 2:
+        print(f"检测到NumPy {numpy_version}，与当前OpenCV版本不兼容")
+        print("正在尝试自动修复...")
+        
+        # 尝试自动降级NumPy
+        try:
+            print("正在降级NumPy到兼容版本...")
+            subprocess.check_call([
+                sys.executable, "-m", "pip", "install", 
+                "numpy<2.0", "--force-reinstall", "--no-deps", "--quiet"
+            ])
+            print("NumPy降级完成，请重新启动程序")
+            input("按回车键退出...")
+            sys.exit(0)
+        except subprocess.CalledProcessError:
+            print("自动修复失败，请手动运行以下命令：")
+            print("pip install 'numpy<2.0' --force-reinstall")
+            print("或者运行修复脚本：python fix_numpy.py")
+            input("按回车键退出...")
+            sys.exit(1)
+            
+except ImportError:
+    print("NumPy未安装，正在安装兼容版本...")
+    try:
+        subprocess.check_call([
+            sys.executable, "-m", "pip", "install", 
+            "numpy<2.0", "--quiet"
+        ])
+        print("NumPy安装完成，请重新启动程序")
+        input("按回车键退出...")
+        sys.exit(0)
+    except subprocess.CalledProcessError:
+        print("NumPy安装失败，请手动安装：pip install 'numpy<2.0'")
+        input("按回车键退出...")
+        sys.exit(1)
+
 # 导入项目模块
 try:
     from src.gui import create_application
     from src.core.config_manager import ConfigManager
     # from src.core.cli import CLIApplication  # 待实现
 except ImportError as e:
-    print(f"导入模块失败: {e}")
+    error_msg = str(e)
+    print(f"导入模块失败: {error_msg}")
     print("请确保所有依赖已正确安装")
+    
+    if "moviepy" in error_msg:
+        print("MoviePy未安装，正在尝试安装...")
+        try:
+            subprocess.check_call([
+                sys.executable, "-m", "pip", "install", 
+                "moviepy==1.0.3"
+            ])
+            print("MoviePy安装完成，请重新启动程序")
+        except subprocess.CalledProcessError:
+            print("MoviePy安装失败，请手动安装：pip install moviepy==1.0.3")
+    elif "numpy" in error_msg:
+        print("如果是NumPy相关错误，请运行：pip install 'numpy<2.0' --force-reinstall")
+    else:
+        print("建议运行：pip install -r requirements.txt")
+    
+    input("按回车键退出...")
     sys.exit(1)
 
 # 应用程序信息

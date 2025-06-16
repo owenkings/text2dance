@@ -47,6 +47,54 @@
 - **内存**: 16GB RAM
 - **存储**: SSD 硬盘
 
+## 快速开始
+
+### 方法一：一键启动（推荐）
+
+**Windows用户**：
+- 双击 `启动程序.bat` 文件
+- 选择操作：启动程序、安装依赖或检查依赖状态
+- 程序会自动处理依赖问题
+
+**所有平台**：
+```bash
+# 智能启动（自动检查依赖）
+python start.py
+
+# 或专门安装依赖
+python install_dependencies.py
+```
+
+### 方法二：手动安装
+
+1. 安装所有依赖：
+```bash
+pip install -r requirements.txt
+```
+
+2. 如果遇到特定问题：
+```bash
+# NumPy兼容性问题
+python fix_numpy.py
+
+# MoviePy缺失问题
+pip install moviepy==1.0.3
+
+# 完整依赖修复
+python install_dependencies.py
+```
+
+3. 运行程序：
+```bash
+python main.py
+```
+
+### 常见问题解决
+
+- **`No module named 'moviepy.editor'`**：运行 `pip install moviepy==1.0.3`
+- **`_ARRAY_API not found`**：运行 `pip install "numpy<2.0" --force-reinstall`
+- **其他依赖问题**：运行 `python install_dependencies.py`
+
 ## 安装指南
 
 ### 1. 克隆项目

@@ -4,6 +4,7 @@ qtawesome==1.2.3
 
 # Video processing
 moviepy==1.0.3
+# OpenCV 4.10.0.84+ supports NumPy 2.0, but we use 4.8.1.78 for stability
 opencv-python==4.8.1.78
 Pillow==10.0.1
 
@@ -22,7 +23,7 @@ mmpose==1.2.0
 openpifpaf==0.13.11
 
 # 3D processing
-numpy==1.24.3
+numpy<2.0,>=1.21.0
 scipy==1.11.3
 matplotlib==3.7.2
 open3d==0.17.0
