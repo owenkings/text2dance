@@ -455,6 +455,7 @@ class VideoPreviewDialog(QDialog):
         self.progress_slider.sliderPressed.connect(self._on_slider_pressed)
         self.progress_slider.sliderReleased.connect(self._on_slider_released)
         self.progress_slider.valueChanged.connect(self._on_position_changed)
+        self.progress_slider.sliderMoved.connect(self._on_slider_moved)
         self.play_timer.timeout.connect(self._update_playback)
     
     def _load_video(self):
@@ -570,6 +571,12 @@ class VideoPreviewDialog(QDialog):
         self.current_time_label.setText(self._format_time(time_seconds))
         self._show_frame(position)
     
+    def _on_slider_moved(self, position):
+        """进度条拖拽时实时跳转"""
+        time_seconds = position / self.fps if self.fps > 0 else 0
+        self.current_time_label.setText(self._format_time(time_seconds))
+        self._show_frame(position)
+    
     def _format_time(self, seconds):
         """格式化时间显示"""
         minutes = int(seconds // 60)
@@ -615,6 +622,9 @@ class VideoEditWidget(QWidget):
         # 编辑操作列表
         self.edit_operations = []
         
+        # 视频指令映射字典 - 为每个视频路径保存对应的指令列表
+        self.video_operations_map = {}
+        
         # 播放状态
         self.is_playing = False
         self.is_paused = False
@@ -638,6 +648,35 @@ class VideoEditWidget(QWidget):
         self._load_settings()
         
         self.logger.info("视频编辑界面组件初始化完成")
+    
+    def _save_current_video_operations(self):
+        """保存当前视频的指令列表"""
+        if self.current_video_path and self.edit_operations:
+            self.video_operations_map[self.current_video_path] = self.edit_operations.copy()
+            self.logger.info(f"保存视频指令列表: {self.current_video_path}, 指令数量: {len(self.edit_operations)}")
+    
+    def _load_video_operations(self, video_path):
+        """加载指定视频的指令列表"""
+        if video_path in self.video_operations_map:
+            self.edit_operations = self.video_operations_map[video_path].copy()
+            self.logger.info(f"加载视频指令列表: {video_path}, 指令数量: {len(self.edit_operations)}")
+        else:
+            self.edit_operations = []
+            self.logger.info(f"新视频，清空指令列表: {video_path}")
+        
+        # 更新指令表格显示
+        self._refresh_command_table()
+    
+    def _refresh_command_table(self):
+        """刷新指令表格显示"""
+        try:
+            self.command_table.setRowCount(0)
+            
+            for operation in self.edit_operations:
+                self._add_command_to_table(operation)
+                
+        except Exception as e:
+            self.logger.error(f"刷新指令表格失败: {e}")
     
     def _init_ui(self):
         """初始化界面"""
@@ -1386,6 +1425,22 @@ class VideoEditWidget(QWidget):
                 if Path(video_path).exists():
                     self._add_video_to_list(video_path)
             
+            # 加载所有视频的指令列表
+            operations_data = self.config_manager.get('video_edit.video_operations', {})
+            for video_path, operations in operations_data.items():
+                if Path(video_path).exists():
+                    self.video_operations_map[video_path] = operations
+            
+            # 加载上次选中的视频
+            last_selected_video = self.config_manager.get('video_edit.last_selected_video', '')
+            if last_selected_video and Path(last_selected_video).exists():
+                # 在视频列表中选中该视频
+                for i in range(self.video_list_widget.count()):
+                    item = self.video_list_widget.item(i)
+                    if item and item.data(Qt.UserRole) == last_selected_video:
+                        self.video_list_widget.setCurrentItem(item)
+                        break
+            
             # 加载输出目录设置
             output_dir = self.config_manager.get('video_edit.output_dir', './output')
             if hasattr(self, 'output_dir_input'):
@@ -1396,6 +1451,40 @@ class VideoEditWidget(QWidget):
             
         except Exception as e:
             self.logger.error(f"加载设置失败: {e}")
+    
+    def _save_settings(self):
+        """保存设置"""
+        try:
+            # 保存当前视频列表
+            self.config_manager.set('video_edit.last_video_list', self.video_list)
+            
+            # 保存当前选中的视频
+            if self.current_video_path:
+                self.config_manager.set('video_edit.last_selected_video', self.current_video_path)
+            
+            # 保存所有视频的指令列表
+            operations_data = {}
+            for video_path, operations in self.video_operations_map.items():
+                operations_data[video_path] = [
+                    {
+                        'operation_type': op['operation_type'],
+                        'start_time': op['start_time'],
+                        'end_time': op['end_time'],
+                        'output_name': op['output_name']
+                    } for op in operations
+                ]
+            self.config_manager.set('video_edit.video_operations', operations_data)
+            
+            # 保存输出目录设置
+            if hasattr(self, 'output_dir_input'):
+                output_dir = self.output_dir_input.text()
+                self.config_manager.set('video_edit.output_dir', output_dir)
+            
+            self.config_manager.save()
+            self.logger.info("设置保存成功")
+            
+        except Exception as e:
+            self.logger.error(f"保存设置失败: {e}")
     
     def _add_video(self):
         """添加视频文件"""
@@ -1455,6 +1544,15 @@ class VideoEditWidget(QWidget):
         """视频选择变化"""
         current_item = self.video_list_widget.currentItem()
         self.remove_video_btn.setEnabled(current_item is not None)
+        
+        # 如果有当前视频，保存其指令列表
+        if self.current_video_path:
+            self._save_current_video_operations()
+        
+        # 如果选择了新视频，加载其指令列表
+        if current_item:
+            video_path = current_item.data(Qt.UserRole)
+            self._load_video_operations(video_path)
     
     def _load_video_preview(self, item):
         """加载视频预览"""
@@ -1464,6 +1562,10 @@ class VideoEditWidget(QWidget):
     def _load_video(self, video_path: str):
         """加载视频"""
         try:
+            # 保存当前视频的指令列表
+            if self.current_video_path:
+                self._save_current_video_operations()
+            
             self.current_video_path = video_path
             self.current_video_info = self.video_processor.get_video_info(video_path)
             
@@ -1500,6 +1602,9 @@ class VideoEditWidget(QWidget):
                 self.current_position = 0.0
                 self.is_playing = False
                 self.is_paused = False
+                
+                # 加载该视频的指令列表
+                self._load_video_operations(video_path)
                 
                 # 显示第一帧
                 self._show_frame(0)
@@ -2458,6 +2563,9 @@ class VideoEditWidget(QWidget):
     def cleanup(self):
         """清理资源"""
         try:
+            # 保存当前设置
+            self._save_settings()
+            
             if self.processing_thread and self.processing_thread.isRunning():
                 self.processing_thread.stop()
             
