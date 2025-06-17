@@ -670,7 +670,7 @@ class VideoEditWidget(QWidget):
     def _refresh_command_table(self):
         """刷新指令表格显示"""
         try:
-            self.command_table.setRowCount(0)
+            self.command_table_widget.setRowCount(0)
             
             for operation in self.edit_operations:
                 self._add_command_to_table(operation)
