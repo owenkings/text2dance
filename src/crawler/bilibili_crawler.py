@@ -383,14 +383,14 @@ class BilibiliCrawler(BaseCrawler):
                 result = subprocess.run(['yt-dlp', '--version'], 
                                       capture_output=True, check=True, text=True)
                 cmd_name = 'yt-dlp'
-                self.logger.info(f"使用yt-dlp版本: {result.stdout.strip()}")
+                self.logger.info(f"使用yt-dlp版本: {result.stdout.strip() if result.stdout else 'unknown'}")
             except (subprocess.CalledProcessError, FileNotFoundError):
                 # 如果yt-dlp不可用，尝试youtube-dl
                 try:
                     result = subprocess.run(['youtube-dl', '--version'], 
                                           capture_output=True, check=True, text=True)
                     cmd_name = 'youtube-dl'
-                    self.logger.info(f"使用youtube-dl版本: {result.stdout.strip()}")
+                    self.logger.info(f"使用youtube-dl版本: {result.stdout.strip() if result.stdout else 'unknown'}")
                 except (subprocess.CalledProcessError, FileNotFoundError):
                     self.logger.error("yt-dlp和youtube-dl都未安装或不可用")
                     return False

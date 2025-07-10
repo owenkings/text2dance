@@ -46,7 +46,7 @@ class AboutDialog(QDialog):
         # 应用程序信息
         self.app_info = {
             "name": "视频处理爬虫工具",
-            "version": "2.0.0",
+            "version": "2.1.0",
             "build": "20240101",
             "description": "一个集成视频爬取、处理和AI算法的综合工具",
             "author": "开发团队",

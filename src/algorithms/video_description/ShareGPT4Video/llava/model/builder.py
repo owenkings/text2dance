@@ -1,5 +1,13 @@
+# -*- coding: utf-8 -*-
 # 必须在所有导入之前设置环境变量
 import os
+import sys
+
+# 设置标准输出编码为UTF-8，避免Unicode字符显示问题
+if sys.platform.startswith('win'):
+    import codecs
+    sys.stdout = codecs.getwriter('utf-8')(sys.stdout.detach())
+    sys.stderr = codecs.getwriter('utf-8')(sys.stderr.detach())
 
 #第三种方法
 #os.environ["HF_HOME"] = r"E:\Tiany\huggingface"
@@ -31,11 +39,11 @@ def get_cache_path():
             with open(test_file, 'w') as f:
                 f.write('test')
             os.remove(test_file)
-            print(f"✅ 使用用户指定缓存路径: {USER_CACHE_PATH}")
+            print(f"[OK] 使用用户指定缓存路径: {USER_CACHE_PATH}")
             return USER_CACHE_PATH
         except (OSError, PermissionError) as e:
-            print(f"⚠️ 用户指定路径无法使用: {USER_CACHE_PATH}, 错误: {e}")
-            print("🔄 将使用配置文件或默认路径")
+            print(f"[WARNING] 用户指定路径无法使用: {USER_CACHE_PATH}, 错误: {e}")
+            print("[INFO] 将使用配置文件或默认路径")
 
     # 2. 定位配置文件 (需要7层dirname从builder.py到达项目根目录)
     # builder.py -> model -> llava -> ShareGPT4Video -> video_description -> algorithms -> src -> text2dance
@@ -64,13 +72,13 @@ def get_cache_path():
                                 with open(test_file, 'w') as f:
                                     f.write('test')
                                 os.remove(test_file)
-                                print(f"✅ 使用配置文件缓存路径: {path}")
+                                print(f"[OK] 使用配置文件缓存路径: {path}")
                                 return path
                             except (OSError, PermissionError) as e:
-                                print(f"⚠️ 配置文件中路径无法使用: {path}, 错误: {e}")
+                                print(f"[WARNING] 配置文件中路径无法使用: {path}, 错误: {e}")
                                 continue
         except Exception as e:
-            print(f"⚠️ 读取配置文件失败: {e}")
+            print(f"[WARNING] 读取配置文件失败: {e}")
 
     # 4. 配置文件不存在或无效时，创建完整配置文件
     default_config = """# 格式：每行一个配置项，使用 key=value 的形式
@@ -89,11 +97,11 @@ api_model=gpt-3.5-turbo
         os.makedirs(os.path.dirname(config_file), exist_ok=True)
         with open(config_file, 'w', encoding='utf-8') as f:
             f.write(default_config)
-        print(f"✅ 已创建默认配置文件: {config_file}")
-        print("💡 请修改配置文件中的路径和 API 配置！")
+        print(f"[OK] 已创建默认配置文件: {config_file}")
+        print("[INFO] 请修改配置文件中的路径和 API 配置！")
     except Exception as e:
-        print(f"❌ 创建配置文件失败: {e}")
-        print("❌ 程序无法继续运行，请检查文件权限")
+        print(f"[ERROR] 创建配置文件失败: {e}")
+        print("[ERROR] 程序无法继续运行，请检查文件权限")
         raise SystemExit(f"配置文件创建失败: {e}")
 
     # 5. 返回默认路径（确保路径存在和可写）
@@ -105,10 +113,10 @@ api_model=gpt-3.5-turbo
         with open(test_file, 'w') as f:
             f.write('test')
         os.remove(test_file)
-        print(f"✅ 使用默认缓存路径: {default_path}")
+        print(f"[OK] 使用默认缓存路径: {default_path}")
         return default_path
     except (OSError, PermissionError) as e:
-        print(f"❌ 默认路径也无法使用: {default_path}, 错误: {e}")
+        print(f"[ERROR] 默认路径也无法使用: {default_path}, 错误: {e}")
         raise SystemExit(f"无法创建可用的缓存目录: {e}")
 
 # ------------------- 主逻辑 -------------------
@@ -127,8 +135,8 @@ if __name__ == "__main__":
     os.makedirs(cache_base_path, exist_ok=True)
     os.makedirs(bnb_cache_path, exist_ok=True)
 
-    print(f"✅ 当前缓存目录: {cache_base_path}")
-    print(f"✅ bitsandbytes 缓存目录: {bnb_cache_path}")
+    print(f"[OK] 当前缓存目录: {cache_base_path}")
+    print(f"[OK] bitsandbytes 缓存目录: {bnb_cache_path}")
     print("环境变量已设置:")
     print(f"  HF_HOME={os.environ['HF_HOME']}")
     print(f"  BNB_CACHE_DIR={os.environ['BNB_CACHE_DIR']}")

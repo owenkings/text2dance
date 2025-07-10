@@ -105,23 +105,27 @@ class VideoDescriptionThread(QThread):
             
             if result.returncode == 0:
                 # 从输出中提取描述内容
-                output_lines = result.stdout.strip().split('\n')
-                description = ""
-                for line in output_lines:
-                    if "### LM OUTPUT TEXT:" in line:
-                        description = line.replace("### LM OUTPUT TEXT:", "").strip()
-                        break
-                
-                if not description:
-                    # 如果没有找到标准输出格式，使用最后一行非空输出
-                    for line in reversed(output_lines):
-                        if line.strip():
-                            description = line.strip()
+                if result.stdout:
+                    output_lines = result.stdout.strip().split('\n')
+                    description = ""
+                    for line in output_lines:
+                        if "### LM OUTPUT TEXT:" in line:
+                            description = line.replace("### LM OUTPUT TEXT:", "").strip()
                             break
-                
-                return True, description, ""
+                    
+                    if not description:
+                        # 如果没有找到标准输出格式，使用最后一行非空输出
+                        for line in reversed(output_lines):
+                            if line.strip():
+                                description = line.strip()
+                                break
+                    
+                    return True, description, ""
+                else:
+                    return False, "", "没有输出内容"
             else:
-                return False, "", result.stderr
+                error_msg = result.stderr if result.stderr else "未知错误"
+                return False, "", error_msg
                 
         except subprocess.TimeoutExpired:
             return False, "", "处理超时"
@@ -170,6 +174,11 @@ class VideoDescriptionWidget(QWidget):
         
         # 媒体播放器
         self.media_player = QMediaPlayer()
+        
+        # 播放控制状态
+        self.is_slider_pressed = False
+        self.is_muted = False
+        self.previous_volume = 50
         
         self._init_ui()
         self._load_cache_config()
@@ -285,18 +294,79 @@ class VideoDescriptionWidget(QWidget):
         # 播放控制
         controls_layout = QHBoxLayout()
         
-        self.play_btn = QPushButton("播放")
+        # 后退按钮
+        self.backward_btn = QPushButton("⏪")
+        self.backward_btn.setToolTip("后退10秒")
+        self.backward_btn.clicked.connect(self._backward_10s)
+        controls_layout.addWidget(self.backward_btn)
+        
+        # 播放/暂停按钮
+        self.play_btn = QPushButton("▶")
+        self.play_btn.setToolTip("播放/暂停")
         self.play_btn.clicked.connect(self._toggle_playback)
         controls_layout.addWidget(self.play_btn)
         
+        # 前进按钮
+        self.forward_btn = QPushButton("⏩")
+        self.forward_btn.setToolTip("前进10秒")
+        self.forward_btn.clicked.connect(self._forward_10s)
+        controls_layout.addWidget(self.forward_btn)
+        
+        # 进度条
         self.position_slider = QSlider(Qt.Horizontal)
+        self.position_slider.setToolTip("拖动调整播放位置")
         self.position_slider.sliderMoved.connect(self._set_position)
+        self.position_slider.sliderPressed.connect(self._slider_pressed)
+        self.position_slider.sliderReleased.connect(self._slider_released)
         controls_layout.addWidget(self.position_slider)
         
+        # 时间显示
         self.time_label = QLabel("00:00 / 00:00")
+        self.time_label.setMinimumWidth(100)
         controls_layout.addWidget(self.time_label)
         
         video_layout.addLayout(controls_layout)
+        
+        # 第二行控制：音量和播放速度
+        controls_layout2 = QHBoxLayout()
+        
+        # 音量控制
+        volume_label = QLabel("音量:")
+        controls_layout2.addWidget(volume_label)
+        
+        self.volume_slider = QSlider(Qt.Horizontal)
+        self.volume_slider.setRange(0, 100)
+        self.volume_slider.setValue(50)
+        self.volume_slider.setMaximumWidth(100)
+        self.volume_slider.setToolTip("调整音量")
+        self.volume_slider.valueChanged.connect(self._set_volume)
+        controls_layout2.addWidget(self.volume_slider)
+        
+        self.volume_label = QLabel("50%")
+        self.volume_label.setMinimumWidth(30)
+        controls_layout2.addWidget(self.volume_label)
+        
+        controls_layout2.addStretch()
+        
+        # 播放速度控制
+        speed_label = QLabel("速度:")
+        controls_layout2.addWidget(speed_label)
+        
+        self.speed_combo = QComboBox()
+        self.speed_combo.addItems(["0.5x", "0.75x", "1.0x", "1.25x", "1.5x", "2.0x"])
+        self.speed_combo.setCurrentText("1.0x")
+        self.speed_combo.setToolTip("调整播放速度")
+        self.speed_combo.currentTextChanged.connect(self._set_playback_rate)
+        controls_layout2.addWidget(self.speed_combo)
+        
+        # 静音按钮
+        self.mute_btn = QPushButton("🔊")
+        self.mute_btn.setToolTip("静音/取消静音")
+        self.mute_btn.clicked.connect(self._toggle_mute)
+        controls_layout2.addWidget(self.mute_btn)
+        
+        video_layout.addLayout(controls_layout)
+        video_layout.addLayout(controls_layout2)
         
         layout.addWidget(video_group)
         
@@ -380,6 +450,7 @@ class VideoDescriptionWidget(QWidget):
         self.media_player.stateChanged.connect(self._media_state_changed)
         self.media_player.positionChanged.connect(self._position_changed)
         self.media_player.durationChanged.connect(self._duration_changed)
+        self.media_player.error.connect(self._media_error)
     
     def _upload_video_files(self):
         """上传视频文件"""
@@ -443,7 +514,8 @@ class VideoDescriptionWidget(QWidget):
         """播放视频"""
         if os.path.exists(video_path):
             self.media_player.setMedia(QMediaContent(QUrl.fromLocalFile(video_path)))
-            self.play_btn.setText("播放")
+            self.media_player.play()
+            self.play_btn.setText("⏸")
     
     def _show_video_result(self, video_path):
         """显示视频结果"""
@@ -481,13 +553,15 @@ class VideoDescriptionWidget(QWidget):
     def _media_state_changed(self, state):
         """媒体状态改变"""
         if state == QMediaPlayer.PlayingState:
-            self.play_btn.setText("暂停")
+            self.play_btn.setText("⏸")
         else:
-            self.play_btn.setText("播放")
+            self.play_btn.setText("▶")
     
     def _position_changed(self, position):
         """播放位置改变"""
-        self.position_slider.setValue(position)
+        # 只有在用户没有拖动进度条时才更新
+        if not self.is_slider_pressed:
+            self.position_slider.setValue(position)
         
         # 更新时间显示
         duration = self.media_player.duration()
@@ -504,12 +578,93 @@ class VideoDescriptionWidget(QWidget):
         """设置播放位置"""
         self.media_player.setPosition(position)
     
+    def _media_error(self, error):
+        """媒体播放错误处理"""
+        error_messages = {
+            QMediaPlayer.NoError: "无错误",
+            QMediaPlayer.ResourceError: "媒体资源错误",
+            QMediaPlayer.FormatError: "格式错误",
+            QMediaPlayer.NetworkError: "网络错误",
+            QMediaPlayer.AccessDeniedError: "访问被拒绝",
+            QMediaPlayer.ServiceMissingError: "服务缺失错误"
+        }
+        
+        error_msg = error_messages.get(error, f"未知错误: {error}")
+        self._log_message(f"视频播放错误: {error_msg}")
+        
+        # 如果是格式错误，提示用户
+        if error == QMediaPlayer.FormatError:
+            QMessageBox.warning(self, "播放错误", 
+                               "视频格式不支持或文件损坏，请尝试其他视频文件。")
+    
     def _format_time(self, ms):
         """格式化时间"""
         seconds = ms // 1000
         minutes = seconds // 60
         seconds = seconds % 60
         return f"{minutes:02d}:{seconds:02d}"
+    
+    def _backward_10s(self):
+        """后退10秒"""
+        current_position = self.media_player.position()
+        new_position = max(0, current_position - 10000)  # 10秒 = 10000毫秒
+        self.media_player.setPosition(new_position)
+    
+    def _forward_10s(self):
+        """前进10秒"""
+        current_position = self.media_player.position()
+        duration = self.media_player.duration()
+        new_position = min(duration, current_position + 10000)  # 10秒 = 10000毫秒
+        self.media_player.setPosition(new_position)
+    
+    def _slider_pressed(self):
+        """进度条按下"""
+        self.is_slider_pressed = True
+    
+    def _slider_released(self):
+        """进度条释放"""
+        self.is_slider_pressed = False
+        # 设置新位置
+        self.media_player.setPosition(self.position_slider.value())
+    
+    def _set_volume(self, volume):
+        """设置音量"""
+        self.media_player.setVolume(volume)
+        self.volume_label.setText(f"{volume}%")
+        
+        # 更新静音按钮状态
+        if volume == 0:
+            self.mute_btn.setText("🔇")
+            self.is_muted = True
+        else:
+            self.mute_btn.setText("🔊")
+            self.is_muted = False
+    
+    def _toggle_mute(self):
+        """切换静音状态"""
+        if self.is_muted:
+            # 取消静音
+            self.volume_slider.setValue(self.previous_volume)
+            self.media_player.setVolume(self.previous_volume)
+            self.volume_label.setText(f"{self.previous_volume}%")
+            self.mute_btn.setText("🔊")
+            self.is_muted = False
+        else:
+            # 静音
+            self.previous_volume = self.volume_slider.value()
+            self.volume_slider.setValue(0)
+            self.media_player.setVolume(0)
+            self.volume_label.setText("0%")
+            self.mute_btn.setText("🔇")
+            self.is_muted = True
+    
+    def _set_playback_rate(self, rate_text):
+        """设置播放速度"""
+        try:
+            rate = float(rate_text.replace('x', ''))
+            self.media_player.setPlaybackRate(rate)
+        except ValueError:
+            pass  # 忽略无效的速度值
     
     def _start_description(self):
         """开始描述处理"""

@@ -156,24 +156,25 @@ class YoutubeCrawler(BaseCrawler):
                 return []
             
             results = []
-            for line in result.stdout.strip().split('\n'):
-                if line.strip():
-                    try:
-                        video_data = json.loads(line)
-                        video_info = {
-                            'title': video_data.get('title', ''),
-                            'description': video_data.get('description', ''),
-                            'url': video_data.get('webpage_url', f"https://www.youtube.com/watch?v={video_data.get('id', '')}"),
-                            'thumbnail': video_data.get('thumbnail', ''),
-                            'uploader': video_data.get('uploader', ''),
-                            'duration': video_data.get('duration', 0),
-                            'view_count': video_data.get('view_count', 0),
-                            'upload_date': video_data.get('upload_date', ''),
-                            'platform': self.platform_name
-                        }
-                        results.append(video_info)
-                    except json.JSONDecodeError:
-                        continue
+            if result.stdout:
+                for line in result.stdout.strip().split('\n'):
+                    if line.strip():
+                        try:
+                            video_data = json.loads(line)
+                            video_info = {
+                                'title': video_data.get('title', ''),
+                                'description': video_data.get('description', ''),
+                                'url': video_data.get('webpage_url', f"https://www.youtube.com/watch?v={video_data.get('id', '')}"),
+                                'thumbnail': video_data.get('thumbnail', ''),
+                                'uploader': video_data.get('uploader', ''),
+                                'duration': video_data.get('duration', 0),
+                                'view_count': video_data.get('view_count', 0),
+                                'upload_date': video_data.get('upload_date', ''),
+                                'platform': self.platform_name
+                            }
+                            results.append(video_info)
+                        except json.JSONDecodeError:
+                            continue
             
             logger.info(f"YouTube搜索 '{keyword}' 完成，找到 {len(results)} 个结果")
             return results
@@ -290,21 +291,22 @@ class YoutubeCrawler(BaseCrawler):
                 return []
             
             results = []
-            for line in result.stdout.strip().split('\n'):
-                if line.strip():
-                    try:
-                        video_data = json.loads(line)
-                        if video_data.get('_type') == 'video':
-                            video_info = {
-                                'title': video_data.get('title', ''),
-                                'url': video_data.get('webpage_url', f"https://www.youtube.com/watch?v={video_data.get('id', '')}"),
-                                'duration': video_data.get('duration', 0),
-                                'uploader': video_data.get('uploader', ''),
-                                'platform': self.platform_name
-                            }
-                            results.append(video_info)
-                    except json.JSONDecodeError:
-                        continue
+            if result.stdout:
+                for line in result.stdout.strip().split('\n'):
+                    if line.strip():
+                        try:
+                            video_data = json.loads(line)
+                            if video_data.get('_type') == 'video':
+                                video_info = {
+                                    'title': video_data.get('title', ''),
+                                    'url': video_data.get('webpage_url', f"https://www.youtube.com/watch?v={video_data.get('id', '')}"),
+                                    'duration': video_data.get('duration', 0),
+                                    'uploader': video_data.get('uploader', ''),
+                                    'platform': self.platform_name
+                                }
+                                results.append(video_info)
+                        except json.JSONDecodeError:
+                            continue
             
             logger.info(f"获取播放列表完成，共 {len(results)} 个视频")
             return results
@@ -336,22 +338,23 @@ class YoutubeCrawler(BaseCrawler):
                 return []
             
             results = []
-            for line in result.stdout.strip().split('\n'):
-                if line.strip():
-                    try:
-                        video_data = json.loads(line)
-                        if video_data.get('_type') == 'video':
-                            video_info = {
-                                'title': video_data.get('title', ''),
-                                'url': video_data.get('webpage_url', f"https://www.youtube.com/watch?v={video_data.get('id', '')}"),
-                                'duration': video_data.get('duration', 0),
-                                'uploader': video_data.get('uploader', ''),
-                                'upload_date': video_data.get('upload_date', ''),
-                                'platform': self.platform_name
-                            }
-                            results.append(video_info)
-                    except json.JSONDecodeError:
-                        continue
+            if result.stdout:
+                for line in result.stdout.strip().split('\n'):
+                    if line.strip():
+                        try:
+                            video_data = json.loads(line)
+                            if video_data.get('_type') == 'video':
+                                video_info = {
+                                    'title': video_data.get('title', ''),
+                                    'url': video_data.get('webpage_url', f"https://www.youtube.com/watch?v={video_data.get('id', '')}"),
+                                    'duration': video_data.get('duration', 0),
+                                    'uploader': video_data.get('uploader', ''),
+                                    'upload_date': video_data.get('upload_date', ''),
+                                    'platform': self.platform_name
+                                }
+                                results.append(video_info)
+                        except json.JSONDecodeError:
+                            continue
             
             logger.info(f"获取频道视频完成，共 {len(results)} 个视频")
             return results

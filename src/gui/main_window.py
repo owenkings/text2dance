@@ -761,7 +761,7 @@ class MainWindow(QMainWindow):
         try:
             about_text = """
             <h2>视频处理系统</h2>
-            <p>版本: 2.0.0</p>
+            <p>版本: 2.1.0</p>
             <p>一个集成了爬虫、视频处理和算法分析的综合性视频处理平台</p>
             <p>功能特性:</p>
             <ul>

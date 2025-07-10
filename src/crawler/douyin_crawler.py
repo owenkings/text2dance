@@ -303,21 +303,22 @@ class DouyinCrawler(BaseCrawler):
                 return []
             
             results = []
-            for line in result.stdout.strip().split('\n'):
-                if line.strip():
-                    try:
-                        video_data = json.loads(line)
-                        if video_data.get('_type') == 'video':
-                            video_info = {
-                                'title': video_data.get('title', ''),
-                                'url': video_data.get('webpage_url', ''),
-                                'duration': video_data.get('duration', 0),
-                                'uploader': video_data.get('uploader', ''),
-                                'platform': self.platform_name
-                            }
-                            results.append(video_info)
-                    except json.JSONDecodeError:
-                        continue
+            if result.stdout:
+                for line in result.stdout.strip().split('\n'):
+                    if line.strip():
+                        try:
+                            video_data = json.loads(line)
+                            if video_data.get('_type') == 'video':
+                                video_info = {
+                                    'title': video_data.get('title', ''),
+                                    'url': video_data.get('webpage_url', ''),
+                                    'duration': video_data.get('duration', 0),
+                                    'uploader': video_data.get('uploader', ''),
+                                    'platform': self.platform_name
+                                }
+                                results.append(video_info)
+                        except json.JSONDecodeError:
+                            continue
             
             logger.info(f"获取抖音用户视频完成，共 {len(results)} 个视频")
             return results

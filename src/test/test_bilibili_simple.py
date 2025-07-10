@@ -106,7 +106,7 @@ def test_youtube_dl_availability():
         result = subprocess.run(['yt-dlp', '--version'], 
                               capture_output=True, text=True, timeout=10)
         if result.returncode == 0:
-            print(f"✓ yt-dlp可用: {result.stdout.strip()}")
+            print(f"✓ yt-dlp可用: {result.stdout.strip() if result.stdout else 'unknown'}")
             return True
     except FileNotFoundError:
         print("✗ yt-dlp未安装")
@@ -118,7 +118,7 @@ def test_youtube_dl_availability():
         result = subprocess.run(['youtube-dl', '--version'], 
                               capture_output=True, text=True, timeout=10)
         if result.returncode == 0:
-            print(f"✓ youtube-dl可用: {result.stdout.strip()}")
+            print(f"✓ youtube-dl可用: {result.stdout.strip() if result.stdout else 'unknown'}")
             return True
         else:
             print(f"✗ youtube-dl不可用: {result.stderr}")
