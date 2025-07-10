@@ -436,8 +436,27 @@ class ConfigWidget(QWidget):
         
         # 默认算法
         self.default_video_desc_combo = QComboBox()
-        self.default_video_desc_combo.addItems(["DescribeAnything", "Vid2Seq"])
+        self.default_video_desc_combo.addItems(["ShareGPT4Video", "DescribeAnything", "Vid2Seq"])
         video_desc_layout.addRow("默认算法:", self.default_video_desc_combo)
+        
+        # 模型缓存路径
+        cache_path_layout = QHBoxLayout()
+        self.video_desc_cache_input = QLineEdit()
+        self.video_desc_cache_input.setText("./models/video_description")
+        self.video_desc_cache_input.textChanged.connect(self._on_cache_path_changed)
+        cache_path_layout.addWidget(self.video_desc_cache_input)
+        
+        self.browse_cache_btn = QPushButton("浏览")
+        self.browse_cache_btn.clicked.connect(lambda: self._browse_directory(self.video_desc_cache_input))
+        cache_path_layout.addWidget(self.browse_cache_btn)
+        
+        video_desc_layout.addRow("模型缓存路径:", cache_path_layout)
+        
+        # ShareGPT4Video模型路径
+        self.sharegpt4video_model_input = QLineEdit()
+        self.sharegpt4video_model_input.setText("Lin-Chen/sharegpt4video-8b")
+        self.sharegpt4video_model_input.textChanged.connect(self._on_cache_path_changed)
+        video_desc_layout.addRow("ShareGPT4Video模型:", self.sharegpt4video_model_input)
         
         # 描述语言
         self.desc_language_combo = QComboBox()
@@ -456,6 +475,31 @@ class ConfigWidget(QWidget):
         video_desc_layout.addRow("最大文本长度:", self.max_text_length_spin)
         
         layout.addWidget(video_desc_group)
+        
+        # API配置设置组（用于动作描述过滤）
+        api_group = QGroupBox("API配置（动作描述过滤）")
+        api_layout = QFormLayout(api_group)
+        
+        # API端点
+        self.api_endpoint_input = QLineEdit()
+        self.api_endpoint_input.setPlaceholderText("https://api.openai.com/v1/chat/completions")
+        self.api_endpoint_input.textChanged.connect(self._on_cache_path_changed)
+        api_layout.addRow("API端点:", self.api_endpoint_input)
+        
+        # API密钥
+        self.api_key_input = QLineEdit()
+        self.api_key_input.setEchoMode(QLineEdit.Password)
+        self.api_key_input.setPlaceholderText("输入API密钥")
+        self.api_key_input.textChanged.connect(self._on_cache_path_changed)
+        api_layout.addRow("API密钥:", self.api_key_input)
+        
+        # API模型
+        self.api_model_input = QLineEdit()
+        self.api_model_input.setText("gpt-3.5-turbo")
+        self.api_model_input.textChanged.connect(self._on_cache_path_changed)
+        api_layout.addRow("API模型:", self.api_model_input)
+        
+        layout.addWidget(api_group)
         
         layout.addStretch()
         
@@ -681,6 +725,7 @@ class ConfigWidget(QWidget):
         # 算法设置
         self.default_pose2d_combo.currentTextChanged.connect(lambda: self._mark_modified("algorithms"))
         self.default_pose3d_combo.currentTextChanged.connect(lambda: self._mark_modified("algorithms"))
+        self.default_video_desc_combo.currentTextChanged.connect(lambda: self._mark_modified("algorithms"))
         
         # 界面设置
         self.font_size_spin.valueChanged.connect(lambda: self._mark_modified("ui"))
@@ -791,10 +836,21 @@ class ConfigWidget(QWidget):
         self.pose3d_depth_spin.setValue(pose3d_config.get("depth_threshold", 1.0))
         
         video_desc_config = config.get("video_description", {})
-        self.default_video_desc_combo.setCurrentText(video_desc_config.get("default_algorithm", "DescribeAnything"))
+        self.default_video_desc_combo.setCurrentText(video_desc_config.get("default_algorithm", "ShareGPT4Video"))
+        
+        # 从cache_config.txt文件读取配置
+        cache_config = self._load_cache_config()
+        self.video_desc_cache_input.setText(cache_config.get("cache_path", video_desc_config.get("cache_path", "./models/video_description")))
+        self.sharegpt4video_model_input.setText(cache_config.get("sharegpt4video_model_path", video_desc_config.get("sharegpt4video_model_path", "Lin-Chen/sharegpt4video-8b")))
+        
         self.desc_language_combo.setCurrentText(video_desc_config.get("language", "中文"))
         self.desc_length_combo.setCurrentText(video_desc_config.get("length", "中等"))
         self.max_text_length_spin.setValue(video_desc_config.get("max_text_length", 200))
+        
+        api_config = config.get("api", {})
+        self.api_endpoint_input.setText(cache_config.get("api_endpoint", api_config.get("endpoint", "")))
+        self.api_key_input.setText(cache_config.get("api_key", api_config.get("key", "")))
+        self.api_model_input.setText(cache_config.get("api_model", api_config.get("model", "gpt-3.5-turbo")))
     
     def _load_ui_config(self, config: dict):
         """加载界面配置"""
@@ -828,6 +884,57 @@ class ConfigWidget(QWidget):
         
         # 加载插件列表
         self._refresh_plugins()
+    
+    def _on_cache_path_changed(self):
+        """缓存路径变更时同步到cache_config.txt文件"""
+        try:
+            import os
+            cache_config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'cache_config.txt')
+            
+            # 读取现有配置
+            config_data = {}
+            if os.path.exists(cache_config_path):
+                with open(cache_config_path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        if '=' in line:
+                            key, value = line.strip().split('=', 1)
+                            config_data[key] = value
+            
+            # 更新配置
+            config_data['cache_path'] = self.video_desc_cache_input.text()
+            config_data['sharegpt4video_model_path'] = self.sharegpt4video_model_input.text()
+            config_data['api_endpoint'] = self.api_endpoint_input.text()
+            config_data['api_key'] = self.api_key_input.text()
+            config_data['api_model'] = self.api_model_input.text()
+            
+            # 写入文件
+            with open(cache_config_path, 'w', encoding='utf-8') as f:
+                for key, value in config_data.items():
+                    f.write(f"{key}={value}\n")
+                    
+        except Exception as e:
+            print(f"更新cache_config.txt失败: {e}")
+        
+        self._mark_modified("algorithms")
+    
+    def _load_cache_config(self):
+        """从cache_config.txt文件加载配置"""
+        try:
+            import os
+            cache_config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'cache_config.txt')
+            
+            config_data = {}
+            if os.path.exists(cache_config_path):
+                with open(cache_config_path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        if '=' in line:
+                            key, value = line.strip().split('=', 1)
+                            config_data[key] = value
+            
+            return config_data
+        except Exception as e:
+            print(f"读取cache_config.txt失败: {e}")
+            return {}
     
     # 槽函数实现
     def _browse_directory(self, line_edit: QLineEdit):
@@ -1039,9 +1146,16 @@ class ConfigWidget(QWidget):
             },
             "video_description": {
                 "default_algorithm": self.default_video_desc_combo.currentText(),
+                "cache_path": self.video_desc_cache_input.text(),
+                "sharegpt4video_model_path": self.sharegpt4video_model_input.text(),
                 "language": self.desc_language_combo.currentText(),
                 "length": self.desc_length_combo.currentText(),
                 "max_text_length": self.max_text_length_spin.value()
+            },
+            "api": {
+                "endpoint": self.api_endpoint_input.text(),
+                "key": self.api_key_input.text(),
+                "model": self.api_model_input.text()
             }
         }
         

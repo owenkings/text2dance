@@ -20,7 +20,7 @@ torchvision==0.16.0
 onnxruntime==1.16.1
 mmcv==2.0.1
 mmpose==1.2.0
-openpifpaf==0.13.11
+openpifpaf>=0.13.11
 
 # 3D processing
 numpy<2.0,>=1.21.0
@@ -57,7 +57,6 @@ toml>=0.10.2
 
 # Network and proxy support
 urllib3>=1.26.0
-socks>=1.7.1
 pysocks>=1.7.1
 
 # Additional video processing

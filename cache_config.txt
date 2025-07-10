@@ -1,0 +1,6 @@
+# 格式：每行一个配置项，使用 key=value 的形式
+cache_path=E:\Tiany\huggingface
+sharegpt4video_model_path=Lin-Chen/sharegpt4video-8b
+api_endpoint=https://api.openai.com/v1/chat/completions
+api_key=
+api_model=Volcano LLM

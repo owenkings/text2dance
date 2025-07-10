@@ -118,6 +118,7 @@ class MainWindow(QMainWindow):
         # 添加选项卡
         self.tab_widget.addTab(self.crawler_widget, "🕷️ 爬虫")
         self.tab_widget.addTab(self.video_edit_widget, "🎬 视频编辑")
+        self.tab_widget.addTab(self.video_description_widget, "📝 视频描述")
         self.tab_widget.addTab(self.config_widget, "⚙️ 配置")
         
         # 任务管理器
@@ -144,6 +145,10 @@ class MainWindow(QMainWindow):
             # 视频编辑模块
             from .video_widget import VideoEditWidget
             self.video_edit_widget = VideoEditWidget(self.config_manager)
+            
+            # 视频描述模块
+            from .video_description_widget import VideoDescriptionWidget
+            self.video_description_widget = VideoDescriptionWidget(self.config_manager)
             
             # 配置模块
             self.config_widget = ConfigWidget(self.config_manager)
@@ -377,6 +382,10 @@ class MainWindow(QMainWindow):
             if self.video_processing_widget:
                 self.video_processing_widget.status_changed.connect(self._on_module_status_changed)
                 self.video_processing_widget.progress_changed.connect(self._on_module_progress_changed)
+            
+            if self.video_description_widget:
+                self.video_description_widget.status_changed.connect(self._on_module_status_changed)
+                self.video_description_widget.progress_changed.connect(self._on_module_progress_changed)
             
             if self.algorithm_widget:
                 self.algorithm_widget.status_changed.connect(self._on_module_status_changed)
@@ -752,7 +761,7 @@ class MainWindow(QMainWindow):
         try:
             about_text = """
             <h2>视频处理系统</h2>
-            <p>版本: 1.0.0</p>
+            <p>版本: 2.0.0</p>
             <p>一个集成了爬虫、视频处理和算法分析的综合性视频处理平台</p>
             <p>功能特性:</p>
             <ul>

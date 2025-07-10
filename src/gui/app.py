@@ -43,7 +43,7 @@ class Application(QApplication):
         
         # 基本属性
         self.app_name = "视频处理爬虫工具"
-        self.app_version = "1.0.0"
+        self.app_version = "2.0.0"
         self.app_author = "开发团队"
         self.app_organization = "VideoTools"
         
@@ -167,7 +167,7 @@ class Application(QApplication):
             painter.setPen(QColor(120, 120, 120))
             painter.setFont(QFont("Arial", 10))
             version_rect = QRect(0, 300, 500, 20)
-            painter.drawText(version_rect, Qt.AlignCenter, "Version 1.0.0")
+            painter.drawText(version_rect, Qt.AlignCenter, f"Version {self.app_version}")
             
             painter.end()
             
