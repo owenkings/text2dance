@@ -482,7 +482,7 @@ class ConfigWidget(QWidget):
         
         # API端点
         self.api_endpoint_input = QLineEdit()
-        self.api_endpoint_input.setPlaceholderText("https://api.openai.com/v1/chat/completions")
+        self.api_endpoint_input.setPlaceholderText("https://ark.cn-beijing.volces.com/api/v3/chat/completions")
         self.api_endpoint_input.textChanged.connect(self._on_cache_path_changed)
         api_layout.addRow("API端点:", self.api_endpoint_input)
         
@@ -495,7 +495,7 @@ class ConfigWidget(QWidget):
         
         # API模型
         self.api_model_input = QLineEdit()
-        self.api_model_input.setText("gpt-3.5-turbo")
+        self.api_model_input.setText("doubao-1-5-pro-32k-250115")
         self.api_model_input.textChanged.connect(self._on_cache_path_changed)
         api_layout.addRow("API模型:", self.api_model_input)
         

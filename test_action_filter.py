@@ -10,15 +10,43 @@ sys.path.append(os.path.dirname(__file__))
 
 from src.gui.video_description_widget import VideoDescriptionThread
 
+def load_api_config():
+    """从cache_config.txt加载API配置"""
+    cache_config_path = os.path.join(os.path.dirname(__file__), 'cache_config.txt')
+    
+    if not os.path.exists(cache_config_path):
+        print(f"❌ 配置文件不存在: {cache_config_path}")
+        return None
+    
+    try:
+        config_data = {}
+        with open(cache_config_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                if '=' in line and not line.strip().startswith('#'):
+                    key, value = line.strip().split('=', 1)
+                    config_data[key] = value
+        
+        api_config = {
+            'api_endpoint': config_data.get('api_endpoint', ''),
+            'api_key': config_data.get('api_key', ''),
+            'api_model': config_data.get('api_model', '')
+        }
+        
+        return api_config
+        
+    except Exception as e:
+        print(f"❌ 读取配置文件失败: {e}")
+        return None
+
 def test_action_filter():
     """测试动作描述过滤功能"""
     
-    # 模拟API配置
-    api_config = {
-        'api_endpoint': 'https://api.openai.com/v1/chat/completions',
-        'api_key': 'your-api-key-here',  # 需要替换为真实的API密钥
-        'api_model': 'gpt-3.5-turbo'
-    }
+    # 从cache_config.txt读取API配置
+    api_config = load_api_config()
+    
+    if not api_config:
+        print("❌ 无法加载API配置，请检查cache_config.txt文件")
+        return
     
     # 创建测试线程实例
     thread = VideoDescriptionThread(
@@ -55,10 +83,10 @@ def test_action_filter():
     else:
         print(f"✅ API端点: {api_config.get('api_endpoint')}")
     
-    if not api_config.get('api_key') or api_config.get('api_key') == 'your-api-key-here':
-        print("❌ API密钥未配置或为默认值")
+    if not api_config.get('api_key'):
+        print("❌ API密钥未配置")
     else:
-        print("✅ API密钥已配置")
+        print(f"✅ API密钥: {'*' * min(8, len(api_config.get('api_key')))}...")
     
     if not api_config.get('api_model'):
         print("❌ API模型未配置")
