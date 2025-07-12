@@ -25,7 +25,8 @@ from PyQt5.QtWidgets import (
     QHeaderView, QFileDialog, QMessageBox, QSplitter,
     QListWidget, QListWidgetItem, QFrame, QSlider,
     QScrollArea, QTreeWidget, QTreeWidgetItem, QShortcut,
-    QDialog, QAbstractItemView, QSizePolicy, QApplication
+    QDialog, QAbstractItemView, QSizePolicy, QApplication,
+    QButtonGroup, QRadioButton
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize, QMutex, QUrl
 from PyQt5.QtGui import QFont, QPixmap, QKeySequence, QImage, QIcon, QMovie
@@ -382,10 +383,59 @@ class VideoDescriptionThread(QThread):
     def _filter_action_description(self, description):
         """使用API过滤动作描述"""
         try:
-            # 这里可以集成API调用来过滤动作描述
-            # 暂时返回原描述
-            return description
+            if not self.api_config or not self.api_config.get('api_endpoint') or not self.api_config.get('api_key'):
+                self.log_updated.emit("API配置不完整，跳过动作描述过滤")
+                return description
+            
+            import requests
+            import json
+            
+            # 构建API请求
+            headers = {
+                'Content-Type': 'application/json',
+                'Authorization': f'Bearer {self.api_config.get("api_key")}'
+            }
+            
+            # 构建请求数据
+            prompt = f"帮我处理这段话，只保留动作描述，去除环境、人物衣着相关内容，并且不润色，保证原文：\n\n{description}"
+            
+            data = {
+                'model': self.api_config.get('api_model', 'gpt-3.5-turbo'),
+                'messages': [
+                    {
+                        'role': 'user',
+                        'content': prompt
+                    }
+                ],
+                'max_tokens': 1000,
+                'temperature': 0.1
+            }
+            
+            self.log_updated.emit("正在调用API进行动作描述过滤...")
+            
+            # 发送API请求
+            response = requests.post(
+                self.api_config.get('api_endpoint'),
+                headers=headers,
+                json=data,
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                if 'choices' in result and len(result['choices']) > 0:
+                    filtered_description = result['choices'][0]['message']['content'].strip()
+                    self.log_updated.emit("动作描述过滤完成")
+                    return filtered_description
+                else:
+                    self.log_updated.emit("API响应格式异常，使用原始描述")
+                    return description
+            else:
+                self.log_updated.emit(f"API调用失败 (状态码: {response.status_code})，使用原始描述")
+                return description
+                
         except Exception as e:
+            self.log_updated.emit(f"动作描述过滤失败: {str(e)}，使用原始描述")
             return description
     
     def _get_video_duration(self, video_path):
@@ -549,71 +599,20 @@ class VideoDescriptionWidget(QWidget):
         options_group = QGroupBox("功能选项")
         options_layout = QVBoxLayout(options_group)
         
-        # 生成模式选择
-        generation_layout = QHBoxLayout()
-        generation_layout.addWidget(QLabel("生成模式:"))
-        self.generation_mode_combo = QComboBox()
-        self.generation_mode_combo.addItems(["确定性生成", "随机采样生成", "混合策略"])
-        self.generation_mode_combo.setCurrentText("随机采样生成")  # 默认使用随机采样
-        self.generation_mode_combo.setToolTip(
-            "确定性生成: 每次运行结果完全一致，输出稳定\n"
-            "随机采样生成: 每次运行结果略有不同，输出更有创造性\n"
-            "混合策略: 结合确定性和随机性，平衡稳定性与创造性"
-        )
-        generation_layout.addWidget(self.generation_mode_combo)
-        generation_layout.addStretch()
-        options_layout.addLayout(generation_layout)
-        
-        # 高级参数设置
-        params_group = QGroupBox("高级参数")
-        params_layout = QVBoxLayout(params_group)
-        
-        # max_new_tokens设置
-        max_tokens_layout = QHBoxLayout()
-        max_tokens_layout.addWidget(QLabel("最大生成长度:"))
-        self.max_tokens_spinbox = QSpinBox()
-        self.max_tokens_spinbox.setRange(0, 2048)
-        self.max_tokens_spinbox.setValue(200)  # 默认值
-        self.max_tokens_spinbox.setSpecialValueText("无限制")
-        self.max_tokens_spinbox.setToolTip(
-            "控制生成描述的最大token数量\n"
-            "0: 无限制（可能导致极长输出）\n"
-            "推荐值: 100-500"
-        )
-        max_tokens_layout.addWidget(self.max_tokens_spinbox)
-        max_tokens_layout.addStretch()
-        params_layout.addLayout(max_tokens_layout)
-        
-        # num_frames设置
-        num_frames_layout = QHBoxLayout()
-        num_frames_layout.addWidget(QLabel("采样帧数:"))
-        self.num_frames_spinbox = QSpinBox()
-        self.num_frames_spinbox.setRange(0, 64)
-        self.num_frames_spinbox.setValue(16)  # 默认值
-        self.num_frames_spinbox.setSpecialValueText("自动")
-        self.num_frames_spinbox.setToolTip(
-            "控制从视频中采样的帧数\n"
-            "0: 自动选择（基于视频长度）\n"
-            "  • ≤10秒: 16帧\n"
-            "  • 10-30秒: 20帧\n"
-            "  • 30-60秒: 25帧\n"
-            "  • >60秒: 32帧\n"
-            "推荐值: 8-32帧"
-        )
-        num_frames_layout.addWidget(self.num_frames_spinbox)
-        num_frames_layout.addStretch()
-        params_layout.addLayout(num_frames_layout)
-        
-        options_layout.addWidget(params_group)
+        # 功能选项
+        self.action_filter_checkbox = QCheckBox("只保留动作描述")
+        self.action_filter_checkbox.setToolTip("过滤掉场景、物体等描述，专注于人物动作和行为分析")
+        self.action_filter_checkbox.stateChanged.connect(self._sync_action_filter_to_center)
+        options_layout.addWidget(self.action_filter_checkbox)
         
         self.backup_checkbox = QCheckBox("启用备份功能")
+        self.backup_checkbox.setToolTip("自动保存处理结果到本地文件，防止数据丢失")
+        self.backup_checkbox.stateChanged.connect(self._sync_backup_to_center)
         options_layout.addWidget(self.backup_checkbox)
         
+        # 保留的其他功能选项
         self.export_checkbox = QCheckBox("启用导出功能")
         options_layout.addWidget(self.export_checkbox)
-        
-        self.action_filter_checkbox = QCheckBox("只保留动作描述")
-        options_layout.addWidget(self.action_filter_checkbox)
         
         self.adaptive_playback_checkbox = QCheckBox("启用自适应播放控制")
         self.adaptive_playback_checkbox.setToolTip("使用PID控制器动态调整播放帧率，提供更平滑的播放体验")
@@ -623,24 +622,75 @@ class VideoDescriptionWidget(QWidget):
         
         layout.addWidget(options_group)
         
-        # 处理控制区域
-        control_group = QGroupBox("处理控制")
-        control_layout = QVBoxLayout(control_group)
+        # 参数说明区域（添加滚动功能）
+        info_group = QGroupBox("参数说明")
+        info_layout = QVBoxLayout(info_group)
         
-        self.start_btn = QPushButton("开始描述")
-        self.start_btn.clicked.connect(self._start_description)
-        control_layout.addWidget(self.start_btn)
+        # 创建滚动区域
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll_area.setMaximumHeight(300)  # 限制最大高度以确保滚动功能
         
-        self.stop_btn = QPushButton("停止处理")
-        self.stop_btn.setEnabled(False)
-        self.stop_btn.clicked.connect(self._stop_description)
-        control_layout.addWidget(self.stop_btn)
+        # 创建滚动内容容器
+        scroll_content = QWidget()
+        scroll_layout = QVBoxLayout(scroll_content)
         
-        # 进度条
-        self.progress_bar = QProgressBar()
-        control_layout.addWidget(self.progress_bar)
+        # 详细参数说明
+        mode_info = QLabel(
+            "<b>🎯 生成模式类型：</b><br>"
+            "• <b>确定性生成</b>：每次运行结果完全一致，输出稳定可重复，适合需要一致性的场景<br>"
+            "• <b>随机采样生成</b>：每次运行结果略有不同，输出更有创造性和多样性<br>"
+            "• <b>混合策略</b>：结合确定性和随机性，平衡稳定性与创造性<br><br>"
+            
+            "<b>📊 采样帧数设置：</b><br>"
+            "控制从视频中提取的关键帧数量，直接影响描述的详细程度和处理时间：<br>"
+            "• <b>自动模式（推荐）</b>：根据视频长度智能选择最佳帧数<br>"
+            "  - ≤10秒视频：16帧（快速处理，适合短片段）<br>"
+            "  - 10-30秒视频：20帧（平衡质量与速度）<br>"
+            "  - 30-60秒视频：25帧（详细分析，适合中长视频）<br>"
+            "  - >60秒视频：32帧（全面覆盖，适合长视频）<br>"
+            "• <b>手动设置</b>：推荐范围8-32帧，帧数越多描述越详细但处理时间越长<br><br>"
+            
+            "<b>📝 最大生成长度：</b><br>"
+            "控制AI生成描述的详细程度和文本长度：<br>"
+            "• <b>无限制（0）</b>：允许生成任意长度的描述，适合需要详尽分析的场景<br>"
+            "• <b>限制模式</b>：推荐100-500个token，确保描述简洁精准<br>"
+            "• 较短设置（100-200）适合快速概览，较长设置（300-500）适合详细分析<br><br>"
+            
+            "<b>⚡ 功能选项说明：</b><br>"
+            "• <b>启用自动保存</b>：自动保存视频列表的输出内容到文件，支持多种格式<br>"
+            "  处理完成后会自动保存结果，无需手动操作<br>"
+            "• <b>用户选择格式</b>：允许用户选择保存文件的格式（JSON、TXT、CSV、MD等）<br>"
+            "  启用后会在处理结束时弹出格式选择对话框<br>"
+            "• <b>启用导出功能</b>：提供手动导出功能，可随时导出处理结果<br>"
+            "• <b>自适应播放控制</b>：使用PID控制器动态调整播放帧率，提供更平滑的播放体验<br><br>"
+            
+            "<b>💡 使用建议：</b><br>"
+            "• 首次使用建议开启所有功能选项，熟悉后可根据需要调整<br>"
+            "• 对于重要视频建议启用备份功能<br>"
+            "• 批量处理时建议使用确定性生成模式以保持一致性<br>"
+            "• 处理长视频时可适当增加采样帧数以获得更全面的描述"
+        )
+        mode_info.setWordWrap(True)
+        mode_info.setStyleSheet(
+            "QLabel {"
+            "    background-color: #f8f9fa;"
+            "    border: 1px solid #dee2e6;"
+            "    border-radius: 5px;"
+            "    padding: 15px;"
+            "    font-size: 12px;"
+            "    line-height: 1.5;"
+            "}"
+        )
+        scroll_layout.addWidget(mode_info)
         
-        layout.addWidget(control_group)
+        # 设置滚动区域内容
+        scroll_area.setWidget(scroll_content)
+        info_layout.addWidget(scroll_area)
+        
+        layout.addWidget(info_group)
         
         layout.addStretch()
         return panel
@@ -751,11 +801,11 @@ class VideoDescriptionWidget(QWidget):
         options_group = QGroupBox("快速设置")
         options_layout = QVBoxLayout(options_group)
         
-        # 第一行：生成模式和最大生成长度
-        row1_layout = QHBoxLayout()
+        # 使用网格布局确保对齐
+        from PyQt5.QtWidgets import QGridLayout
+        grid_layout = QGridLayout()
         
-        # 生成模式
-        mode_layout = QVBoxLayout()
+        # 第一行：生成模式和最大生成长度
         mode_label = QLabel("生成模式:")
         mode_label.setStyleSheet("font-weight: bold; color: #2c3e50;")
         self.center_generation_mode_combo = QComboBox()
@@ -766,12 +816,7 @@ class VideoDescriptionWidget(QWidget):
             "随机采样生成: 每次运行结果略有不同，更有创造性\n"
             "混合策略: 结合确定性和随机性"
         )
-        mode_layout.addWidget(mode_label)
-        mode_layout.addWidget(self.center_generation_mode_combo)
-        row1_layout.addLayout(mode_layout)
         
-        # 最大生成长度
-        tokens_layout = QVBoxLayout()
         tokens_label = QLabel("最大生成长度:")
         tokens_label.setStyleSheet("font-weight: bold; color: #2c3e50;")
         self.center_max_tokens_spinbox = QSpinBox()
@@ -779,17 +824,8 @@ class VideoDescriptionWidget(QWidget):
         self.center_max_tokens_spinbox.setValue(200)
         self.center_max_tokens_spinbox.setSpecialValueText("无限制")
         self.center_max_tokens_spinbox.setToolTip("控制生成描述的最大token数量\n推荐值: 100-500")
-        tokens_layout.addWidget(tokens_label)
-        tokens_layout.addWidget(self.center_max_tokens_spinbox)
-        row1_layout.addLayout(tokens_layout)
         
-        options_layout.addLayout(row1_layout)
-        
-        # 第二行：采样帧数和快捷选项
-        row2_layout = QHBoxLayout()
-        
-        # 采样帧数
-        frames_layout = QVBoxLayout()
+        # 第二行：采样帧数和自动保存选项
         frames_label = QLabel("采样帧数:")
         frames_label.setStyleSheet("font-weight: bold; color: #2c3e50;")
         self.center_num_frames_spinbox = QSpinBox()
@@ -801,26 +837,30 @@ class VideoDescriptionWidget(QWidget):
             "0: 自动选择（基于视频长度）\n"
             "推荐值: 8-32帧"
         )
-        frames_layout.addWidget(frames_label)
-        frames_layout.addWidget(self.center_num_frames_spinbox)
-        row2_layout.addLayout(frames_layout)
         
-        # 快捷选项
-        quick_options_layout = QVBoxLayout()
-        quick_label = QLabel("快捷选项:")
-        quick_label.setStyleSheet("font-weight: bold; color: #2c3e50;")
+        auto_save_label = QLabel("启用自动保存:")
+        auto_save_label.setStyleSheet("font-weight: bold; color: #2c3e50;")
+        self.auto_save_format_combo = QComboBox()
+        self.auto_save_format_combo.addItems(["关闭", "JSON格式", "TXT格式", "CSV格式", "MD格式"])
+        self.auto_save_format_combo.setToolTip("选择自动保存的文件格式，选择'关闭'则不启用自动保存")
         
-        quick_checkboxes_layout = QHBoxLayout()
-        self.center_action_filter_checkbox = QCheckBox("只保留动作")
-        self.center_backup_checkbox = QCheckBox("启用备份")
-        quick_checkboxes_layout.addWidget(self.center_action_filter_checkbox)
-        quick_checkboxes_layout.addWidget(self.center_backup_checkbox)
+        # 添加到网格布局 (行, 列)
+        grid_layout.addWidget(mode_label, 0, 0)
+        grid_layout.addWidget(self.center_generation_mode_combo, 0, 1)
+        grid_layout.addWidget(tokens_label, 0, 3)
+        grid_layout.addWidget(self.center_max_tokens_spinbox, 0, 4)
         
-        quick_options_layout.addWidget(quick_label)
-        quick_options_layout.addLayout(quick_checkboxes_layout)
-        row2_layout.addLayout(quick_options_layout)
+        grid_layout.addWidget(frames_label, 1, 0)
+        grid_layout.addWidget(self.center_num_frames_spinbox, 1, 1)
+        grid_layout.addWidget(auto_save_label, 1, 3)
+        grid_layout.addWidget(self.auto_save_format_combo, 1, 4)
         
-        options_layout.addLayout(row2_layout)
+        # 设置列间距和拉伸
+        grid_layout.setColumnMinimumWidth(2, 50)  # 第2列作为间距列，设置最小宽度
+        grid_layout.setColumnStretch(5, 1)  # 最后一列拉伸
+        grid_layout.setContentsMargins(20, 0, 0, 0)  # 左边距，让整体向右移动
+        
+        options_layout.addLayout(grid_layout)
         
         # 第三行：处理控制按钮（增大尺寸）
         control_layout = QHBoxLayout()
@@ -994,31 +1034,8 @@ class VideoDescriptionWidget(QWidget):
         # 注意：播放控制按钮的信号已在_create_center_panel中连接，这里不再重复连接
         # 连接中间面板和左侧面板控件的同步信号
         
-        # 生成模式同步
-        self.generation_mode_combo.currentTextChanged.connect(self._sync_generation_mode_to_center)
-        self.center_generation_mode_combo.currentTextChanged.connect(self._sync_generation_mode_to_left)
-        
-        # 最大生成长度同步
-        self.max_tokens_spinbox.valueChanged.connect(self._sync_max_tokens_to_center)
-        self.center_max_tokens_spinbox.valueChanged.connect(self._sync_max_tokens_to_left)
-        
-        # 采样帧数同步
-        self.num_frames_spinbox.valueChanged.connect(self._sync_num_frames_to_center)
-        self.center_num_frames_spinbox.valueChanged.connect(self._sync_num_frames_to_left)
-        
-        # 快捷选项同步
-        self.action_filter_checkbox.stateChanged.connect(self._sync_action_filter_to_center)
-        self.center_action_filter_checkbox.stateChanged.connect(self._sync_action_filter_to_left)
-        
-        self.backup_checkbox.stateChanged.connect(self._sync_backup_to_center)
-        self.center_backup_checkbox.stateChanged.connect(self._sync_backup_to_left)
-        
-        # 进度条同步
-        self.progress_bar.valueChanged.connect(self._sync_progress_to_center)
-        
-        # 按钮状态同步
-        self.start_btn.clicked.connect(self._sync_start_button_state)
-        self.stop_btn.clicked.connect(self._sync_stop_button_state)
+        # 自动保存选项同步
+        self.auto_save_format_combo.currentTextChanged.connect(self._on_auto_save_format_changed)
     
     def _upload_video_files(self):
         """上传视频文件"""
@@ -1503,10 +1520,6 @@ class VideoDescriptionWidget(QWidget):
             QMessageBox.warning(self, "警告", "请输入描述要求")
             return
         
-        # 禁用开始按钮，启用停止按钮
-        self.start_btn.setEnabled(False)
-        self.stop_btn.setEnabled(True)
-        
         # 同步中间面板按钮状态
         if hasattr(self, 'center_start_btn'):
             self.center_start_btn.setEnabled(False)
@@ -1515,14 +1528,12 @@ class VideoDescriptionWidget(QWidget):
         
         # 清空日志
         self.log_text.clear()
-        self.progress_bar.setValue(0)
+        if hasattr(self, 'center_progress_bar'):
+            self.center_progress_bar.setValue(0)
         
-        # 优先从中间面板获取参数，如果不存在则从左侧面板获取
+        # 从中间面板获取参数
         # 获取生成模式
-        if hasattr(self, 'center_generation_mode_combo'):
-            generation_text = self.center_generation_mode_combo.currentText()
-        else:
-            generation_text = self.generation_mode_combo.currentText()
+        generation_text = self.center_generation_mode_combo.currentText()
             
         if generation_text == "确定性生成":
             generation_mode = "deterministic"
@@ -1534,15 +1545,11 @@ class VideoDescriptionWidget(QWidget):
             generation_mode = "random"  # 默认值
         
         # 获取高级参数
-        if hasattr(self, 'center_max_tokens_spinbox'):
-            max_new_tokens = self.center_max_tokens_spinbox.value()
-        else:
-            max_new_tokens = self.max_tokens_spinbox.value()
-            
-        if hasattr(self, 'center_num_frames_spinbox'):
-            num_frames = self.center_num_frames_spinbox.value()
-        else:
-            num_frames = self.num_frames_spinbox.value()
+        max_new_tokens = self.center_max_tokens_spinbox.value()
+        num_frames = self.center_num_frames_spinbox.value()
+        
+        # 获取API配置
+        api_config = self._get_api_config()
         
         # 启动处理线程
         self.processing_thread = VideoDescriptionThread(
@@ -1552,10 +1559,12 @@ class VideoDescriptionWidget(QWidget):
             self.action_filter_checkbox.isChecked(),
             generation_mode,
             max_new_tokens,
-            num_frames
+            num_frames,
+            api_config
         )
         
-        self.processing_thread.progress_updated.connect(self.progress_bar.setValue)
+        if hasattr(self, 'center_progress_bar'):
+            self.processing_thread.progress_updated.connect(self.center_progress_bar.setValue)
         self.processing_thread.status_updated.connect(self._log_message)
         self.processing_thread.log_updated.connect(self._log_message)
         self.processing_thread.video_completed.connect(self._on_video_completed)
@@ -1570,9 +1579,6 @@ class VideoDescriptionWidget(QWidget):
         if self.processing_thread and self.processing_thread.isRunning():
             self.processing_thread.stop()
             self._log_message("用户取消处理")
-        
-        self.start_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
         
         # 同步中间面板按钮状态
         if hasattr(self, 'center_start_btn'):
@@ -1619,17 +1625,18 @@ class VideoDescriptionWidget(QWidget):
         """所有视频处理完成"""
         self._log_message("所有视频处理完成！")
         
-        self.start_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
-        
         # 同步中间面板按钮状态
         if hasattr(self, 'center_start_btn'):
             self.center_start_btn.setEnabled(True)
         if hasattr(self, 'center_stop_btn'):
             self.center_stop_btn.setEnabled(False)
         
+        # 检查是否启用自动保存
+        if self.auto_save_format_combo.currentText() != "关闭":
+            self._handle_auto_save()
+        
         # 如果启用了导出功能，询问是否导出
-        if self.export_checkbox.isChecked():
+        elif self.export_checkbox.isChecked():
             reply = QMessageBox.question(
                 self, "导出结果", "处理完成，是否导出结果？",
                 QMessageBox.Yes | QMessageBox.No
@@ -1671,6 +1678,29 @@ class VideoDescriptionWidget(QWidget):
             return f"{duration:.2f}秒"
         except:
             return "未知"
+    
+    def _get_api_config(self):
+        """获取API配置"""
+        try:
+            import os
+            cache_config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'cache_config.txt')
+            
+            config_data = {}
+            if os.path.exists(cache_config_path):
+                with open(cache_config_path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        if '=' in line:
+                            key, value = line.strip().split('=', 1)
+                            config_data[key] = value
+            
+            return {
+                'api_endpoint': config_data.get('api_endpoint', ''),
+                'api_key': config_data.get('api_key', ''),
+                'api_model': config_data.get('api_model', 'gpt-3.5-turbo')
+            }
+        except Exception as e:
+            self._log_message(f"获取API配置失败: {e}")
+            return {}
     
     def _log_message(self, message):
         """记录日志消息"""
@@ -1837,87 +1867,176 @@ class VideoDescriptionWidget(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "导出失败", f"导出过程中发生错误: {str(e)}")
     
-    # 同步方法实现
-    def _sync_generation_mode_to_center(self, text):
-        """同步生成模式到中间面板"""
-        if hasattr(self, 'center_generation_mode_combo'):
-            self.center_generation_mode_combo.blockSignals(True)
-            self.center_generation_mode_combo.setCurrentText(text)
-            self.center_generation_mode_combo.blockSignals(False)
+    def _handle_auto_save(self):
+        """处理自动保存功能"""
+        if not self.current_videos:
+            QMessageBox.warning(self, "警告", "没有可保存的结果")
+            return
+        
+        try:
+            # 根据下拉框选择确定格式
+            format_text = self.auto_save_format_combo.currentText()
+            format_map = {
+                "JSON格式": "json",
+                "TXT格式": "txt", 
+                "CSV格式": "csv",
+                "MD格式": "md"
+            }
+            selected_format = format_map.get(format_text, "json")
+            
+            # 询问保存地址
+            save_dir = QFileDialog.getExistingDirectory(self, "选择保存目录")
+            if not save_dir:
+                return
+            
+            # 执行自动保存
+            self._auto_save_results(selected_format, save_dir)
+            
+        except Exception as e:
+            QMessageBox.critical(self, "自动保存失败", f"自动保存过程中发生错误: {str(e)}")
     
-    def _sync_generation_mode_to_left(self, text):
-        """同步生成模式到左侧面板"""
-        self.generation_mode_combo.blockSignals(True)
-        self.generation_mode_combo.setCurrentText(text)
-        self.generation_mode_combo.blockSignals(False)
+    def _auto_save_results(self, format_type, save_dir):
+        """执行自动保存"""
+        try:
+            # 收集所有结果
+            all_results = []
+            for video_path in self.current_videos:
+                result_file = self._get_result_file_path(video_path)
+                if result_file.exists():
+                    with open(result_file, 'r', encoding='utf-8') as f:
+                        result = json.load(f)
+                        result['video_path'] = video_path
+                        result['video_name'] = os.path.basename(video_path)
+                        all_results.append(result)
+            
+            if not all_results:
+                QMessageBox.warning(self, "警告", "没有找到处理结果")
+                return
+            
+            # 生成文件名
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            
+            if format_type == 'json':
+                save_file = os.path.join(save_dir, f"video_description_results_{timestamp}.json")
+                with open(save_file, 'w', encoding='utf-8') as f:
+                    json.dump(all_results, f, ensure_ascii=False, indent=2)
+            
+            elif format_type == 'txt':
+                save_file = os.path.join(save_dir, f"video_description_results_{timestamp}.txt")
+                with open(save_file, 'w', encoding='utf-8') as f:
+                    for result in all_results:
+                        f.write(f"视频: {result['video_name']}\n")
+                        
+                        # 显示总耗时
+                        total_time = result.get('total_processing_time')
+                        if total_time is not None:
+                            if total_time < 60:
+                                time_str = f"{total_time:.1f} 秒"
+                            elif total_time < 3600:
+                                minutes = int(total_time // 60)
+                                seconds = total_time % 60
+                                time_str = f"{minutes} 分 {seconds:.1f} 秒"
+                            else:
+                                hours = int(total_time // 3600)
+                                minutes = int((total_time % 3600) // 60)
+                                seconds = total_time % 60
+                                time_str = f"{hours} 小时 {minutes} 分 {seconds:.1f} 秒"
+                            f.write(f"总耗时: {time_str}\n")
+                        else:
+                            f.write(f"处理时间: {result.get('process_time', '未知')}\n")
+                        
+                        f.write(f"视频时长: {result.get('duration', '未知')}\n")
+                        f.write(f"处理状态: {'成功' if result.get('success', False) else '失败'}\n")
+                        if result.get('success', False):
+                            f.write(f"描述内容: {result.get('description', '无')}\n")
+                        else:
+                            f.write(f"错误信息: {result.get('error_message', '无')}\n")
+                        f.write("-" * 50 + "\n")
+            
+            elif format_type == 'csv':
+                import csv
+                save_file = os.path.join(save_dir, f"video_description_results_{timestamp}.csv")
+                with open(save_file, 'w', newline='', encoding='utf-8-sig') as f:
+                    writer = csv.writer(f)
+                    writer.writerow(['视频名称', '总耗时', '视频时长', '处理状态', '描述内容', '错误信息'])
+                    for result in all_results:
+                        # 格式化总耗时
+                        total_time = result.get('total_processing_time')
+                        if total_time is not None:
+                            if total_time < 60:
+                                time_str = f"{total_time:.1f} 秒"
+                            elif total_time < 3600:
+                                minutes = int(total_time // 60)
+                                seconds = total_time % 60
+                                time_str = f"{minutes} 分 {seconds:.1f} 秒"
+                            else:
+                                hours = int(total_time // 3600)
+                                minutes = int((total_time % 3600) // 60)
+                                seconds = total_time % 60
+                                time_str = f"{hours} 小时 {minutes} 分 {seconds:.1f} 秒"
+                        else:
+                            time_str = result.get('process_time', '未知')
+                        
+                        writer.writerow([
+                            result['video_name'],
+                            time_str,
+                            result.get('duration', '未知'),
+                            '成功' if result.get('success', False) else '失败',
+                            result.get('description', '无'),
+                            result.get('error_message', '无')
+                        ])
+            
+            elif format_type == 'md':
+                save_file = os.path.join(save_dir, f"video_description_results_{timestamp}.md")
+                with open(save_file, 'w', encoding='utf-8') as f:
+                    f.write("# 视频描述结果\n\n")
+                    for result in all_results:
+                        f.write(f"## {result['video_name']}\n\n")
+                        
+                        # 显示总耗时
+                        total_time = result.get('total_processing_time')
+                        if total_time is not None:
+                            if total_time < 60:
+                                time_str = f"{total_time:.1f} 秒"
+                            elif total_time < 3600:
+                                minutes = int(total_time // 60)
+                                seconds = total_time % 60
+                                time_str = f"{minutes} 分 {seconds:.1f} 秒"
+                            else:
+                                hours = int(total_time // 3600)
+                                minutes = int((total_time % 3600) // 60)
+                                seconds = total_time % 60
+                                time_str = f"{hours} 小时 {minutes} 分 {seconds:.1f} 秒"
+                            f.write(f"- **总耗时**: {time_str}\n")
+                        else:
+                            f.write(f"- **处理时间**: {result.get('process_time', '未知')}\n")
+                        
+                        f.write(f"- **视频时长**: {result.get('duration', '未知')}\n")
+                        f.write(f"- **处理状态**: {'成功' if result.get('success', False) else '失败'}\n\n")
+                        if result.get('success', False):
+                            f.write(f"### 描述内容\n\n{result.get('description', '无')}\n\n")
+                        else:
+                            f.write(f"### 错误信息\n\n{result.get('error_message', '无')}\n\n")
+                        f.write("---\n\n")
+            
+            # 显示成功消息
+            QMessageBox.information(self, "自动保存成功", f"结果已自动保存到: {save_file}")
+            self._log_message(f"自动保存完成: {save_file}")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "自动保存失败", f"自动保存过程中发生错误: {str(e)}")
+            self._log_message(f"自动保存失败: {str(e)}")
     
-    def _sync_max_tokens_to_center(self, value):
-        """同步最大生成长度到中间面板"""
-        if hasattr(self, 'center_max_tokens_spinbox'):
-            self.center_max_tokens_spinbox.blockSignals(True)
-            self.center_max_tokens_spinbox.setValue(value)
-            self.center_max_tokens_spinbox.blockSignals(False)
-    
-    def _sync_max_tokens_to_left(self, value):
-        """同步最大生成长度到左侧面板"""
-        self.max_tokens_spinbox.blockSignals(True)
-        self.max_tokens_spinbox.setValue(value)
-        self.max_tokens_spinbox.blockSignals(False)
-    
-    def _sync_num_frames_to_center(self, value):
-        """同步采样帧数到中间面板"""
-        if hasattr(self, 'center_num_frames_spinbox'):
-            self.center_num_frames_spinbox.blockSignals(True)
-            self.center_num_frames_spinbox.setValue(value)
-            self.center_num_frames_spinbox.blockSignals(False)
-    
-    def _sync_num_frames_to_left(self, value):
-        """同步采样帧数到左侧面板"""
-        self.num_frames_spinbox.blockSignals(True)
-        self.num_frames_spinbox.setValue(value)
-        self.num_frames_spinbox.blockSignals(False)
+    def _on_auto_save_format_changed(self, text):
+        """自动保存格式变化处理"""
+        self._log_message(f"自动保存格式已更改为: {text}")
     
     def _sync_action_filter_to_center(self, state):
         """同步动作过滤到中间面板"""
-        if hasattr(self, 'center_action_filter_checkbox'):
-            self.center_action_filter_checkbox.blockSignals(True)
-            self.center_action_filter_checkbox.setChecked(state == Qt.Checked)
-            self.center_action_filter_checkbox.blockSignals(False)
-    
-    def _sync_action_filter_to_left(self, state):
-        """同步动作过滤到左侧面板"""
-        self.action_filter_checkbox.blockSignals(True)
-        self.action_filter_checkbox.setChecked(state == Qt.Checked)
-        self.action_filter_checkbox.blockSignals(False)
+        # 这里可以添加同步逻辑，目前暂时为空
+        pass
     
     def _sync_backup_to_center(self, state):
-        """同步备份选项到中间面板"""
-        if hasattr(self, 'center_backup_checkbox'):
-            self.center_backup_checkbox.blockSignals(True)
-            self.center_backup_checkbox.setChecked(state == Qt.Checked)
-            self.center_backup_checkbox.blockSignals(False)
-    
-    def _sync_backup_to_left(self, state):
-        """同步备份选项到左侧面板"""
-        self.backup_checkbox.blockSignals(True)
-        self.backup_checkbox.setChecked(state == Qt.Checked)
-        self.backup_checkbox.blockSignals(False)
-    
-    def _sync_progress_to_center(self, value):
-        """同步进度条到中间面板"""
-        if hasattr(self, 'center_progress_bar'):
-            self.center_progress_bar.setValue(value)
-    
-    def _sync_start_button_state(self):
-        """同步开始按钮状态"""
-        if hasattr(self, 'center_start_btn'):
-            self.center_start_btn.setEnabled(False)
-        if hasattr(self, 'center_stop_btn'):
-            self.center_stop_btn.setEnabled(True)
-    
-    def _sync_stop_button_state(self):
-        """同步停止按钮状态"""
-        if hasattr(self, 'center_start_btn'):
-            self.center_start_btn.setEnabled(True)
-        if hasattr(self, 'center_stop_btn'):
-            self.center_stop_btn.setEnabled(False)
+        """同步备份功能到中间面板"""
+        # 这里可以添加同步逻辑，目前暂时为空
+        pass
