@@ -4,6 +4,7 @@ import warnings
 import logging
 import sys
 import traceback
+import json
 from datetime import datetime
 from contextlib import redirect_stdout, redirect_stderr
 from io import StringIO
@@ -24,42 +25,63 @@ warnings.filterwarnings("ignore", message=".*Xet Storage is enabled.*")
 os.environ['HF_HUB_DISABLE_SYMLINKS_WARNING'] = '1'
 
 # 设置详细日志记录
-def setup_comprehensive_logging():
-    """设置全面的日志记录"""
-    # 创建logs目录
-    log_dir = "logs"
-    if not os.path.exists(log_dir):
-        os.makedirs(log_dir)
+def setup_comprehensive_logging(log_level='INFO', silent_mode=False, enable_file_log=True):
+    """设置全面的日志记录
     
-    # 创建详细的日志文件名
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    log_file = os.path.join(log_dir, f"run_detailed_{timestamp}.log")
+    Args:
+        log_level: 日志级别 ('DEBUG', 'INFO', 'WARNING', 'ERROR')
+        silent_mode: 静默模式，不输出到控制台
+        enable_file_log: 是否启用文件日志
+    """
+    # 创建logs目录
+    if enable_file_log:
+        log_dir = "logs"
+        if not os.path.exists(log_dir):
+            os.makedirs(log_dir)
+        
+        # 创建详细的日志文件名
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        log_file = os.path.join(log_dir, f"sharegpt4video_{timestamp}.log")
     
     # 设置日志格式
-    formatter = logging.Formatter(
+    detailed_formatter = logging.Formatter(
         '[%(asctime)s] %(levelname)s - %(name)s: %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
     
+    simple_formatter = logging.Formatter(
+        '[%(levelname)s] %(message)s'
+    )
+    
     # 创建根日志记录器
     root_logger = logging.getLogger()
-    root_logger.setLevel(logging.DEBUG)
+    
+    # 设置日志级别
+    level_map = {
+        'DEBUG': logging.DEBUG,
+        'INFO': logging.INFO,
+        'WARNING': logging.WARNING,
+        'ERROR': logging.ERROR
+    }
+    root_logger.setLevel(level_map.get(log_level.upper(), logging.INFO))
     
     # 清除现有处理器
     for handler in root_logger.handlers[:]:
         root_logger.removeHandler(handler)
     
     # 添加文件处理器（记录所有级别）
-    file_handler = logging.FileHandler(log_file, encoding='utf-8')
-    file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(formatter)
-    root_logger.addHandler(file_handler)
+    if enable_file_log:
+        file_handler = logging.FileHandler(log_file, encoding='utf-8')
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(detailed_formatter)
+        root_logger.addHandler(file_handler)
     
-    # 添加控制台处理器（只显示重要信息）
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.INFO)
-    console_handler.setFormatter(formatter)
-    root_logger.addHandler(console_handler)
+    # 添加控制台处理器（根据模式决定是否显示）
+    if not silent_mode:
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(level_map.get(log_level.upper(), logging.INFO))
+        console_handler.setFormatter(simple_formatter)
+        root_logger.addHandler(console_handler)
     
     return logging.getLogger('ShareGPT4Video')
 
@@ -67,14 +89,19 @@ def setup_comprehensive_logging():
 class LoggingCapture:
     """捕获并记录所有输出"""
     
-    def __init__(self, logger, level=logging.INFO):
+    def __init__(self, logger, level=logging.INFO, silent=False):
         self.logger = logger
         self.level = level
         self.buffer = StringIO()
+        self.silent = silent
         
     def write(self, text):
         if text.strip():  # 只记录非空内容
-            self.logger.log(self.level, f"OUTPUT: {text.strip()}")
+            if not self.silent:
+                # 过滤重复和无用信息
+                if not any(skip_word in text.lower() for skip_word in 
+                          ['### lm output text:', '=== 视频描述结果 ===', '===================']):
+                    self.logger.log(self.level, f"OUTPUT: {text.strip()}")
         self.buffer.write(text)
         
     def flush(self):
@@ -82,6 +109,39 @@ class LoggingCapture:
         
     def getvalue(self):
         return self.buffer.getvalue()
+
+# 结果格式化类
+class ResultFormatter:
+    """结果格式化器"""
+    
+    @staticmethod
+    def format_json_output(description, metadata=None):
+        """格式化为JSON输出"""
+        result = {
+            "status": "success",
+            "description": description,
+            "timestamp": datetime.now().isoformat(),
+            "metadata": metadata or {}
+        }
+        return json.dumps(result, ensure_ascii=False, indent=2)
+    
+    @staticmethod
+    def format_plain_output(description):
+        """格式化为纯文本输出"""
+        return f"\n=== 视频描述结果 ===\n{description}\n===================\n"
+    
+    @staticmethod
+    def format_error_output(error_msg, error_type="UnknownError"):
+        """格式化错误输出"""
+        result = {
+            "status": "error",
+            "error_type": error_type,
+            "error_message": str(error_msg),
+            "timestamp": datetime.now().isoformat()
+        }
+        return json.dumps(result, ensure_ascii=False, indent=2)
+
+import json
 
 from llava.constants import DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX
 from llava.conversation import conv_templates
@@ -140,7 +200,7 @@ def resize_image_grid(image, max_length=1920):
 
 def video_answer(prompt, model, processor, tokenizer, img_grid, do_sample=True,
                  max_new_tokens=200, num_beams=1, top_p=0.9,
-                 temperature=1.0, print_res=False, **kwargs):
+                 temperature=1.0, print_res=False, silent_mode=False, **kwargs):
     # 获取日志记录器
     logger = logging.getLogger('ShareGPT4Video.video_answer')
     
@@ -204,17 +264,19 @@ def video_answer(prompt, model, processor, tokenizer, img_grid, do_sample=True,
         
         logger.info(f"解码后输出长度: {len(outputs)} 字符")
     
-    if print_res:  # debug usage
+    if print_res and not silent_mode:  # debug usage
         print('### PROMPTING LM WITH: ', prompt)
         print('### LM OUTPUT TEXT:  ', outputs)
-        logger.info(f"提示内容: {prompt}")
-        logger.info(f"LM输出文本: {outputs}")
+    
+    # 始终记录到日志，但不重复打印
+    logger.debug(f"提示内容: {prompt}")
+    logger.info(f"LM输出文本: {outputs}")
     
     logger.info("视频回答生成完成")
     return outputs
 
 
-def single_test(model, processor, tokenizer, vid_path, qs, pre_query_prompt=None,  num_frames=16, conv_mode="plain"):
+def single_test(model, processor, tokenizer, vid_path, qs, pre_query_prompt=None,  num_frames=16, conv_mode="plain", do_sample=True, top_p=0.9, temperature=1.0, max_new_tokens=200, num_beams=1):
     # 获取日志记录器
     logger = logging.getLogger('ShareGPT4Video.single_test')
     
@@ -369,8 +431,11 @@ def single_test(model, processor, tokenizer, vid_path, qs, pre_query_prompt=None
     logger.info(f"最终提示长度: {len(prompt)} 字符")
     
     logger.info("开始生成回答...")
+    logger.info(f"生成参数: do_sample={do_sample}, top_p={top_p}, temperature={temperature}, max_new_tokens={max_new_tokens}, num_beams={num_beams}")
     llm_response = video_answer(prompt, model=model, processor=processor, tokenizer=tokenizer,
-                                do_sample=False, img_grid=img_grid, max_new_tokens=512, print_res=True)
+                                do_sample=do_sample, img_grid=img_grid, max_new_tokens=max_new_tokens, 
+                                top_p=top_p, temperature=temperature, num_beams=num_beams,
+                                print_res=False, silent_mode=True)
     
     logger.info(f"生成的回答长度: {len(llm_response) if llm_response else 0} 字符")
     logger.info("单个视频测试完成")
@@ -378,229 +443,247 @@ def single_test(model, processor, tokenizer, vid_path, qs, pre_query_prompt=None
     return llm_response
 
 
-if __name__ == "__main__":
-    # 设置全面的日志记录
-    logger = setup_comprehensive_logging()
+def parse_arguments():
+    """解析命令行参数"""
+    parser = argparse.ArgumentParser(description='ShareGPT4Video 视频描述生成工具')
+    parser.add_argument('--model-path', default='Lin-Chen/sharegpt4video-8b', 
+                       help='模型路径 (默认: Lin-Chen/sharegpt4video-8b)')
+    parser.add_argument('--video', required=True, help='视频文件路径')
+    parser.add_argument('--conv-mode', default='llava_llama_3', help='对话模式 (默认: llava_llama_3)')
+    parser.add_argument('--query', default='Describe this video in detail.', help='查询内容')
+    parser.add_argument('--device', default='cuda', choices=['cuda', 'cpu'], help='计算设备')
+    parser.add_argument('--output-format', choices=['plain', 'json'], default='plain',
+                       help='输出格式 (默认: plain)')
+    parser.add_argument('--log-level', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'], 
+                       default='INFO', help='日志级别 (默认: INFO)')
+    parser.add_argument('--silent', action='store_true', help='静默模式，不输出到控制台')
+    parser.add_argument('--no-file-log', action='store_true', help='禁用文件日志')
     
-    # 记录程序开始
-    logger.info("="*80)
-    logger.info("ShareGPT4Video 视频描述程序开始运行")
-    logger.info(f"开始时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    logger.info(f"Python版本: {sys.version}")
-    logger.info(f"工作目录: {os.getcwd()}")
-    logger.info(f"命令行参数: {sys.argv}")
-    logger.info("="*80)
+    # 生成控制参数
+    parser.add_argument('--do_sample', type=str, choices=['True', 'False'], default='True',
+                       help='是否使用采样生成 (默认: True)')
+    parser.add_argument('--top_p', type=float, default=0.9,
+                       help='nucleus采样的累积概率阈值 (默认: 0.9)')
+    parser.add_argument('--temperature', type=float, default=1.0,
+                       help='生成温度 (默认: 1.0)')
+    parser.add_argument('--max_new_tokens', type=int, default=200,
+                       help='最大生成token数 (默认: 200)')
+    parser.add_argument('--num_beams', type=int, default=1,
+                       help='束搜索的束数 (默认: 1)')
     
-    # 设置输出捕获
-    stdout_capture = LoggingCapture(logger, logging.INFO)
-    stderr_capture = LoggingCapture(logger, logging.ERROR)
-    
-    # 自定义参数解析函数，处理包含空格和特殊字符的文件路径
-    def parse_custom_args():
-        # 获取原始命令行参数
-        raw_args = sys.argv[1:]
-        
-        # 初始化参数字典
-        parsed_args = {
-            'model_path': 'Lin-Chen/sharegpt4video-8b',
-            'video': 'examples/yoga.mp4',
-            'conv_mode': 'llava_llama_3',
-            'query': 'Describe this video in detail.',
-            'device': 'cuda'
-        }
-        
-        i = 0
-        while i < len(raw_args):
-            arg = raw_args[i]
-            
-            if arg == '--model-path' and i + 1 < len(raw_args):
-                parsed_args['model_path'] = raw_args[i + 1]
-                i += 2
-            elif arg == '--video' and i + 1 < len(raw_args):
-                # 处理视频路径，可能包含空格和特殊字符
-                video_path = raw_args[i + 1]
-                
-                # 如果路径被引号包围，移除引号
-                if (video_path.startswith('"') and video_path.endswith('"')) or \
-                   (video_path.startswith("'") and video_path.endswith("'")):
-                    video_path = video_path[1:-1]
-                else:
-                    # 如果没有引号，尝试重建完整路径
-                    # 查找下一个以--开头的参数或到达末尾
-                    j = i + 2
-                    while j < len(raw_args) and not raw_args[j].startswith('--'):
-                        video_path += ' ' + raw_args[j]
-                        j += 1
-                    i = j - 1  # 调整索引
-                
-                parsed_args['video'] = video_path.strip()
-                i += 2
-            elif arg == '--conv-mode' and i + 1 < len(raw_args):
-                parsed_args['conv_mode'] = raw_args[i + 1]
-                i += 2
-            elif arg == '--query' and i + 1 < len(raw_args):
-                # 处理查询字符串，可能包含空格
-                query = raw_args[i + 1]
-                if (query.startswith('"') and query.endswith('"')) or \
-                   (query.startswith("'") and query.endswith("'")):
-                    query = query[1:-1]
-                else:
-                    # 重建完整查询字符串
-                    j = i + 2
-                    while j < len(raw_args) and not raw_args[j].startswith('--'):
-                        query += ' ' + raw_args[j]
-                        j += 1
-                    i = j - 1
-                
-                parsed_args['query'] = query.strip()
-                i += 2
-            elif arg == '--device' and i + 1 < len(raw_args):
-                parsed_args['device'] = raw_args[i + 1]
-                i += 2
-            else:
-                i += 1
-        
-        # 创建类似argparse.Namespace的对象
-        class Args:
-            def __init__(self, **kwargs):
-                for key, value in kwargs.items():
-                    setattr(self, key, value)
-        
-        return Args(
-            model_path=parsed_args['model_path'],
-            video=parsed_args['video'],
-            conv_mode=parsed_args['conv_mode'],
-            query=parsed_args['query'],
-            device=parsed_args['device']
-        )
-    
+    return parser.parse_args()
+
+def main():
+    """主函数"""
     try:
-        # 捕获所有输出
-        with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
-            # 使用自定义参数解析
-            logger.info("开始解析命令行参数...")
-            args = parse_custom_args()
-            
-            # 记录解析结果
-            logger.info("参数解析完成:")
-            logger.info(f"  模型路径: {args.model_path}")
-            logger.info(f"  视频路径: {args.video}")
-            logger.info(f"  对话模式: {args.conv_mode}")
-            logger.info(f"  查询内容: {args.query}")
-            logger.info(f"  设备: {args.device}")
-            
-            # 输出解析结果用于调试
-            print(f"解析的参数:")
-            print(f"  模型路径: {args.model_path}")
-            print(f"  视频路径: {args.video}")
-            print(f"  对话模式: {args.conv_mode}")
-            print(f"  查询内容: {args.query}")
-            print(f"  设备: {args.device}")
-            print()
-            
-            num_frames = 16
-            pre_query_prompt = "The provided image arranges keyframes from a video in a grid view, keyframes are separated with white bands. Answer concisely with overall content and context of the video, highlighting any significant events, characters, or objects that appear throughout the frames."
-            
-            logger.info(f"设置帧数: {num_frames}")
-            logger.info(f"预查询提示: {pre_query_prompt}")
-            
-            # 检查视频文件是否存在
-            logger.info(f"检查视频文件: {args.video}")
-            if not os.path.exists(args.video):
-                logger.error(f"视频文件不存在: {args.video}")
-                raise FileNotFoundError(f"视频文件不存在: {args.video}")
-            else:
-                logger.info("视频文件存在，继续处理")
-            
-            logger.info("初始化PyTorch...")
-            disable_torch_init()
-            
-            model_path = os.path.expanduser(args.model_path)
-            model_name = get_model_name_from_path(model_path)
-            logger.info(f"展开后的模型路径: {model_path}")
-            logger.info(f"模型名称: {model_name}")
-            
-            # 根据device参数设置设备
-            logger.info("配置计算设备...")
-            if args.device.lower() == 'cuda' and torch.cuda.is_available():
-                device_map = 'auto'
-                logger.info(f"使用GPU加速，CUDA可用: {torch.cuda.is_available()}")
-                logger.info(f"CUDA设备数量: {torch.cuda.device_count()}")
-                if torch.cuda.is_available():
-                    logger.info(f"当前CUDA设备: {torch.cuda.current_device()}")
-                    logger.info(f"CUDA设备名称: {torch.cuda.get_device_name()}")
-                print(f"使用GPU加速，CUDA可用: {torch.cuda.is_available()}")
-            else:
-                device_map = 'cpu'
-                logger.info("使用CPU模式")
-                print("使用CPU模式")
-            
-            logger.info("开始加载预训练模型...")
-            tokenizer, model, processor, context_len = load_pretrained_model(
-                model_path, None, model_name, device_map=device_map)
-            logger.info("模型加载完成")
-            logger.info(f"上下文长度: {context_len}")
-            
-            # 当使用device_map='auto'时，模型已经自动分配到合适的设备，无需再次移动
-            # 只有在使用CPU模式时才需要显式设置eval模式
-            logger.info("设置模型为评估模式...")
-            if device_map == 'cpu':
-                model = model.eval()
-                logger.info("CPU模式：模型设置为评估模式")
-            else:
-                # GPU模式下，模型已经通过device_map自动配置，只需设置eval模式
-                model = model.eval()
-                logger.info("GPU模式：模型设置为评估模式")
-            
-            logger.info("开始视频处理...")
-            print("\n开始处理视频...")
-            
-            outputs = single_test(model,
-                                  processor,
-                                  tokenizer,
-                                  args.video,
-                                  qs=args.query,
-                                  pre_query_prompt=pre_query_prompt,
-                                  num_frames=num_frames,
-                                  conv_mode=args.conv_mode)
-            
-            logger.info("视频处理完成")
-            logger.info(f"生成的描述长度: {len(outputs) if outputs else 0} 字符")
-            logger.info(f"生成的描述内容: {outputs}")
-            
-            print("\n=== 视频描述结果 ===")
-            print(outputs)
-            print("===================\n")
-            
-    except Exception as e:
-        logger.error("程序执行过程中发生错误:")
-        logger.error(f"错误类型: {type(e).__name__}")
-        logger.error(f"错误信息: {str(e)}")
-        logger.error("详细错误堆栈:")
-        logger.error(traceback.format_exc())
+        # 解析参数
+        args = parse_arguments()
         
-        # 也输出到控制台
-        print(f"\n错误: {e}")
-        print("详细错误信息请查看日志文件")
+        # 设置日志记录
+        logger = setup_comprehensive_logging(
+            log_level=args.log_level,
+            silent_mode=args.silent,
+            enable_file_log=not args.no_file_log
+        )
         
-        # 重新抛出异常
-        raise
-    
-    finally:
-        # 记录程序结束
+        # 记录程序开始
         logger.info("="*80)
-        logger.info("ShareGPT4Video 视频描述程序运行结束")
-        logger.info(f"结束时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info("ShareGPT4Video 视频描述程序开始运行")
+        logger.info(f"开始时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(f"Python版本: {sys.version}")
+        logger.info(f"工作目录: {os.getcwd()}")
+        logger.info(f"命令行参数: {sys.argv}")
         logger.info("="*80)
         
-        # 输出捕获的内容摘要
+        # 设置输出捕获
+        stdout_capture = LoggingCapture(logger, logging.INFO, silent=args.silent)
+        stderr_capture = LoggingCapture(logger, logging.ERROR, silent=args.silent)
+        
         try:
-            stdout_content = stdout_capture.getvalue()
-            stderr_content = stderr_capture.getvalue()
+            # 捕获所有输出
+            with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
+                logger.info("参数解析完成:")
+                logger.info(f"  模型路径: {args.model_path}")
+                logger.info(f"  视频路径: {args.video}")
+                logger.info(f"  对话模式: {args.conv_mode}")
+                logger.info(f"  查询内容: {args.query}")
+                logger.info(f"  设备: {args.device}")
+                logger.info(f"  输出格式: {args.output_format}")
+                
+                if not args.silent:
+                    print(f"解析的参数:")
+                    print(f"  模型路径: {args.model_path}")
+                    print(f"  视频路径: {args.video}")
+                    print(f"  对话模式: {args.conv_mode}")
+                    print(f"  查询内容: {args.query}")
+                    print(f"  设备: {args.device}")
+                    print()
+                
+                num_frames = 16
+                pre_query_prompt = "The provided image arranges keyframes from a video in a grid view, keyframes are separated with white bands. Answer concisely with overall content and context of the video, highlighting any significant events, characters, or objects that appear throughout the frames."
+                
+                logger.info(f"设置帧数: {num_frames}")
+                logger.info(f"预查询提示: {pre_query_prompt}")
+                
+                # 检查视频文件是否存在
+                logger.info(f"检查视频文件: {args.video}")
+                if not os.path.exists(args.video):
+                    error_msg = f"视频文件不存在: {args.video}"
+                    logger.error(error_msg)
+                    if args.output_format == 'json':
+                        print(ResultFormatter.format_error_output(error_msg, "FileNotFoundError"))
+                    else:
+                        print(f"错误: {error_msg}")
+                    return 1
+                else:
+                    logger.info("视频文件存在，继续处理")
+                
+                logger.info("初始化PyTorch...")
+                disable_torch_init()
+                
+                model_path = os.path.expanduser(args.model_path)
+                model_name = get_model_name_from_path(model_path)
+                logger.info(f"展开后的模型路径: {model_path}")
+                logger.info(f"模型名称: {model_name}")
+                
+                # 根据device参数设置设备
+                logger.info("配置计算设备...")
+                if args.device.lower() == 'cuda' and torch.cuda.is_available():
+                    device_map = 'auto'
+                    logger.info(f"使用GPU加速，CUDA可用: {torch.cuda.is_available()}")
+                    logger.info(f"CUDA设备数量: {torch.cuda.device_count()}")
+                    if torch.cuda.is_available():
+                        logger.info(f"当前CUDA设备: {torch.cuda.current_device()}")
+                        logger.info(f"CUDA设备名称: {torch.cuda.get_device_name()}")
+                    if not args.silent:
+                        print(f"使用GPU加速，CUDA可用: {torch.cuda.is_available()}")
+                else:
+                    device_map = 'cpu'
+                    logger.info("使用CPU模式")
+                    if not args.silent:
+                        print("使用CPU模式")
+                
+                logger.info("开始加载预训练模型...")
+                try:
+                    tokenizer, model, processor, context_len = load_pretrained_model(
+                        model_path, None, model_name, device_map=device_map)
+                    logger.info("模型加载完成")
+                    logger.info(f"上下文长度: {context_len}")
+                except Exception as e:
+                    error_msg = f"模型加载失败: {str(e)}"
+                    logger.error(error_msg)
+                    if args.output_format == 'json':
+                        print(ResultFormatter.format_error_output(error_msg, "ModelLoadError"))
+                    else:
+                        print(f"错误: {error_msg}")
+                    return 1
+                
+                # 设置模型为评估模式
+                logger.info("设置模型为评估模式...")
+                model = model.eval()
+                logger.info("模型设置为评估模式")
+                
+                # 处理生成参数
+                do_sample_bool = args.do_sample.lower() == 'true' if isinstance(args.do_sample, str) else args.do_sample
+                logger.info(f"生成参数: do_sample={do_sample_bool}, top_p={args.top_p}, temperature={args.temperature}, max_new_tokens={args.max_new_tokens}, num_beams={args.num_beams}")
+                
+                logger.info("开始视频处理...")
+                if not args.silent:
+                    print("\n开始处理视频...")
+                
+                try:
+                    outputs = single_test(model,
+                                          processor,
+                                          tokenizer,
+                                          args.video,
+                                          qs=args.query,
+                                          pre_query_prompt=pre_query_prompt,
+                                          num_frames=num_frames,
+                                          conv_mode=args.conv_mode,
+                                          do_sample=do_sample_bool,
+                                          top_p=args.top_p,
+                                          temperature=args.temperature,
+                                          max_new_tokens=args.max_new_tokens,
+                                          num_beams=args.num_beams)
+                    
+                    logger.info("视频处理完成")
+                    logger.info(f"生成的描述长度: {len(outputs) if outputs else 0} 字符")
+                    logger.info(f"生成的描述内容: {outputs}")
+                except Exception as e:
+                    error_msg = f"视频处理失败: {str(e)}"
+                    logger.error(error_msg)
+                    if args.output_format == 'json':
+                        print(ResultFormatter.format_error_output(error_msg, "VideoProcessError"))
+                    else:
+                        print(f"错误: {error_msg}")
+                    return 1
+                
+                # 输出结果
+                metadata = {
+                    "video_path": args.video,
+                    "model_path": args.model_path,
+                    "conv_mode": args.conv_mode,
+                    "query": args.query,
+                    "device": args.device,
+                    "num_frames": num_frames
+                }
+                
+                if args.output_format == 'json':
+                    result = ResultFormatter.format_json_output(outputs, metadata)
+                else:
+                    result = ResultFormatter.format_plain_output(outputs)
+                
+                print(result)
+                logger.info("脚本执行完成")
+                return 0
+                
+        except KeyboardInterrupt:
+            logger.warning("用户中断执行")
+            if args.output_format == 'json':
+                print(ResultFormatter.format_error_output("用户中断执行", "KeyboardInterrupt"))
+            else:
+                print("\n执行被用户中断")
+            return 1
             
-            if stdout_content:
-                logger.info(f"标准输出内容长度: {len(stdout_content)} 字符")
-            if stderr_content:
-                logger.info(f"标准错误内容长度: {len(stderr_content)} 字符")
-        except Exception as capture_error:
-            logger.warning(f"获取捕获内容时出错: {capture_error}")
+        except Exception as e:
+            logger.error("程序执行过程中发生错误:")
+            logger.error(f"错误类型: {type(e).__name__}")
+            logger.error(f"错误信息: {str(e)}")
+            logger.error("详细错误堆栈:")
+            logger.error(traceback.format_exc())
+            
+            error_msg = f"执行过程中发生未知错误: {str(e)}"
+            if args.output_format == 'json':
+                print(ResultFormatter.format_error_output(error_msg, type(e).__name__))
+            else:
+                print(f"\n错误: {e}")
+                print("详细错误信息请查看日志文件")
+            return 1
+        
+        finally:
+            # 记录程序结束
+            logger.info("="*80)
+            logger.info("ShareGPT4Video 视频描述程序运行结束")
+            logger.info(f"结束时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            logger.info("="*80)
+            
+            # 输出捕获的内容摘要
+            try:
+                stdout_content = stdout_capture.getvalue()
+                stderr_content = stderr_capture.getvalue()
+                
+                if stdout_content and not args.silent:
+                    logger.debug(f"标准输出内容长度: {len(stdout_content)} 字符")
+                if stderr_content and not args.silent:
+                    logger.debug(f"标准错误内容长度: {len(stderr_content)} 字符")
+            except Exception as capture_error:
+                logger.warning(f"获取捕获内容时出错: {capture_error}")
+                
+    except Exception as e:
+        # 处理参数解析等早期错误
+        print(f"启动错误: {str(e)}")
+        return 1
+
+if __name__ == "__main__":
+    exit_code = main()
+    sys.exit(exit_code)

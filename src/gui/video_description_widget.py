@@ -13,6 +13,9 @@ import time
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from datetime import datetime
+from collections import deque
+import cv2
+import numpy as np
 
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
@@ -24,26 +27,109 @@ from PyQt5.QtWidgets import (
     QScrollArea, QTreeWidget, QTreeWidgetItem, QShortcut,
     QDialog, QAbstractItemView, QSizePolicy, QApplication
 )
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize, QMutex
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize, QMutex, QUrl
 from PyQt5.QtGui import QFont, QPixmap, QKeySequence, QImage, QIcon, QMovie
-from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
-from PyQt5.QtMultimediaWidgets import QVideoWidget
-from PyQt5.QtCore import QUrl
+
+class FrameRateMonitor:
+    """帧率监控器"""
+    
+    def __init__(self, window_size=30):
+        self.frame_times = deque(maxlen=window_size)
+        self.last_frame_time = time.time()
+        self.frame_count = 0
+    
+    def record_frame(self):
+        """记录一帧的时间"""
+        current_time = time.time()
+        if self.frame_count > 0:  # 跳过第一帧
+            frame_interval = current_time - self.last_frame_time
+            self.frame_times.append(frame_interval)
+        
+        self.last_frame_time = current_time
+        self.frame_count += 1
+    
+    def get_measured_fps(self):
+        """获取测量的FPS"""
+        if len(self.frame_times) < 2:
+            return 0
+        
+        avg_interval = sum(self.frame_times) / len(self.frame_times)
+        return 1.0 / avg_interval if avg_interval > 0 else 0
+    
+    def reset(self):
+        """重置监控器"""
+        self.frame_times.clear()
+        self.frame_count = 0
+        self.last_frame_time = time.time()
+
+class AdaptivePIDController:
+    """自适应PID控制器"""
+    
+    def __init__(self, kp=0.1, ki=0.01, kd=0.05, target_fps=30.0):
+        self.kp = kp  # 比例增益
+        self.ki = ki  # 积分增益
+        self.kd = kd  # 微分增益
+        self.target_fps = target_fps
+        
+        self.integral = 0.0
+        self.last_error = 0.0
+        self.last_time = time.time()
+    
+    def update(self, measured_fps):
+        """更新控制器并返回调整值"""
+        current_time = time.time()
+        dt = current_time - self.last_time
+        
+        if dt <= 0:
+            return 0
+        
+        # 计算误差
+        error = self.target_fps - measured_fps
+        
+        # 积分项
+        self.integral += error * dt
+        # 限制积分项防止积分饱和
+        self.integral = max(-10, min(10, self.integral))
+        
+        # 微分项
+        derivative = (error - self.last_error) / dt
+        
+        # PID输出
+        output = (self.kp * error + 
+                 self.ki * self.integral + 
+                 self.kd * derivative)
+        
+        self.last_error = error
+        self.last_time = current_time
+        
+        return output
+    
+    def set_target_fps(self, target_fps):
+        """设置目标FPS"""
+        self.target_fps = target_fps
+    
+    def reset(self):
+        """重置控制器"""
+        self.integral = 0.0
+        self.last_error = 0.0
+        self.last_time = time.time()
 
 class VideoDescriptionThread(QThread):
     """视频描述处理线程"""
     
     progress_updated = pyqtSignal(int)  # 进度百分比
     status_updated = pyqtSignal(str)  # 状态信息
+    log_updated = pyqtSignal(str)  # 实时日志更新
     video_completed = pyqtSignal(str, bool, str, str)  # 视频路径, 是否成功, 描述内容, 错误信息
     all_completed = pyqtSignal()
     
-    def __init__(self, videos, description_requirement, model_path, use_action_filter=False, api_config=None):
+    def __init__(self, videos, description_requirement, model_path, use_action_filter=False, generation_mode="random", api_config=None):
         super().__init__()
         self.videos = videos
         self.description_requirement = description_requirement
         self.model_path = model_path
         self.use_action_filter = use_action_filter
+        self.generation_mode = generation_mode  # "deterministic" 或 "random"
         self.api_config = api_config or {}
         self.is_running = True
         self.results = []
@@ -91,46 +177,172 @@ class VideoDescriptionThread(QThread):
     def _process_single_video(self, video_path):
         """处理单个视频"""
         try:
-            # 构建命令
+            # 构建命令 - 使用相对路径，程序在根目录运行
             cmd = [
                 'python',
-                'E:\\Tiany\\text2dance\\src\\algorithms\\video_description\\ShareGPT4Video\\run.py',
+                'src/algorithms/video_description/ShareGPT4Video/run.py',
                 '--model-path', self.model_path,
                 '--video', video_path,
-                '--query', self.description_requirement
+                '--query', self.description_requirement,
+                '--device', 'cuda'
             ]
             
-            # 执行命令
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            # 添加生成控制参数
+            if self.generation_mode == "deterministic":
+                cmd.extend(['--do_sample', 'False', '--num_beams', '1'])
+                self.log_updated.emit("使用确定性生成模式 (do_sample=False, num_beams=1)")
+            else:
+                cmd.extend(['--do_sample', 'True', '--top_p', '0.9'])
+                self.log_updated.emit("使用随机采样生成模式 (do_sample=True, top_p=0.9)")
             
-            if result.returncode == 0:
-                # 从输出中提取描述内容
-                if result.stdout:
-                    output_lines = result.stdout.strip().split('\n')
-                    description = ""
-                    for line in output_lines:
+            # 记录执行的命令
+            cmd_str = ' '.join(f'"{arg}"' if ' ' in arg else arg for arg in cmd)
+            self.log_updated.emit(f"执行命令: {cmd_str}")
+            
+            # 使用Popen实现实时输出捕获
+            # 设置工作目录为项目根目录
+            import os
+            project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+            self.log_updated.emit(f"工作目录: {project_root}")
+            
+            process = subprocess.Popen(
+                cmd, 
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.STDOUT,  # 合并stderr到stdout
+                text=True, 
+                bufsize=1,  # 行缓冲
+                universal_newlines=True,
+                encoding='utf-8',  # 明确指定UTF-8编码
+                errors='replace',   # 替换编码错误字符
+                cwd=project_root  # 设置工作目录
+            )
+            
+            output_lines = []
+            description = ""
+            
+            self.log_updated.emit("开始读取命令输出...")
+            
+            # 实时读取输出
+            while True:
+                if not self.is_running:
+                    process.terminate()
+                    self.log_updated.emit("用户取消处理")
+                    return False, "", "用户取消处理"
+                
+                # 读取一行输出
+                line = process.stdout.readline()
+                
+                if line:
+                    line = line.strip()
+                    if line:
+                        output_lines.append(line)
+                        # 实时发送日志更新
+                        self.log_updated.emit(line)
+                        
+                        # 检查是否是描述结果
                         if "### LM OUTPUT TEXT:" in line:
                             description = line.replace("### LM OUTPUT TEXT:", "").strip()
-                            break
+                            self.log_updated.emit(f"找到描述结果: {description[:100]}...")
+                        elif "LM OUTPUT TEXT:" in line:
+                            description = line.replace("LM OUTPUT TEXT:", "").strip()
+                            self.log_updated.emit(f"找到描述结果: {description[:100]}...")
+                        elif "生成的描述内容:" in line:
+                            # 提取ShareGPT4Video日志中的描述内容
+                            description_part = line.split("生成的描述内容:", 1)[1].strip()
+                            if not description:
+                                description = description_part
+                            else:
+                                description += " " + description_part
+                            self.log_updated.emit(f"找到日志描述: {description_part[:100]}...")
+                
+                # 检查进程是否结束
+                if process.poll() is not None:
+                    # 读取剩余输出
+                    remaining_output = process.stdout.read()
+                    if remaining_output:
+                        remaining_lines = remaining_output.strip().split('\n')
+                        for remaining_line in remaining_lines:
+                            if remaining_line.strip():
+                                output_lines.append(remaining_line.strip())
+                                self.log_updated.emit(remaining_line.strip())
+                    break
+                
+                # 短暂休眠避免CPU占用过高
+                time.sleep(0.01)
+            
+            self.log_updated.emit(f"命令执行完成，返回码: {process.returncode}")
+            
+            # 检查进程返回码
+            if process.returncode == 0:
+                # 如果没有找到标准格式的描述，尝试从输出中提取
+                if not description and output_lines:
+                    self.log_updated.emit("尝试从输出中提取描述...")
                     
-                    if not description:
-                        # 如果没有找到标准输出格式，使用最后一行非空输出
-                        for line in reversed(output_lines):
-                            if line.strip():
-                                description = line.strip()
+                    # 如果已经从日志中提取到了描述，直接使用
+                    if description:
+                        self.log_updated.emit(f"使用日志中提取的描述: {description[:100]}...")
+                    else:
+                        # 首先尝试提取ShareGPT4Video的标准输出格式
+                        description_start = -1
+                        description_end = -1
+                        
+                        for i, line in enumerate(output_lines):
+                            if "=== 视频描述结果 ===" in line:
+                                description_start = i + 1
+                            elif "==================" in line and description_start != -1:
+                                description_end = i
                                 break
-                    
+                        
+                        if description_start != -1 and description_end != -1:
+                            # 提取描述内容
+                            description_lines = output_lines[description_start:description_end]
+                            description = '\n'.join(description_lines).strip()
+                            self.log_updated.emit(f"从标准格式提取到描述: {description[:100]}...")
+                        elif description_start != -1:
+                            # 只找到开始标记，提取到最后
+                            description_lines = output_lines[description_start:]
+                            # 过滤掉日志行和其他无关行
+                            filtered_lines = []
+                            for line in description_lines:
+                                if (not line.startswith('[') and 
+                                    not line.startswith('Loading') and 
+                                    not line.startswith('Downloading') and
+                                    not line.startswith('ShareGPT4Video') and
+                                    not line.startswith('结束时间:') and
+                                    not line.startswith('=') and
+                                    line.strip()):
+                                    filtered_lines.append(line)
+                            description = '\n'.join(filtered_lines).strip()
+                            self.log_updated.emit(f"从部分格式提取到描述: {description[:100]}...")
+                        else:
+                            # 回退到原来的逻辑
+                            for line in reversed(output_lines):
+                                if (line.strip() and 
+                                    not line.startswith('[') and 
+                                    not line.startswith('Loading') and 
+                                    not line.startswith('Downloading') and
+                                    not line.startswith('ShareGPT4Video') and
+                                    not line.startswith('结束时间:') and
+                                    not line.startswith('=')):
+                                    description = line.strip()
+                                    self.log_updated.emit(f"从末尾提取到描述: {description[:100]}...")
+                                    break
+                
+                if description:
+                    self.log_updated.emit("视频描述处理成功")
                     return True, description, ""
                 else:
-                    return False, "", "没有输出内容"
+                    self.log_updated.emit("警告: 未找到有效的描述内容")
+                    return False, "", "未找到有效的描述内容"
             else:
-                error_msg = result.stderr if result.stderr else "未知错误"
+                error_msg = '\n'.join(output_lines) if output_lines else "未知错误"
+                self.log_updated.emit(f"命令执行失败: {error_msg}")
                 return False, "", error_msg
                 
-        except subprocess.TimeoutExpired:
-            return False, "", "处理超时"
         except Exception as e:
-            return False, "", str(e)
+            error_msg = f"处理视频时发生异常: {str(e)}"
+            self.log_updated.emit(error_msg)
+            return False, "", error_msg
     
     def _filter_action_description(self, description):
         """使用API过滤动作描述"""
@@ -172,17 +384,44 @@ class VideoDescriptionWidget(QWidget):
         self.video_results = {}  # 存储视频处理结果
         self.processing_thread = None
         
-        # 媒体播放器
-        self.media_player = QMediaPlayer()
+        # OpenCV视频播放相关
+        self.video_capture = None
+        self.current_video_path = None
+        self.total_frames = 0
+        self.fps = 30
+        self.current_frame = 0
+        self.is_playing = False
+        self.playback_speed = 1.0
         
         # 播放控制状态
         self.is_slider_pressed = False
         self.is_muted = False
         self.previous_volume = 50
+        self._last_click_time = 0  # 防抖机制用的时间戳
+        
+        # 动态帧率调整相关变量
+        self.frame_rate_monitor = FrameRateMonitor(window_size=30)
+        self.pid_controller = AdaptivePIDController(kp=0.1, ki=0.01, kd=0.05)
+        self.adaptive_interval = 33  # 初始间隔（毫秒）
+        self.base_interval = 33  # 基础间隔
+        self.enable_adaptive_playback = True  # 是否启用自适应播放
+        self.adjustment_counter = 0  # 调整计数器
+        
+        # 播放定时器
+        self.play_timer = QTimer()
+        self.play_timer.timeout.connect(self._update_frame)
+        
+        # 自适应调整定时器（每秒调整一次）
+        self.adaptive_timer = QTimer()
+        self.adaptive_timer.timeout.connect(self._adaptive_playback_control)
+        self.adaptive_timer.setInterval(1000)  # 1秒间隔
         
         self._init_ui()
         self._load_cache_config()
         self._connect_signals()
+        
+        # 初始化自适应播放控制状态
+        self._toggle_adaptive_playback(Qt.Checked if self.enable_adaptive_playback else Qt.Unchecked)
     
     def _init_ui(self):
         """初始化用户界面"""
@@ -190,14 +429,21 @@ class VideoDescriptionWidget(QWidget):
         main_layout.setContentsMargins(5, 5, 5, 5)
         
         # 创建三个主要区域
-        left_panel = self._create_left_panel()  # 300px
-        center_panel = self._create_center_panel()  # 400px
-        right_panel = self._create_right_panel()  # 500px
+        left_panel = self._create_left_panel()  # 左侧面板
+        center_panel = self._create_center_panel()  # 中间面板
+        right_panel = self._create_right_panel()  # 右侧面板
         
-        # 添加到主布局
-        main_layout.addWidget(left_panel, 300)
-        main_layout.addWidget(center_panel, 400)
-        main_layout.addWidget(right_panel, 500)
+        # 设置固定宽度，防止布局变化
+        left_panel.setMinimumWidth(300)
+        left_panel.setMaximumWidth(350)
+        center_panel.setMinimumWidth(450)
+        center_panel.setMaximumWidth(650)
+        right_panel.setMinimumWidth(400)
+        
+        # 添加到主布局，使用固定比例
+        main_layout.addWidget(left_panel, 0)  # 固定宽度
+        main_layout.addWidget(center_panel, 0)  # 固定宽度
+        main_layout.addWidget(right_panel, 1)  # 可伸缩
     
     def _create_left_panel(self):
         """创建左侧面板"""
@@ -243,6 +489,20 @@ class VideoDescriptionWidget(QWidget):
         options_group = QGroupBox("功能选项")
         options_layout = QVBoxLayout(options_group)
         
+        # 生成模式选择
+        generation_layout = QHBoxLayout()
+        generation_layout.addWidget(QLabel("生成模式:"))
+        self.generation_mode_combo = QComboBox()
+        self.generation_mode_combo.addItems(["确定性生成", "随机采样生成"])
+        self.generation_mode_combo.setCurrentText("随机采样生成")  # 默认使用随机采样
+        self.generation_mode_combo.setToolTip(
+            "确定性生成: 每次运行结果完全一致，输出稳定\n"
+            "随机采样生成: 每次运行结果略有不同，输出更有创造性"
+        )
+        generation_layout.addWidget(self.generation_mode_combo)
+        generation_layout.addStretch()
+        options_layout.addLayout(generation_layout)
+        
         self.backup_checkbox = QCheckBox("启用备份功能")
         options_layout.addWidget(self.backup_checkbox)
         
@@ -251,6 +511,12 @@ class VideoDescriptionWidget(QWidget):
         
         self.action_filter_checkbox = QCheckBox("只保留动作描述")
         options_layout.addWidget(self.action_filter_checkbox)
+        
+        self.adaptive_playback_checkbox = QCheckBox("启用自适应播放控制")
+        self.adaptive_playback_checkbox.setToolTip("使用PID控制器动态调整播放帧率，提供更平滑的播放体验")
+        self.adaptive_playback_checkbox.setChecked(True)  # 默认启用
+        self.adaptive_playback_checkbox.stateChanged.connect(self._toggle_adaptive_playback)
+        options_layout.addWidget(self.adaptive_playback_checkbox)
         
         layout.addWidget(options_group)
         
@@ -285,11 +551,19 @@ class VideoDescriptionWidget(QWidget):
         video_group = QGroupBox("视频播放")
         video_layout = QVBoxLayout(video_group)
         
-        # 视频播放器
-        self.video_widget = QVideoWidget()
-        self.video_widget.setMinimumHeight(300)
-        self.media_player.setVideoOutput(self.video_widget)
-        video_layout.addWidget(self.video_widget)
+        # 视频显示标签
+        self.video_label = QLabel()
+        self.video_label.setMinimumHeight(300)
+        self.video_label.setMaximumHeight(400)  # 设置最大高度
+        self.video_label.setMinimumWidth(400)
+        self.video_label.setMaximumWidth(600)   # 设置最大宽度
+        self.video_label.setStyleSheet("border: 1px solid gray; background-color: black;")
+        self.video_label.setAlignment(Qt.AlignCenter)
+        self.video_label.setText("请选择视频文件")
+        self.video_label.setScaledContents(False)  # 关闭自动缩放内容
+        # 设置尺寸策略，防止自动调整大小
+        self.video_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        video_layout.addWidget(self.video_label)
         
         # 播放控制
         controls_layout = QHBoxLayout()
@@ -446,11 +720,9 @@ class VideoDescriptionWidget(QWidget):
     
     def _connect_signals(self):
         """连接信号"""
-        # 媒体播放器信号
-        self.media_player.stateChanged.connect(self._media_state_changed)
-        self.media_player.positionChanged.connect(self._position_changed)
-        self.media_player.durationChanged.connect(self._duration_changed)
-        self.media_player.error.connect(self._media_error)
+        # 注意：播放控制按钮的信号已在_create_center_panel中连接，这里不再重复连接
+        # 只连接其他必要的信号
+        pass
     
     def _upload_video_files(self):
         """上传视频文件"""
@@ -511,11 +783,51 @@ class VideoDescriptionWidget(QWidget):
         self._show_video_result(video_path)
     
     def _play_video(self, video_path):
-        """播放视频"""
-        if os.path.exists(video_path):
-            self.media_player.setMedia(QMediaContent(QUrl.fromLocalFile(video_path)))
-            self.media_player.play()
-            self.play_btn.setText("⏸")
+        """加载视频（不自动播放）"""
+        try:
+            if not os.path.exists(video_path):
+                self._log_message(f"视频文件不存在: {video_path}")
+                return
+            
+            # 检查文件大小
+            file_size = os.path.getsize(video_path)
+            if file_size == 0:
+                self._log_message(f"视频文件为空: {video_path}")
+                return
+            
+            # 停止当前播放
+            self._stop_video()
+            
+            # 打开新视频
+            self.video_capture = cv2.VideoCapture(video_path)
+            if not self.video_capture.isOpened():
+                self._log_message(f"无法打开视频文件: {video_path}")
+                return
+            
+            # 获取视频信息
+            self.current_video_path = video_path
+            self.total_frames = int(self.video_capture.get(cv2.CAP_PROP_FRAME_COUNT))
+            self.fps = self.video_capture.get(cv2.CAP_PROP_FPS)
+            if self.fps <= 0:
+                self.fps = 30  # 默认帧率
+            
+            # 设置进度条范围
+            self.position_slider.setRange(0, self.total_frames - 1)
+            self.current_frame = 0
+            
+            # 显示第一帧（不自动播放）
+            self._show_frame(0)
+            
+            # 重置播放状态
+            self.is_playing = False
+            self.play_btn.setText("▶")
+            
+            self._log_message(f"成功加载视频: {os.path.basename(video_path)}")
+            
+        except Exception as e:
+            self._log_message(f"播放视频时发生错误: {str(e)}")
+            import traceback
+            self._log_message(f"详细错误信息: {traceback.format_exc()}")
     
     def _show_video_result(self, video_path):
         """显示视频结果"""
@@ -545,57 +857,176 @@ class VideoDescriptionWidget(QWidget):
     
     def _toggle_playback(self):
         """切换播放状态"""
-        if self.media_player.state() == QMediaPlayer.PlayingState:
-            self.media_player.pause()
+        # 防抖机制：检查是否在短时间内重复点击
+        current_time = time.time()
+        if hasattr(self, '_last_click_time') and (current_time - self._last_click_time) < 0.3:
+            self._log_message("按钮点击过快，忽略此次点击")
+            return
+        self._last_click_time = current_time
+        
+        self._log_message(f"播放按钮被点击，当前状态: {'播放中' if self.is_playing else '暂停'}")
+        
+        if self.video_capture is None:
+            self._log_message("错误：没有加载视频，请先选择一个视频")
+            return
+            
+        if self.is_playing:
+            self._pause_video()
+            self._log_message("视频已暂停")
         else:
-            self.media_player.play()
+            self._start_playback()
+            if self.is_playing:
+                self._log_message("视频开始播放")
+            else:
+                self._log_message("播放失败")
     
-    def _media_state_changed(self, state):
-        """媒体状态改变"""
-        if state == QMediaPlayer.PlayingState:
+    def _start_playback(self):
+        """开始播放（使用动态帧率调整）"""
+        if self.video_capture is not None and self.video_capture.isOpened():
+            self.is_playing = True
             self.play_btn.setText("⏸")
+            
+            # 初始化动态帧率调整系统
+            target_fps = self.fps * self.playback_speed
+            self.pid_controller.set_target_fps(target_fps)
+            self.pid_controller.reset()
+            self.frame_rate_monitor.reset()
+            
+            # 计算基础播放间隔
+            self.base_interval = int(1000 / self.fps / self.playback_speed)
+            self.adaptive_interval = self.base_interval
+            self.adjustment_counter = 0
+            
+            # 启动播放定时器
+            self.play_timer.start(self.adaptive_interval)
+            
+            # 启动自适应调整定时器（如果启用）
+            if self.enable_adaptive_playback:
+                self.adaptive_timer.start()
+            
+            self._log_message(f"开始播放，视频FPS: {self.fps}, 目标FPS: {target_fps:.1f}, 播放速度: {self.playback_speed}x, 自适应播放: {'启用' if self.enable_adaptive_playback else '禁用'}")
         else:
+            self._log_message("无法开始播放：视频未加载或已关闭")
+            # 重置按钮状态
+            self.is_playing = False
             self.play_btn.setText("▶")
     
-    def _position_changed(self, position):
-        """播放位置改变"""
-        # 只有在用户没有拖动进度条时才更新
-        if not self.is_slider_pressed:
-            self.position_slider.setValue(position)
+    def _pause_video(self):
+        """暂停播放"""
+        self.is_playing = False
+        self.play_btn.setText("▶")
+        self.play_timer.stop()
+        self.adaptive_timer.stop()
+    
+    def _stop_video(self):
+        """停止播放"""
+        self.is_playing = False
+        self.play_btn.setText("▶")
+        self.play_timer.stop()
+        self.adaptive_timer.stop()
+        if self.video_capture is not None:
+            self.video_capture.release()
+            self.video_capture = None
+        self.current_frame = 0
+        self.total_frames = 0
+    
+    def _update_frame(self):
+        """更新帧显示（带帧率监控的顺序播放）"""
+        if not self.is_playing or self.video_capture is None:
+            return
         
-        # 更新时间显示
-        duration = self.media_player.duration()
-        if duration > 0:
-            current_time = self._format_time(position)
-            total_time = self._format_time(duration)
+        try:
+            # 记录帧时间（用于帧率监控）
+            if self.enable_adaptive_playback:
+                self.frame_rate_monitor.record_frame()
+            
+            # 读取下一帧
+            ret, frame = self.video_capture.read()
+            if ret:
+                self.current_frame += 1
+                self._display_frame(frame)
+                
+                # 更新进度条（如果用户没有在拖动）
+                if not self.is_slider_pressed:
+                    self.position_slider.setValue(self.current_frame)
+                
+                # 更新时间显示
+                self._update_time_display()
+            else:
+                # 播放完毕
+                self._log_message("视频播放完毕")
+                self._pause_video()
+                self.current_frame = 0
+                self._show_frame(0)
+                
+        except Exception as e:
+            self._log_message(f"更新帧时发生错误: {str(e)}")
+            self._pause_video()
+    
+    def _display_frame(self, frame):
+        """显示帧"""
+        try:
+            # 转换颜色格式
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            h, w, ch = rgb_frame.shape
+            bytes_per_line = ch * w
+            
+            # 创建QImage
+            qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
+            
+            # 获取固定的显示区域大小
+            display_width = 400
+            display_height = 300
+            
+            # 缩放图像以适应固定尺寸，保持宽高比
+            scaled_pixmap = QPixmap.fromImage(qt_image).scaled(
+                display_width, display_height, Qt.KeepAspectRatio, Qt.SmoothTransformation
+            )
+            
+            # 显示图像
+            self.video_label.setPixmap(scaled_pixmap)
+            
+        except Exception as e:
+            self._log_message(f"显示帧时发生错误: {str(e)}")
+    
+    def _show_frame(self, frame_number):
+        """显示指定帧"""
+        if self.video_capture is None:
+            return
+        
+        try:
+            # 设置帧位置
+            self.video_capture.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+            ret, frame = self.video_capture.read()
+            
+            if ret:
+                self.current_frame = frame_number
+                self._display_frame(frame)
+                self._update_time_display()
+            
+        except Exception as e:
+            self._log_message(f"显示帧时发生错误: {str(e)}")
+    
+    def _update_time_display(self):
+        """更新时间显示"""
+        if self.fps > 0:
+            current_seconds = self.current_frame / self.fps
+            total_seconds = self.total_frames / self.fps
+            
+            current_time = self._format_time(int(current_seconds * 1000))
+            total_time = self._format_time(int(total_seconds * 1000))
+            
             self.time_label.setText(f"{current_time} / {total_time}")
     
-    def _duration_changed(self, duration):
-        """播放时长改变"""
-        self.position_slider.setRange(0, duration)
+
     
     def _set_position(self, position):
         """设置播放位置"""
-        self.media_player.setPosition(position)
+        if self.video_capture is not None:
+            self.current_frame = position
+            self._show_frame(position)
     
-    def _media_error(self, error):
-        """媒体播放错误处理"""
-        error_messages = {
-            QMediaPlayer.NoError: "无错误",
-            QMediaPlayer.ResourceError: "媒体资源错误",
-            QMediaPlayer.FormatError: "格式错误",
-            QMediaPlayer.NetworkError: "网络错误",
-            QMediaPlayer.AccessDeniedError: "访问被拒绝",
-            QMediaPlayer.ServiceMissingError: "服务缺失错误"
-        }
-        
-        error_msg = error_messages.get(error, f"未知错误: {error}")
-        self._log_message(f"视频播放错误: {error_msg}")
-        
-        # 如果是格式错误，提示用户
-        if error == QMediaPlayer.FormatError:
-            QMessageBox.warning(self, "播放错误", 
-                               "视频格式不支持或文件损坏，请尝试其他视频文件。")
+
     
     def _format_time(self, ms):
         """格式化时间"""
@@ -606,16 +1037,17 @@ class VideoDescriptionWidget(QWidget):
     
     def _backward_10s(self):
         """后退10秒"""
-        current_position = self.media_player.position()
-        new_position = max(0, current_position - 10000)  # 10秒 = 10000毫秒
-        self.media_player.setPosition(new_position)
+        if self.video_capture is not None and self.fps > 0:
+            frames_to_skip = int(10 * self.fps)  # 10秒对应的帧数
+            new_frame = max(0, self.current_frame - frames_to_skip)
+            self._show_frame(new_frame)
     
     def _forward_10s(self):
         """前进10秒"""
-        current_position = self.media_player.position()
-        duration = self.media_player.duration()
-        new_position = min(duration, current_position + 10000)  # 10秒 = 10000毫秒
-        self.media_player.setPosition(new_position)
+        if self.video_capture is not None and self.fps > 0:
+            frames_to_skip = int(10 * self.fps)  # 10秒对应的帧数
+            new_frame = min(self.total_frames - 1, self.current_frame + frames_to_skip)
+            self._show_frame(new_frame)
     
     def _slider_pressed(self):
         """进度条按下"""
@@ -625,11 +1057,13 @@ class VideoDescriptionWidget(QWidget):
         """进度条释放"""
         self.is_slider_pressed = False
         # 设置新位置
-        self.media_player.setPosition(self.position_slider.value())
+        if self.video_capture is not None:
+            new_frame = self.position_slider.value()
+            self._show_frame(new_frame)
     
     def _set_volume(self, volume):
         """设置音量"""
-        self.media_player.setVolume(volume)
+        # OpenCV不支持音频，这里只更新UI显示
         self.volume_label.setText(f"{volume}%")
         
         # 更新静音按钮状态
@@ -645,7 +1079,6 @@ class VideoDescriptionWidget(QWidget):
         if self.is_muted:
             # 取消静音
             self.volume_slider.setValue(self.previous_volume)
-            self.media_player.setVolume(self.previous_volume)
             self.volume_label.setText(f"{self.previous_volume}%")
             self.mute_btn.setText("🔊")
             self.is_muted = False
@@ -653,16 +1086,94 @@ class VideoDescriptionWidget(QWidget):
             # 静音
             self.previous_volume = self.volume_slider.value()
             self.volume_slider.setValue(0)
-            self.media_player.setVolume(0)
             self.volume_label.setText("0%")
             self.mute_btn.setText("🔇")
             self.is_muted = True
     
+    def _adaptive_playback_control(self):
+        """自适应播放控制（PID控制器核心逻辑）"""
+        if not self.is_playing or not self.enable_adaptive_playback:
+            return
+        
+        try:
+            # 获取测量的FPS
+            measured_fps = self.frame_rate_monitor.get_measured_fps()
+            
+            if measured_fps <= 0:
+                return  # 数据不足，跳过调整
+            
+            # 使用PID控制器计算调整值
+            adjustment = self.pid_controller.update(measured_fps)
+            
+            # 计算新的播放间隔
+            # adjustment为正值表示需要加快播放（减少间隔）
+            # adjustment为负值表示需要减慢播放（增加间隔）
+            new_interval = self.adaptive_interval - int(adjustment)
+            
+            # 限制调整范围（防止过度调整）
+            min_interval = int(self.base_interval * 0.7)  # 最快不超过基础速度的1.43倍
+            max_interval = int(self.base_interval * 1.5)  # 最慢不超过基础速度的0.67倍
+            new_interval = max(min_interval, min(max_interval, new_interval))
+            
+            # 只有当间隔变化超过阈值时才调整（避免频繁微调）
+            interval_change = abs(new_interval - self.adaptive_interval)
+            if interval_change >= 2:  # 至少2毫秒的变化
+                self.adaptive_interval = new_interval
+                self.play_timer.setInterval(self.adaptive_interval)
+                self.adjustment_counter += 1
+                
+                # 每10次调整记录一次日志（避免日志过多）
+                if self.adjustment_counter % 10 == 0:
+                    target_fps = self.pid_controller.target_fps
+                    self._log_message(f"自适应调整 #{self.adjustment_counter}: 测量FPS={measured_fps:.1f}, 目标FPS={target_fps:.1f}, 新间隔={self.adaptive_interval}ms")
+                    
+        except Exception as e:
+            self._log_message(f"自适应播放控制错误: {str(e)}")
+    
+    def _toggle_adaptive_playback(self, state):
+        """切换自适应播放控制"""
+        self.enable_adaptive_playback = state == Qt.Checked
+        
+        if self.enable_adaptive_playback:
+            self._log_message("自适应播放控制已启用")
+            # 如果正在播放，重新初始化自适应控制
+            if self.is_playing and self.fps > 0:
+                target_fps = self.fps * self.playback_speed
+                self.pid_controller.set_target_fps(target_fps)
+                self.frame_rate_monitor.reset()
+                self.adaptive_timer.start(1000)  # 每秒调整一次
+        else:
+            self._log_message("自适应播放控制已禁用")
+            # 停止自适应调整，回到传统模式
+            self.adaptive_timer.stop()
+            if self.is_playing and self.fps > 0:
+                # 使用基础间隔
+                self.play_timer.setInterval(self.base_interval)
+    
     def _set_playback_rate(self, rate_text):
-        """设置播放速度"""
+        """设置播放速度（支持动态帧率调整）"""
         try:
             rate = float(rate_text.replace('x', ''))
-            self.media_player.setPlaybackRate(rate)
+            self.playback_speed = rate
+            
+            # 如果正在播放，更新播放控制
+            if self.is_playing and self.fps > 0:
+                # 重新计算基础间隔
+                self.base_interval = int(1000 / self.fps / self.playback_speed)
+                self.adaptive_interval = self.base_interval
+                
+                if self.enable_adaptive_playback:
+                    # 更新PID控制器的目标FPS
+                    target_fps = self.fps * self.playback_speed
+                    self.pid_controller.set_target_fps(target_fps)
+                    # 重置帧率监控器
+                    self.frame_rate_monitor.reset()
+                    self._log_message(f"播放速度已设置为 {self.playback_speed}x，目标FPS: {target_fps:.1f}，基础间隔: {self.base_interval}ms")
+                else:
+                    # 传统模式：直接设置定时器间隔
+                    self.play_timer.setInterval(self.base_interval)
+                    self._log_message(f"播放速度已调整为 {self.playback_speed}x，定时器间隔: {self.base_interval}ms")
+                
         except ValueError:
             pass  # 忽略无效的速度值
     
@@ -685,16 +1196,21 @@ class VideoDescriptionWidget(QWidget):
         self.log_text.clear()
         self.progress_bar.setValue(0)
         
+        # 获取生成模式
+        generation_mode = "deterministic" if self.generation_mode_combo.currentText() == "确定性生成" else "random"
+        
         # 启动处理线程
         self.processing_thread = VideoDescriptionThread(
             self.current_videos,
             description_requirement,
             self.model_path,
-            self.action_filter_checkbox.isChecked()
+            self.action_filter_checkbox.isChecked(),
+            generation_mode
         )
         
         self.processing_thread.progress_updated.connect(self.progress_bar.setValue)
         self.processing_thread.status_updated.connect(self._log_message)
+        self.processing_thread.log_updated.connect(self._log_message)
         self.processing_thread.video_completed.connect(self._on_video_completed)
         self.processing_thread.all_completed.connect(self._on_all_completed)
         
@@ -798,10 +1314,27 @@ class VideoDescriptionWidget(QWidget):
     def _log_message(self, message):
         """记录日志消息"""
         timestamp = datetime.now().strftime('%H:%M:%S')
-        self.log_text.append(f"[{timestamp}] {message}")
+        formatted_message = f"[{timestamp}] {message}"
+        self.log_text.append(formatted_message)
+        
+        # 自动滚动到底部
+        scrollbar = self.log_text.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
         
         # 发送状态信号
         self.status_changed.emit(message)
+    
+    def closeEvent(self, event):
+        """窗口关闭事件"""
+        # 停止视频播放并释放资源
+        self._stop_video()
+        
+        # 停止处理线程
+        if self.processing_thread and self.processing_thread.isRunning():
+            self.processing_thread.stop()
+            self.processing_thread.wait()
+        
+        event.accept()
     
     def _export_results(self, format_type):
         """导出结果"""

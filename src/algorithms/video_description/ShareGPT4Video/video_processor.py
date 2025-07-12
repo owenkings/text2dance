@@ -30,7 +30,7 @@ class Config:
         self.enable_memory_check = True
         self.enable_backup = True
         self.max_workers = 4
-        self.timeout_seconds = 300
+        # 移除超时限制，因为不同视频处理时间差异很大
         self.model_path = "Lin-Chen/sharegpt4video-8b"
         self.query_text = "Begin by providing a general overview of the person's current action (e.g., walking, sitting, interacting) visible in the video footage. Then proceed with a detailed analysis focusing specifically on the physical movements and body positioning within the video frame. For the upper body, describe the position and movement patterns of the arms, hands, shoulders and torso. For the lower body, detail the positioning and motion of the legs, feet and overall balance dynamics. The description must remain strictly focused on observable physical actions, deliberately excluding any mention of facial expressions, clothing details or environmental elements outside the video frame boundaries."
         self.supported_exts = ('.mp4', '.avi', '.mov')

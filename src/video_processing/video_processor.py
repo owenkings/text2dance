@@ -84,22 +84,51 @@ class VideoProcessor:
                 logger.error(f"视频文件不存在: {video_path}")
                 return None
             
+            # 检查文件大小
+            file_size = Path(video_path).stat().st_size
+            if file_size == 0:
+                logger.error(f"视频文件为空: {video_path}")
+                return None
+            
+            # 检查文件格式
+            supported_formats = ['.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.m4v', '.webm']
+            file_ext = Path(video_path).suffix.lower()
+            if file_ext not in supported_formats:
+                logger.warning(f"可能不支持的视频格式: {file_ext}")
+            
             # 使用OpenCV获取基本信息
             cap = cv2.VideoCapture(video_path)
             if not cap.isOpened():
-                logger.error(f"无法打开视频文件: {video_path}")
+                # 尝试使用FFMPEG后端
+                cap = cv2.VideoCapture(video_path, cv2.CAP_FFMPEG)
+                if not cap.isOpened():
+                    logger.error(f"无法打开视频文件: {video_path}")
+                    return None
+            
+            # 验证视频流
+            ret, test_frame = cap.read()
+            if not ret or test_frame is None:
+                cap.release()
+                logger.error(f"视频文件无法读取帧数据: {video_path}")
                 return None
+            
+            # 重置到开始位置
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
             
             fps = cap.get(cv2.CAP_PROP_FPS)
             frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            
+            # 验证获取的信息
+            if fps <= 0 or frame_count <= 0 or width <= 0 or height <= 0:
+                cap.release()
+                logger.error(f"视频信息无效: fps={fps}, frames={frame_count}, size={width}x{height}")
+                return None
+            
             duration = frame_count / fps if fps > 0 else 0
             
             cap.release()
-            
-            # 获取文件大小
-            file_size = Path(video_path).stat().st_size
             
             info = {
                 'path': video_path,

@@ -25,11 +25,60 @@ from PyQt5.QtWidgets import (
     QDialog, QAbstractItemView, QSizePolicy
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize, QMutex
-from PyQt5.QtGui import QFont, QPixmap, QKeySequence, QImage, QIcon, QMovie
+from PyQt5.QtGui import QFont, QPixmap, QKeySequence, QImage, QIcon, QMovie, QColor
 
 from ..algorithms.algorithm_manager import AlgorithmManager, AlgorithmType
 from ..video_processing.video_processor import VideoProcessor
 from ..utils.logger import Logger
+
+
+def validate_video_file(video_path: str) -> tuple[bool, str]:
+    """验证视频文件的有效性
+    
+    Args:
+        video_path: 视频文件路径
+        
+    Returns:
+        tuple: (是否有效, 错误信息)
+    """
+    try:
+        # 检查文件是否存在
+        if not Path(video_path).exists():
+            return False, "视频文件不存在"
+        
+        # 检查文件大小
+        file_size = Path(video_path).stat().st_size
+        if file_size == 0:
+            return False, "视频文件为空"
+        
+        if file_size < 1024:  # 小于1KB可能是损坏的文件
+            return False, "视频文件过小，可能已损坏"
+        
+        # 检查文件扩展名
+        supported_formats = ['.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.m4v', '.webm', '.mpg', '.mpeg']
+        file_ext = Path(video_path).suffix.lower()
+        if file_ext not in supported_formats:
+            return False, f"不支持的视频格式: {file_ext}"
+        
+        # 尝试打开视频文件进行基本验证
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            # 尝试FFMPEG后端
+            cap = cv2.VideoCapture(video_path, cv2.CAP_FFMPEG)
+            if not cap.isOpened():
+                return False, "无法打开视频文件，可能文件已损坏或格式不兼容"
+        
+        # 尝试读取第一帧
+        ret, frame = cap.read()
+        cap.release()
+        
+        if not ret or frame is None:
+            return False, "视频文件无法读取帧数据，可能已损坏"
+        
+        return True, ""
+        
+    except Exception as e:
+        return False, f"验证视频文件时发生错误: {str(e)}"
 
 class VideoProcessingThread(QThread):
     """视频处理工作线程"""
@@ -692,14 +741,28 @@ class VideoEditWidget(QWidget):
         center_panel = self._create_video_preview_panel()
         main_layout.addWidget(center_panel)
         
-        # 右侧：指令列表面板
-        right_panel = self._create_command_list_panel()
-        main_layout.addWidget(right_panel)
+        # 右侧：控制面板（包含算法选择等）
+        control_panel = self._create_control_panel()
+        main_layout.addWidget(control_panel)
+        
+        # 底部：指令列表面板
+        command_panel = self._create_command_list_panel()
+        
+        # 使用垂直分割器组合中间和底部面板
+        center_splitter = QSplitter(Qt.Vertical)
+        center_splitter.addWidget(center_panel)
+        center_splitter.addWidget(command_panel)
+        center_splitter.setStretchFactor(0, 2)  # 视频预览占更多空间
+        center_splitter.setStretchFactor(1, 1)  # 指令列表占较少空间
+        
+        # 重新布局
+        main_layout.takeAt(1)  # 移除center_panel
+        main_layout.insertWidget(1, center_splitter)
         
         # 设置布局比例 (1:2:1)
         main_layout.setStretchFactor(left_panel, 1)
-        main_layout.setStretchFactor(center_panel, 2)
-        main_layout.setStretchFactor(right_panel, 1)
+        main_layout.setStretchFactor(center_splitter, 2)
+        main_layout.setStretchFactor(control_panel, 1)
     
     def _create_video_list_panel(self) -> QWidget:
         """创建视频列表面板"""
@@ -1493,11 +1556,36 @@ class VideoEditWidget(QWidget):
             self,
             "选择视频文件",
             "",
-            "视频文件 (*.mp4 *.avi *.mov *.mkv *.wmv *.flv);;所有文件 (*)"
+            "视频文件 (*.mp4 *.avi *.mov *.mkv *.flv *.wmv *.m4v *.webm *.mpg *.mpeg);;所有文件 (*)"
         )
         
+        valid_files = []
+        invalid_files = []
+        
         for file_path in file_paths:
-            self._add_video_to_list(file_path)
+            # 验证视频文件
+            is_valid, error_msg = validate_video_file(file_path)
+            if is_valid:
+                valid_files.append(file_path)
+                self._add_video_to_list(file_path)
+            else:
+                invalid_files.append((file_path, error_msg))
+                self.logger.warning(f"跳过无效视频文件: {file_path}, 错误: {error_msg}")
+        
+        # 显示结果
+        if valid_files:
+            self.logger.info(f"成功添加 {len(valid_files)} 个视频文件")
+        
+        if invalid_files:
+            error_details = "\n".join([f"• {Path(f[0]).name}: {f[1]}" for f in invalid_files[:5]])
+            if len(invalid_files) > 5:
+                error_details += f"\n... 还有 {len(invalid_files) - 5} 个文件"
+            
+            QMessageBox.warning(
+                self, 
+                "部分文件无效", 
+                f"以下 {len(invalid_files)} 个文件无法添加:\n\n{error_details}"
+            )
     
     def _add_video_to_list(self, video_path: str):
         """添加视频到列表"""
@@ -1566,13 +1654,37 @@ class VideoEditWidget(QWidget):
             if self.current_video_path:
                 self._save_current_video_operations()
             
+            # 验证视频文件
+            is_valid, error_msg = validate_video_file(video_path)
+            if not is_valid:
+                raise ValueError(f"视频文件验证失败: {error_msg}")
+            
             self.current_video_path = video_path
             self.current_video_info = self.video_processor.get_video_info(video_path)
             
+            if not self.current_video_info:
+                raise RuntimeError("无法获取视频信息，文件可能已损坏")
+            
             # 初始化OpenCV视频捕获对象
-            if hasattr(self, 'video_capture'):
+            if hasattr(self, 'video_capture') and self.video_capture:
                 self.video_capture.release()
+            
+            # 尝试多种方式打开视频
             self.video_capture = cv2.VideoCapture(video_path)
+            if not self.video_capture.isOpened():
+                # 尝试使用FFMPEG后端
+                self.video_capture = cv2.VideoCapture(video_path, cv2.CAP_FFMPEG)
+                if not self.video_capture.isOpened():
+                    raise RuntimeError("无法打开视频文件，可能是编码格式不支持或文件已损坏")
+            
+            # 验证视频流
+            ret, test_frame = self.video_capture.read()
+            if not ret or test_frame is None:
+                self.video_capture.release()
+                raise RuntimeError("视频文件无法读取帧数据，可能已损坏")
+            
+            # 重置到开始位置
+            self.video_capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
             
             if self.current_video_info and self.video_capture.isOpened():
                 # 更新预览标签
@@ -1618,21 +1730,50 @@ class VideoEditWidget(QWidget):
     def _show_frame(self, frame_number):
         """显示指定帧"""
         if not hasattr(self, 'video_capture') or not self.video_capture.isOpened():
+            self.logger.warning("视频捕获对象未初始化或已关闭")
             return
             
         try:
+            # 验证帧号有效性
+            if not self.current_video_info:
+                self.logger.error("视频信息不可用")
+                return
+                
+            total_frames = self.current_video_info.get('frame_count', 0)
+            if frame_number < 0 or frame_number >= total_frames:
+                self.logger.error(f"无效的帧号: {frame_number}, 总帧数: {total_frames}")
+                return
+            
             # 设置视频位置到指定帧
-            self.video_capture.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+            success = self.video_capture.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+            if not success:
+                self.logger.error(f"无法设置视频位置到帧 {frame_number}")
+                return
+                
             ret, frame = self.video_capture.read()
             
-            if ret:
+            if ret and frame is not None:
+                # 检查帧数据有效性
+                if frame.size == 0:
+                    self.logger.error(f"帧 {frame_number} 数据为空")
+                    return
+                    
                 # 转换BGR到RGB
                 rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 h, w, ch = rgb_frame.shape
+                
+                if h <= 0 or w <= 0 or ch <= 0:
+                    self.logger.error(f"无效的帧尺寸: {w}x{h}x{ch}")
+                    return
+                    
                 bytes_per_line = ch * w
                 
                 # 创建QImage
                 qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
+                
+                if qt_image.isNull():
+                    self.logger.error("创建QImage失败")
+                    return
                 
                 # 获取预览标签的实际大小
                 label_size = self.preview_label.size()
@@ -1642,14 +1783,27 @@ class VideoEditWidget(QWidget):
                         label_size, Qt.KeepAspectRatio, Qt.SmoothTransformation
                     )
                     
+                    if scaled_pixmap.isNull():
+                        self.logger.error("图像缩放失败")
+                        return
+                    
                     # 显示图像
                     self.preview_label.setPixmap(scaled_pixmap)
                 else:
                     # 如果标签尺寸无效，使用原始尺寸
-                    self.preview_label.setPixmap(QPixmap.fromImage(qt_image))
+                    original_pixmap = QPixmap.fromImage(qt_image)
+                    if not original_pixmap.isNull():
+                        self.preview_label.setPixmap(original_pixmap)
+                    else:
+                        self.logger.error("创建原始尺寸Pixmap失败")
+            else:
+                self.logger.error(f"无法读取帧 {frame_number}")
                 
         except Exception as e:
             self.logger.error(f"显示帧失败: {e}")
+            # 显示错误信息给用户
+            self.preview_label.clear()
+            self.preview_label.setText(f"视频播放错误: {str(e)}")
     
     def _clear_preview(self):
         """清空预览"""
@@ -2236,14 +2390,23 @@ class VideoEditWidget(QWidget):
         try:
             file_path, _ = QFileDialog.getOpenFileName(
                 self, "选择视频文件", "", 
-                "视频文件 (*.mp4 *.avi *.mov *.mkv *.flv *.wmv);;所有文件 (*)"
+                "视频文件 (*.mp4 *.avi *.mov *.mkv *.flv *.wmv *.m4v *.webm *.mpg *.mpeg);;所有文件 (*)"
             )
             
             if file_path:
+                # 验证视频文件
+                is_valid, error_msg = validate_video_file(file_path)
+                if not is_valid:
+                    QMessageBox.warning(self, "视频文件错误", f"选择的视频文件无效:\n{error_msg}")
+                    self.logger.warning(f"选择的视频文件无效: {file_path}, 错误: {error_msg}")
+                    return
+                
                 self.video_path_input.setText(file_path)
+                self.logger.info(f"选择视频文件: {file_path}")
                 
         except Exception as e:
             self.logger.error(f"浏览视频文件失败: {e}")
+            QMessageBox.critical(self, "错误", f"浏览视频文件时发生错误:\n{str(e)}")
     
     def _browse_output_dir(self):
         """浏览输出目录"""
@@ -2267,17 +2430,26 @@ class VideoEditWidget(QWidget):
                 
                 # 更新显示
                 info_text = f"文件: {os.path.basename(path)}\n"
-                info_text += f"分辨率: {video_info.get('width', 'Unknown')}x{video_info.get('height', 'Unknown')}\n"
-                info_text += f"帧率: {video_info.get('fps', 'Unknown')} fps\n"
-                info_text += f"时长: {video_info.get('duration', 'Unknown')} 秒\n"
-                info_text += f"总帧数: {video_info.get('frame_count', 'Unknown')}"
+                
+                if video_info:
+                    info_text += f"分辨率: {video_info.get('width', 'Unknown')}x{video_info.get('height', 'Unknown')}\n"
+                    info_text += f"帧率: {video_info.get('fps', 'Unknown')} fps\n"
+                    info_text += f"时长: {video_info.get('duration', 'Unknown')} 秒\n"
+                    info_text += f"总帧数: {video_info.get('frame_count', 'Unknown')}"
+                    
+                    # 更新预览滑块
+                    frame_count = video_info.get('frame_count', 0)
+                    self.preview_frame_slider.setMaximum(max(0, frame_count - 1))
+                    self.frame_info_label.setText(f"帧: 0/{frame_count}")
+                else:
+                    info_text += "视频信息获取失败\n"
+                    info_text += "可能的原因: 文件损坏、格式不支持或编解码器缺失"
+                    
+                    # 重置预览滑块
+                    self.preview_frame_slider.setMaximum(0)
+                    self.frame_info_label.setText("帧: 0/0")
                 
                 self.video_info_label.setText(info_text)
-                
-                # 更新预览滑块
-                frame_count = video_info.get('frame_count', 0)
-                self.preview_frame_slider.setMaximum(max(0, frame_count - 1))
-                self.frame_info_label.setText(f"帧: 0/{frame_count}")
                 
             else:
                 self.current_video_path = None
@@ -2288,6 +2460,12 @@ class VideoEditWidget(QWidget):
                 
         except Exception as e:
             self.logger.error(f"处理视频路径变化失败: {e}")
+            # 重置界面状态
+            self.current_video_path = None
+            self.current_video_info = None
+            self.video_info_label.setText(f"视频加载失败: {str(e)}")
+            self.preview_frame_slider.setMaximum(0)
+            self.frame_info_label.setText("帧: 0/0")
     
     def _on_algorithm_type_changed(self, algorithm_type: str):
         """算法类型变化"""
@@ -2520,10 +2698,78 @@ class VideoEditWidget(QWidget):
     def _update_result_tree(self, result: dict):
         """更新结果树"""
         try:
-            # TODO: 实现结果树更新
-            pass
+            # 创建根节点
+            root_item = QTreeWidgetItem(self.result_tree)
+            algorithm_name = result.get('algorithm_name', '未知算法')
+            input_path = result.get('input_path', '未知路径')
+            root_item.setText(0, f"{algorithm_name} - {Path(input_path).name}")
+            
+            # 根据算法类型处理结果
+            algorithm_type = result.get('algorithm_type')
+            if algorithm_type == 'VIDEO_DESCRIPTION' and algorithm_name == 'ShareGPT4Video':
+                self._add_sharegpt4video_result(root_item, result)
+            else:
+                self._add_general_result(root_item, result)
+                
+            # 展开根节点
+            root_item.setExpanded(True)
+            
         except Exception as e:
             self.logger.error(f"更新结果树失败: {e}")
+    
+    def _add_sharegpt4video_result(self, parent_item: QTreeWidgetItem, result: dict):
+        """添加ShareGPT4Video结果"""
+        try:
+            # 显示处理日志（包含警告信息）
+            processing_log = result.get('processing_log', '')
+            if processing_log:
+                log_item = QTreeWidgetItem(parent_item)
+                log_item.setText(0, "处理日志")
+                
+                # 按行分割日志并添加子项
+                log_lines = processing_log.strip().split('\n')
+                for line in log_lines:
+                    if line.strip():
+                        line_item = QTreeWidgetItem(log_item)
+                        line_item.setText(0, line.strip())
+                        
+                        # 高亮警告信息
+                        if 'WARNING' in line or 'warning' in line:
+                            line_item.setForeground(0, QColor(255, 165, 0))  # 橙色
+                        elif 'ERROR' in line or 'error' in line:
+                            line_item.setForeground(0, QColor(255, 0, 0))  # 红色
+                
+                log_item.setExpanded(True)
+            
+            # 显示最终描述结果
+            description = result.get('description', '')
+            if description:
+                desc_item = QTreeWidgetItem(parent_item)
+                desc_item.setText(0, "视频描述")
+                
+                # 将描述按句子分割显示
+                sentences = description.split('. ')
+                for sentence in sentences:
+                    if sentence.strip():
+                        sentence_item = QTreeWidgetItem(desc_item)
+                        sentence_item.setText(0, sentence.strip() + ('.' if not sentence.endswith('.') else ''))
+                
+                desc_item.setExpanded(True)
+                
+        except Exception as e:
+            self.logger.error(f"添加ShareGPT4Video结果失败: {e}")
+    
+    def _add_general_result(self, parent_item: QTreeWidgetItem, result: dict):
+        """添加通用算法结果"""
+        try:
+            # 显示基本信息
+            for key, value in result.items():
+                if key not in ['algorithm_name', 'input_path', 'algorithm_type']:
+                    item = QTreeWidgetItem(parent_item)
+                    item.setText(0, f"{key}: {value}")
+                    
+        except Exception as e:
+            self.logger.error(f"添加通用结果失败: {e}")
     
     def _update_stats(self):
         """更新统计信息"""
