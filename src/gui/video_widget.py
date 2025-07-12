@@ -816,12 +816,35 @@ class VideoEditWidget(QWidget):
         self.preview_label.setText("请选择视频文件")
         layout.addWidget(self.preview_label, 1)  # 设置拉伸因子
         
-        # 播放控制
+        # 播放控制 - 紧贴视频预览窗口
         control_layout = QHBoxLayout()
+        control_layout.setContentsMargins(0, 5, 0, 5)  # 减少上下边距
+        control_layout.setSpacing(8)  # 减少按钮间距
         
         self.play_btn = QPushButton("播放")
         self.pause_btn = QPushButton("暂停")
         self.stop_btn = QPushButton("停止")
+        
+        # 设置按钮样式，使其更紧凑
+        button_style = """
+            QPushButton {
+                padding: 6px 12px;
+                font-size: 12px;
+                border: 1px solid #ccc;
+                border-radius: 4px;
+                background-color: #f8f9fa;
+            }
+            QPushButton:hover {
+                background-color: #e9ecef;
+            }
+            QPushButton:pressed {
+                background-color: #dee2e6;
+            }
+        """
+        
+        self.play_btn.setStyleSheet(button_style)
+        self.pause_btn.setStyleSheet(button_style)
+        self.stop_btn.setStyleSheet(button_style)
         
         control_layout.addWidget(self.play_btn)
         control_layout.addWidget(self.pause_btn)

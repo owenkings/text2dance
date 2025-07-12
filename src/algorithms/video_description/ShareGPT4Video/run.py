@@ -470,6 +470,8 @@ def parse_arguments():
                        help='最大生成token数 (默认: 200)')
     parser.add_argument('--num_beams', type=int, default=1,
                        help='束搜索的束数 (默认: 1)')
+    parser.add_argument('--num_frames', type=int, default=16,
+                       help='视频采样帧数 (默认: 16)')
     
     return parser.parse_args()
 
@@ -519,7 +521,7 @@ def main():
                     print(f"  设备: {args.device}")
                     print()
                 
-                num_frames = 16
+                num_frames = args.num_frames
                 pre_query_prompt = "The provided image arranges keyframes from a video in a grid view, keyframes are separated with white bands. Answer concisely with overall content and context of the video, highlighting any significant events, characters, or objects that appear throughout the frames."
                 
                 logger.info(f"设置帧数: {num_frames}")
