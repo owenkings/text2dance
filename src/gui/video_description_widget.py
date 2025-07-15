@@ -116,7 +116,7 @@ class AdaptivePIDController:
         self.last_time = time.time()
 
 class VideoDescriptionThread(QThread):
-    """视频描述处理线程"""
+    """视频描述处理线程 - 使用批量处理优化"""
     
     progress_updated = pyqtSignal(int)  # 进度百分比
     status_updated = pyqtSignal(str)  # 状态信息
@@ -140,156 +140,151 @@ class VideoDescriptionThread(QThread):
     def run(self):
         try:
             total_videos = len(self.videos)
-            for i, video_path in enumerate(self.videos):
-                if not self.is_running:
-                    break
-                
-                self.status_updated.emit(f"正在处理视频 {i+1}/{total_videos}: {os.path.basename(video_path)}")
-                
-                # 记录开始时间
-                start_time = time.time()
-                start_time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                
-                # 执行视频描述命令
-                success, description, error_msg = self._process_single_video(video_path)
-                
-                # 记录结束时间并计算总耗时
-                end_time = time.time()
-                end_time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                total_processing_time = end_time - start_time
-                
-                # 如果需要动作过滤
-                if success and self.use_action_filter and description:
-                    description = self._filter_action_description(description)
-                
-                # 记录结果
-                result = {
-                    'video_path': video_path,
-                    'success': success,
-                    'description': description,
-                    'error_message': error_msg,
-                    'start_time': start_time_str,
-                    'end_time': end_time_str,
-                    'total_processing_time': round(total_processing_time, 2),  # 总耗时（秒）
-                    'process_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),  # 保持兼容性
-                    'duration': self._get_video_duration(video_path)
-                }
-                self.results.append(result)
-                
-                # 发送完成信号
-                self.video_completed.emit(video_path, success, description, error_msg, total_processing_time)
-                
-                # 更新进度
-                progress = int(((i + 1) / total_videos) * 100)
-                self.progress_updated.emit(progress)
+            self.status_updated.emit(f"开始批量处理 {total_videos} 个视频...")
+            self.log_updated.emit("使用优化的批量处理模式 (1次模型加载 + N次推理)")
+            
+            # 记录整体开始时间
+            overall_start_time = time.time()
+            
+            # 使用批量处理脚本
+            success, results = self._process_videos_batch()
+            
+            if success and results:
+                # 处理每个视频的结果
+                for i, result in enumerate(results):
+                    if not self.is_running:
+                        break
+                    
+                    video_path = result['video_path']
+                    is_success = result['success']
+                    description = result['description'] or ""
+                    error_msg = result.get('error_message', "")
+                    processing_time = result.get('processing_time', 0)
+                    
+                    # 如果需要动作过滤
+                    if is_success and self.use_action_filter and description:
+                        description = self._filter_action_description(description)
+                    
+                    # 记录结果
+                    processed_result = {
+                        'video_path': video_path,
+                        'success': is_success,
+                        'description': description,
+                        'error_message': error_msg,
+                        'start_time': result.get('timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S')),
+                        'end_time': result.get('timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S')),
+                        'total_processing_time': round(processing_time, 2),
+                        'process_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                        'duration': self._get_video_duration(video_path)
+                    }
+                    self.results.append(processed_result)
+                    
+                    # 发送完成信号
+                    self.video_completed.emit(video_path, is_success, description, error_msg, processing_time)
+                    
+                    # 更新进度
+                    progress = int(((i + 1) / total_videos) * 100)
+                    self.progress_updated.emit(progress)
+                    
+                    self.status_updated.emit(f"已完成 {i+1}/{total_videos}: {os.path.basename(video_path)}")
+            else:
+                self.status_updated.emit("批量处理失败")
+                self.log_updated.emit("批量处理脚本执行失败")
+            
+            # 计算总耗时
+            overall_end_time = time.time()
+            total_time = overall_end_time - overall_start_time
             
             if self.is_running:
+                self.log_updated.emit(f"批量处理完成，总耗时: {total_time:.2f}秒")
+                self.log_updated.emit(f"平均每个视频: {total_time/total_videos:.2f}秒")
                 self.all_completed.emit()
                 
         except Exception as e:
             self.status_updated.emit(f"处理过程中发生错误: {str(e)}")
+            self.log_updated.emit(f"异常详情: {str(e)}")
     
-    def _process_single_video(self, video_path):
-        """处理单个视频"""
+    def _process_videos_batch(self):
+        """批量处理所有视频"""
         try:
-            # 构建命令 - 使用相对路径，程序在根目录运行
+            # 构建批量处理命令
             cmd = [
                 'python',
-                'src/algorithms/video_description/ShareGPT4Video/run.py',
+                'src/algorithms/video_description/ShareGPT4Video/batch_run.py',
                 '--model-path', self.model_path,
-                '--video', video_path,
                 '--query', self.description_requirement,
-                '--device', 'cuda'
+                '--device', 'cuda',
+                '--output-format', 'json'
             ]
+            
+            # 添加所有视频路径
+            cmd.extend(['--videos'] + self.videos)
             
             # 添加高级参数
             if self.max_new_tokens > 0:
-                cmd.extend(['--max_new_tokens', str(self.max_new_tokens)])
+                cmd.extend(['--max-new-tokens', str(self.max_new_tokens)])
                 self.log_updated.emit(f"设置最大生成长度: {self.max_new_tokens}")
             else:
-                self.log_updated.emit("使用无限制生成长度")
+                self.log_updated.emit("使用默认生成长度")
             
-            # 处理帧数设置（支持自动选择）
+            # 处理帧数设置
             if self.num_frames > 0:
-                actual_frames = self.num_frames
-                cmd.extend(['--num_frames', str(actual_frames)])
-                self.log_updated.emit(f"设置采样帧数: {actual_frames}")
+                cmd.extend(['--num-frames', str(self.num_frames)])
+                self.log_updated.emit(f"设置采样帧数: {self.num_frames}")
             else:
-                # 自动选择帧数：根据视频时长决定
-                actual_frames = self._get_auto_frames(video_path)
-                cmd.extend(['--num_frames', str(actual_frames)])
-                self.log_updated.emit(f"自动选择采样帧数: {actual_frames} (基于视频时长)")
+                cmd.extend(['--num-frames', '16'])  # 默认值
+                self.log_updated.emit("使用默认采样帧数: 16")
             
             # 添加生成控制参数
             if self.generation_mode == "deterministic":
-                cmd.extend(['--do_sample', 'False', '--num_beams', '1'])
+                cmd.extend(['--do-sample', 'False', '--num-beams', '1'])
                 self.log_updated.emit("使用确定性生成模式 (do_sample=False, num_beams=1)")
             elif self.generation_mode == "random":
-                cmd.extend(['--do_sample', 'True', '--top_p', '0.9'])
+                cmd.extend(['--do-sample', 'True', '--top-p', '0.9'])
                 self.log_updated.emit("使用随机采样生成模式 (do_sample=True, top_p=0.9)")
             elif self.generation_mode == "hybrid":
-                cmd.extend(['--do_sample', 'True', '--top_p', '0.7', '--temperature', '0.8', '--num_beams', '2'])
+                cmd.extend(['--do-sample', 'True', '--top-p', '0.7', '--temperature', '0.8', '--num-beams', '2'])
                 self.log_updated.emit("使用混合策略模式 (do_sample=True, top_p=0.7, temperature=0.8, num_beams=2)")
             
             # 记录执行的命令
             cmd_str = ' '.join(f'"{arg}"' if ' ' in arg else arg for arg in cmd)
-            self.log_updated.emit(f"执行命令: {cmd_str}")
+            self.log_updated.emit(f"执行批量处理命令: {cmd_str}")
             
-            # 使用Popen实现实时输出捕获
             # 设置工作目录为项目根目录
             import os
             project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
             self.log_updated.emit(f"工作目录: {project_root}")
             
+            # 执行批量处理命令
             process = subprocess.Popen(
                 cmd, 
                 stdout=subprocess.PIPE, 
-                stderr=subprocess.STDOUT,  # 合并stderr到stdout
+                stderr=subprocess.STDOUT,
                 text=True, 
-                bufsize=1,  # 行缓冲
+                bufsize=1,
                 universal_newlines=True,
-                encoding='utf-8',  # 明确指定UTF-8编码
-                errors='replace',   # 替换编码错误字符
-                cwd=project_root  # 设置工作目录
+                encoding='utf-8',
+                errors='replace',
+                cwd=project_root
             )
             
             output_lines = []
-            description = ""
-            
-            self.log_updated.emit("开始读取命令输出...")
+            self.log_updated.emit("开始读取批量处理输出...")
             
             # 实时读取输出
             while True:
                 if not self.is_running:
                     process.terminate()
-                    self.log_updated.emit("用户取消处理")
-                    return False, "", "用户取消处理"
+                    self.log_updated.emit("用户取消批量处理")
+                    return False, []
                 
-                # 读取一行输出
                 line = process.stdout.readline()
                 
                 if line is not None:
                     line = line.strip()
                     if line:
                         output_lines.append(line)
-                        # 实时发送日志更新
                         self.log_updated.emit(line)
-                        
-                        # 检查是否是描述结果
-                        if "### LM OUTPUT TEXT:" in line:
-                            description = line.replace("### LM OUTPUT TEXT:", "").strip()
-                            self.log_updated.emit(f"找到描述结果: {description[:100]}...")
-                        elif "LM OUTPUT TEXT:" in line:
-                            description = line.replace("LM OUTPUT TEXT:", "").strip()
-                            self.log_updated.emit(f"找到描述结果: {description[:100]}...")
-                        elif "生成的描述内容:" in line:
-                            # 提取ShareGPT4Video日志中的描述内容
-                            description_part = line.split("生成的描述内容:", 1)[1].strip()
-                            if not description:
-                                description = description_part
-                            else:
-                                description += " " + description_part
-                            self.log_updated.emit(f"找到日志描述: {description_part[:100]}...")
                 
                 # 检查进程是否结束
                 if process.poll() is not None:
@@ -303,82 +298,57 @@ class VideoDescriptionThread(QThread):
                                 self.log_updated.emit(remaining_line.strip())
                     break
                 
-                # 短暂休眠避免CPU占用过高
                 time.sleep(0.01)
             
-            self.log_updated.emit(f"命令执行完成，返回码: {process.returncode}")
+            self.log_updated.emit(f"批量处理命令执行完成，返回码: {process.returncode}")
             
             # 检查进程返回码
             if process.returncode == 0:
-                # 如果没有找到标准格式的描述，尝试从输出中提取
-                if not description and output_lines:
-                    self.log_updated.emit("尝试从输出中提取描述...")
-                    
-                    # 如果已经从日志中提取到了描述，直接使用
-                    if description:
-                        self.log_updated.emit(f"使用日志中提取的描述: {description[:100]}...")
-                    else:
-                        # 首先尝试提取ShareGPT4Video的标准输出格式
-                        description_start = -1
-                        description_end = -1
-                        
-                        for i, line in enumerate(output_lines):
-                            if "=== 视频描述结果 ===" in line:
-                                description_start = i + 1
-                            elif "==================" in line and description_start != -1:
-                                description_end = i
-                                break
-                        
-                        if description_start != -1 and description_end != -1:
-                            # 提取描述内容
-                            description_lines = output_lines[description_start:description_end]
-                            description = '\n'.join(description_lines).strip()
-                            self.log_updated.emit(f"从标准格式提取到描述: {description[:100]}...")
-                        elif description_start != -1:
-                            # 只找到开始标记，提取到最后
-                            description_lines = output_lines[description_start:]
-                            # 过滤掉日志行和其他无关行
-                            filtered_lines = []
-                            for line in description_lines:
-                                if (not line.startswith('[') and 
-                                    not line.startswith('Loading') and 
-                                    not line.startswith('Downloading') and
-                                    not line.startswith('ShareGPT4Video') and
-                                    not line.startswith('结束时间:') and
-                                    not line.startswith('=') and
-                                    line.strip()):
-                                    filtered_lines.append(line)
-                            description = '\n'.join(filtered_lines).strip()
-                            self.log_updated.emit(f"从部分格式提取到描述: {description[:100]}...")
-                        else:
-                            # 回退到原来的逻辑
-                            for line in reversed(output_lines):
-                                if (line.strip() and 
-                                    not line.startswith('[') and 
-                                    not line.startswith('Loading') and 
-                                    not line.startswith('Downloading') and
-                                    not line.startswith('ShareGPT4Video') and
-                                    not line.startswith('结束时间:') and
-                                    not line.startswith('=')):
-                                    description = line.strip()
-                                    self.log_updated.emit(f"从末尾提取到描述: {description[:100]}...")
-                                    break
+                # 尝试从输出中提取JSON结果
+                json_output = None
+                json_start = -1
                 
-                if description:
-                    self.log_updated.emit("视频描述处理成功")
-                    return True, description, ""
+                # 查找JSON输出的开始位置
+                for i, line in enumerate(output_lines):
+                    if line.strip().startswith('{'):
+                        json_start = i
+                        break
+                
+                if json_start != -1:
+                    # 提取JSON部分
+                    json_lines = output_lines[json_start:]
+                    json_text = '\n'.join(json_lines)
+                    
+                    try:
+                        import json
+                        json_output = json.loads(json_text)
+                        self.log_updated.emit("成功解析批量处理结果")
+                        
+                        # 提取结果列表
+                        if 'results' in json_output:
+                            results = json_output['results']
+                            self.log_updated.emit(f"批量处理完成，共处理 {len(results)} 个视频")
+                            return True, results
+                        else:
+                            self.log_updated.emit("JSON输出中未找到results字段")
+                            return False, []
+                            
+                    except json.JSONDecodeError as e:
+                        self.log_updated.emit(f"JSON解析失败: {str(e)}")
+                        self.log_updated.emit(f"原始输出: {json_text[:500]}...")
+                        return False, []
                 else:
-                    self.log_updated.emit("警告: 未找到有效的描述内容")
-                    return False, "", "未找到有效的描述内容"
+                    self.log_updated.emit("未找到JSON输出")
+                    return False, []
             else:
                 error_msg = '\n'.join(output_lines) if output_lines else "未知错误"
-                self.log_updated.emit(f"命令执行失败: {error_msg}")
-                return False, "", error_msg
+                self.log_updated.emit(f"批量处理命令执行失败: {error_msg}")
+                return False, []
                 
         except Exception as e:
-            error_msg = f"处理视频时发生异常: {str(e)}"
+            error_msg = f"批量处理时发生异常: {str(e)}"
             self.log_updated.emit(error_msg)
-            return False, "", error_msg
+            return False, []
     
     def _filter_action_description(self, description):
         """使用API过滤动作描述"""
