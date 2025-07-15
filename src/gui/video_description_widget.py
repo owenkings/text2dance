@@ -535,19 +535,53 @@ class VideoDescriptionWidget(QWidget):
         upload_layout = QVBoxLayout(upload_group)
         
         # 上传按钮
+        upload_buttons_layout = QHBoxLayout()
+        
         self.upload_file_btn = QPushButton("上传视频文件")
         self.upload_file_btn.clicked.connect(self._upload_video_files)
-        upload_layout.addWidget(self.upload_file_btn)
+        upload_buttons_layout.addWidget(self.upload_file_btn)
         
-        self.upload_folder_btn = QPushButton("上传视频文件夹")
+        self.upload_folder_btn = QPushButton("上传文件夹")
         self.upload_folder_btn.clicked.connect(self._upload_video_folder)
-        upload_layout.addWidget(self.upload_folder_btn)
+        upload_buttons_layout.addWidget(self.upload_folder_btn)
         
-        # 视频列表
+        upload_layout.addLayout(upload_buttons_layout)
+        
+        # 视频列表控制区域
+        list_control_layout = QHBoxLayout()
+        list_control_layout.addWidget(QLabel("视频列表:"))
+        
+        # 添加全选/取消全选按钮
+        self.select_all_btn = QPushButton("全选")
+        self.select_all_btn.clicked.connect(self._select_all_videos)
+        self.select_all_btn.setMaximumWidth(50)
+        list_control_layout.addWidget(self.select_all_btn)
+        
+        self.deselect_all_btn = QPushButton("取消全选")
+        self.deselect_all_btn.clicked.connect(self._deselect_all_videos)
+        self.deselect_all_btn.setMaximumWidth(70)
+        list_control_layout.addWidget(self.deselect_all_btn)
+        
+        # 添加删除选中视频按钮
+        self.delete_selected_btn = QPushButton("删除选中")
+        self.delete_selected_btn.clicked.connect(self._delete_selected_videos)
+        self.delete_selected_btn.setMaximumWidth(70)
+        self.delete_selected_btn.setStyleSheet("QPushButton { color: #d32f2f; }")
+        list_control_layout.addWidget(self.delete_selected_btn)
+        
+        list_control_layout.addStretch()
+        upload_layout.addLayout(list_control_layout)
+        
+        # 视频列表（支持复选框）
         self.video_list = QListWidget()
         self.video_list.itemClicked.connect(self._on_video_selected)
-        upload_layout.addWidget(QLabel("视频列表:"))
+        self.video_list.itemChanged.connect(self._on_video_check_changed)
         upload_layout.addWidget(self.video_list)
+        
+        # 选择状态显示
+        self.selection_status_label = QLabel("已选择: 0 个视频")
+        self.selection_status_label.setStyleSheet("color: #666; font-size: 12px;")
+        upload_layout.addWidget(self.selection_status_label)
         
         layout.addWidget(upload_group)
         
@@ -958,18 +992,22 @@ class VideoDescriptionWidget(QWidget):
         
         self.export_json_btn = QPushButton("导出JSON")
         self.export_json_btn.clicked.connect(lambda: self._export_results('json'))
+        self.export_json_btn.setToolTip("导出选中视频的详细结果为JSON格式")
         export_layout.addWidget(self.export_json_btn)
         
         self.export_txt_btn = QPushButton("导出TXT")
         self.export_txt_btn.clicked.connect(lambda: self._export_results('txt'))
+        self.export_txt_btn.setToolTip("导出选中视频的详细结果为TXT格式")
         export_layout.addWidget(self.export_txt_btn)
         
         self.export_csv_btn = QPushButton("导出CSV")
         self.export_csv_btn.clicked.connect(lambda: self._export_results('csv'))
+        self.export_csv_btn.setToolTip("导出选中视频的详细结果为CSV格式")
         export_layout.addWidget(self.export_csv_btn)
         
         self.export_md_btn = QPushButton("导出Markdown")
         self.export_md_btn.clicked.connect(lambda: self._export_results('md'))
+        self.export_md_btn.setToolTip("导出选中视频的详细结果为Markdown格式")
         export_layout.addWidget(self.export_md_btn)
         
         result_layout.addLayout(export_layout)
@@ -1020,18 +1058,102 @@ class VideoDescriptionWidget(QWidget):
                     self._add_video_to_list(file_path)
     
     def _upload_video_folder(self):
-        """上传视频文件夹"""
+        """上传视频文件夹（支持累积式添加）"""
         folder = QFileDialog.getExistingDirectory(self, "选择视频文件夹")
         
         if folder:
-            for file_path in Path(folder).glob("*.mp4"):
+            self._add_videos_from_folder(folder)
+            
+            # 询问是否继续添加更多文件夹
+            reply = QMessageBox.question(
+                self, "继续添加", 
+                f"已添加文件夹: {folder}\n\n是否继续添加其他文件夹？",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            
+            # 如果用户选择继续，递归调用自己
+            if reply == QMessageBox.Yes:
+                self._upload_video_folder()
+    
+    def _add_videos_from_folder(self, folder):
+        """从文件夹添加视频文件"""
+        video_extensions = ['*.mp4', '*.avi', '*.mov', '*.mkv', '*.wmv', '*.flv', '*.webm']
+        
+        for extension in video_extensions:
+            for file_path in Path(folder).glob(extension):
                 file_str = str(file_path)
                 if file_str not in self.current_videos:
                     self.current_videos.append(file_str)
                     self._add_video_to_list(file_str)
     
+    def _select_all_videos(self):
+        """全选所有视频"""
+        for i in range(self.video_list.count()):
+            item = self.video_list.item(i)
+            item.setCheckState(Qt.Checked)
+        self._update_selection_status()
+    
+    def _deselect_all_videos(self):
+        """取消全选所有视频"""
+        for i in range(self.video_list.count()):
+            item = self.video_list.item(i)
+            item.setCheckState(Qt.Unchecked)
+        self._update_selection_status()
+    
+    def _get_selected_videos(self):
+        """获取选中的视频列表"""
+        selected_videos = []
+        for i in range(self.video_list.count()):
+            item = self.video_list.item(i)
+            if item.checkState() == Qt.Checked:
+                video_path = item.data(Qt.UserRole)
+                selected_videos.append(video_path)
+        return selected_videos
+    
+    def _on_video_check_changed(self, item):
+        """视频复选框状态改变"""
+        self._update_selection_status()
+    
+    def _update_selection_status(self):
+        """更新选择状态显示"""
+        selected_count = len(self._get_selected_videos())
+        total_count = self.video_list.count()
+        self.selection_status_label.setText(f"已选择: {selected_count} / {total_count} 个视频")
+    
+    def _delete_selected_videos(self):
+        """删除选中的视频"""
+        selected_videos = self._get_selected_videos()
+        
+        if not selected_videos:
+            QMessageBox.warning(self, "警告", "请先选择要删除的视频")
+            return
+        
+        # 确认删除
+        reply = QMessageBox.question(
+            self, "确认删除", 
+            f"确定要删除选中的 {len(selected_videos)} 个视频吗？\n\n注意：这只会从列表中移除，不会删除实际文件。",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            # 从后往前删除，避免索引变化问题
+            for i in range(self.video_list.count() - 1, -1, -1):
+                item = self.video_list.item(i)
+                if item.checkState() == Qt.Checked:
+                    video_path = item.data(Qt.UserRole)
+                    # 从current_videos列表中移除
+                    if video_path in self.current_videos:
+                        self.current_videos.remove(video_path)
+                    # 从列表控件中移除
+                    self.video_list.takeItem(i)
+            
+            # 更新选择状态显示
+            self._update_selection_status()
+            
+            self._log_message(f"已删除 {len(selected_videos)} 个视频")
+    
     def _add_video_to_list(self, video_path):
-        """添加视频到列表"""
+        """添加视频到列表（带复选框）"""
         item = QListWidgetItem()
         
         # 检查是否已处理过
@@ -1041,7 +1163,12 @@ class VideoDescriptionWidget(QWidget):
             item.setText(os.path.basename(video_path))
         
         item.setData(Qt.UserRole, video_path)
+        item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+        item.setCheckState(Qt.Checked)  # 默认选中
         self.video_list.addItem(item)
+        
+        # 更新选择状态显示
+        self._update_selection_status()
     
     def _is_video_processed(self, video_path):
         """检查视频是否已处理过"""
@@ -1485,6 +1612,12 @@ class VideoDescriptionWidget(QWidget):
             QMessageBox.warning(self, "警告", "请先上传视频文件")
             return
         
+        # 获取选中的视频
+        selected_videos = self._get_selected_videos()
+        if not selected_videos:
+            QMessageBox.warning(self, "警告", "请至少选择一个视频进行处理")
+            return
+        
         description_requirement = self.description_text.toPlainText().strip()
         if not description_requirement:
             QMessageBox.warning(self, "警告", "请输入描述要求")
@@ -1521,9 +1654,9 @@ class VideoDescriptionWidget(QWidget):
         # 获取API配置
         api_config = self._get_api_config()
         
-        # 启动处理线程
+        # 启动处理线程（只处理选中的视频）
         self.processing_thread = VideoDescriptionThread(
-            self.current_videos,
+            selected_videos,
             description_requirement,
             self.model_path,
             self.action_filter_checkbox.isChecked(),
@@ -1590,6 +1723,11 @@ class VideoDescriptionWidget(QWidget):
             
             # 更新列表显示
             self._update_video_list_item(video_path, False)
+        
+        # 如果当前选中的是刚处理完的视频，立即更新结果显示
+        current_item = self.video_list.currentItem()
+        if current_item and current_item.data(Qt.UserRole) == video_path:
+            self._show_video_result(video_path)
     
     def _on_all_completed(self):
         """所有视频处理完成"""
@@ -1628,23 +1766,32 @@ class VideoDescriptionWidget(QWidget):
             self._log_message(f"保存结果失败: {str(e)}")
     
     def _update_video_list_item(self, video_path, success):
-        """更新视频列表项显示"""
+        """更新视频列表项显示（保持复选框状态）"""
         for i in range(self.video_list.count()):
             item = self.video_list.item(i)
             if item.data(Qt.UserRole) == video_path:
+                # 保存当前复选框状态
+                current_check_state = item.checkState()
+                
                 video_name = os.path.basename(video_path)
                 if success:
                     item.setText(f"✅ {video_name}")
                 else:
                     item.setText(f"❌ {video_name}")
+                
+                # 恢复复选框状态
+                item.setCheckState(current_check_state)
                 break
     
     def _refresh_video_list_status(self):
-        """刷新视频列表状态显示"""
+        """刷新视频列表状态显示（保持复选框状态）"""
         for i in range(self.video_list.count()):
             item = self.video_list.item(i)
             video_path = item.data(Qt.UserRole)
             video_name = os.path.basename(video_path)
+            
+            # 保存当前复选框状态
+            current_check_state = item.checkState()
             
             # 检查是否已处理过
             result_file = self._get_result_file_path(video_path)
@@ -1667,6 +1814,9 @@ class VideoDescriptionWidget(QWidget):
                 # 如果没有结果文件，显示未处理状态
                 if not item.text().startswith(("✅", "❌")):
                     item.setText(video_name)
+            
+            # 恢复复选框状态
+            item.setCheckState(current_check_state)
     
     def _get_video_duration(self, video_path):
         """获取视频时长"""
@@ -1735,15 +1885,21 @@ class VideoDescriptionWidget(QWidget):
             QMessageBox.warning(self, "警告", "没有可导出的结果")
             return
         
+        # 获取选中的视频
+        selected_videos = self._get_selected_videos()
+        if not selected_videos:
+            QMessageBox.warning(self, "警告", "请先选择要导出的视频")
+            return
+        
         # 选择导出目录
         export_dir = QFileDialog.getExistingDirectory(self, "选择导出目录")
         if not export_dir:
             return
         
         try:
-            # 收集所有结果
+            # 收集选中视频的结果
             all_results = []
-            for video_path in self.current_videos:
+            for video_path in selected_videos:
                 result_file = self._get_result_file_path(video_path)
                 if result_file.exists():
                     with open(result_file, 'r', encoding='utf-8') as f:
@@ -1875,6 +2031,12 @@ class VideoDescriptionWidget(QWidget):
             QMessageBox.warning(self, "警告", "没有可保存的结果")
             return
         
+        # 获取选中的视频
+        selected_videos = self._get_selected_videos()
+        if not selected_videos:
+            QMessageBox.warning(self, "警告", "请先选择要保存的视频")
+            return
+        
         try:
             # 根据下拉框选择确定格式
             format_text = self.auto_save_format_combo.currentText()
@@ -1892,17 +2054,20 @@ class VideoDescriptionWidget(QWidget):
                 return
             
             # 执行自动保存
-            self._auto_save_results(selected_format, save_dir)
+            self._auto_save_results(selected_format, save_dir, selected_videos)
             
         except Exception as e:
             QMessageBox.critical(self, "自动保存失败", f"自动保存过程中发生错误: {str(e)}")
     
-    def _auto_save_results(self, format_type, save_dir):
+    def _auto_save_results(self, format_type, save_dir, selected_videos=None):
         """执行自动保存"""
         try:
-            # 收集所有结果
+            # 如果没有指定选中视频，则使用所有视频
+            videos_to_save = selected_videos if selected_videos is not None else self.current_videos
+            
+            # 收集选中视频的结果
             all_results = []
-            for video_path in self.current_videos:
+            for video_path in videos_to_save:
                 result_file = self._get_result_file_path(video_path)
                 if result_file.exists():
                     with open(result_file, 'r', encoding='utf-8') as f:
