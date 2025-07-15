@@ -1595,6 +1595,9 @@ class VideoDescriptionWidget(QWidget):
         """所有视频处理完成"""
         self._log_message("所有视频处理完成！")
         
+        # 刷新视频列表状态显示
+        self._refresh_video_list_status()
+        
         # 同步中间面板按钮状态
         if hasattr(self, 'center_start_btn'):
             self.center_start_btn.setEnabled(True)
@@ -1635,6 +1638,35 @@ class VideoDescriptionWidget(QWidget):
                 else:
                     item.setText(f"❌ {video_name}")
                 break
+    
+    def _refresh_video_list_status(self):
+        """刷新视频列表状态显示"""
+        for i in range(self.video_list.count()):
+            item = self.video_list.item(i)
+            video_path = item.data(Qt.UserRole)
+            video_name = os.path.basename(video_path)
+            
+            # 检查是否已处理过
+            result_file = self._get_result_file_path(video_path)
+            if result_file.exists():
+                try:
+                    with open(result_file, 'r', encoding='utf-8') as f:
+                        result = json.load(f)
+                    
+                    # 根据处理结果更新显示
+                    if result.get('success', False):
+                        item.setText(f"✅ {video_name}")
+                    else:
+                        item.setText(f"❌ {video_name}")
+                except Exception as e:
+                    # 如果读取结果文件失败，保持原状态
+                    self._log_message(f"读取结果文件失败: {str(e)}")
+                    if not item.text().startswith(("✅", "❌")):
+                        item.setText(video_name)
+            else:
+                # 如果没有结果文件，显示未处理状态
+                if not item.text().startswith(("✅", "❌")):
+                    item.setText(video_name)
     
     def _get_video_duration(self, video_path):
         """获取视频时长"""
