@@ -27,7 +27,15 @@ class CLIPVisionTower(nn.Module):
             return
 
         self.image_processor = CLIPImageProcessor.from_pretrained(self.vision_tower_name)
-        self.vision_tower = CLIPVisionModel.from_pretrained(self.vision_tower_name, device_map=device_map)
+        
+        # 根据设备映射选择合适的数据类型
+        load_kwargs = {}
+        if device_map == 'cpu' or (isinstance(device_map, dict) and all(v == 'cpu' for v in device_map.values())):
+            load_kwargs['torch_dtype'] = torch.float32
+        else:
+            load_kwargs['torch_dtype'] = torch.float16
+            
+        self.vision_tower = CLIPVisionModel.from_pretrained(self.vision_tower_name, device_map=device_map, **load_kwargs)
         self.vision_tower.requires_grad_(False)
 
         self.is_loaded = True
@@ -165,7 +173,15 @@ class CLIPVisionTowerS2(CLIPVisionTower):
             return
 
         self.image_processor = CLIPImageProcessor.from_pretrained(self.vision_tower_name)
-        self.vision_tower = CLIPVisionModel.from_pretrained(self.vision_tower_name, device_map=device_map)
+        
+        # 根据设备映射选择合适的数据类型
+        load_kwargs = {}
+        if device_map == 'cpu' or (isinstance(device_map, dict) and all(v == 'cpu' for v in device_map.values())):
+            load_kwargs['torch_dtype'] = torch.float32
+        else:
+            load_kwargs['torch_dtype'] = torch.float16
+            
+        self.vision_tower = CLIPVisionModel.from_pretrained(self.vision_tower_name, device_map=device_map, **load_kwargs)
         self.vision_tower.requires_grad_(False)
 
         self.image_processor.size['shortest_edge'] = self.s2_image_size

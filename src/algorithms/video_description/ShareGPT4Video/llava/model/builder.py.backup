@@ -204,11 +204,7 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
             bnb_4bit_quant_type='nf4'
         )
     else:
-        # 根据设备类型选择合适的数据类型
-        if device == "cpu" or (device_map == "cpu") or (isinstance(device_map, dict) and all(v == "cpu" for v in device_map.values())):
-            kwargs['torch_dtype'] = torch.float32  # CPU模式使用float32
-        else:
-            kwargs['torch_dtype'] = torch.float16  # GPU模式使用float16
+        kwargs['torch_dtype'] = torch.float16
 
     if use_flash_attn:
         kwargs['attn_implementation'] = 'flash_attention_2'
@@ -286,19 +282,11 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
                     model_path, 
                     use_fast=False
                 )
-                # 根据device_map配置选择合适的加载方式
-                if device_map is not None:
-                    model = LlavaLlamaForCausalLM.from_pretrained(
-                        model_path,
-                        device_map=device_map,
-                        **{k: v for k, v in kwargs.items() if k != 'device_map'}
-                    )
-                else:
-                    model = LlavaLlamaForCausalLM.from_pretrained(
-                        model_path,
-                        low_cpu_mem_usage=True,
-                        **kwargs
-                    )
+                model = LlavaLlamaForCausalLM.from_pretrained(
+                    model_path,
+                    low_cpu_mem_usage=True,
+                    **kwargs
+                )
     else:
         if model_base is not None:
             from peft import PeftModel
@@ -347,65 +335,8 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
         if not vision_tower.is_loaded:
             vision_tower.load_model(device_map=device_map)
         if device_map != 'auto':
-            # 确定目标设备
-            if isinstance(device_map, str):
-                target_device = device_map
-            elif isinstance(device_map, dict):
-                target_device = next(iter(device_map.values())) if device_map else device
-                if isinstance(target_device, int):
-                    target_device = f"cuda:{target_device}"
-            else:
-                target_device = device
-            vision_tower.to(device=target_device, dtype=torch.float16)
+            vision_tower.to(device=device_map, dtype=torch.float16)
         image_processor = vision_tower.image_processor
-        
-        # 确保所有模型组件正确设置设备
-        if device_map != 'auto' and device_map != 'cpu':
-            # 确定目标设备
-            if isinstance(device_map, str):
-                target_device = device_map
-            elif isinstance(device_map, dict):
-                # 从设备映射字典中获取第一个设备作为目标设备
-                target_device = next(iter(device_map.values())) if device_map else device
-                if isinstance(target_device, int):
-                    target_device = f"cuda:{target_device}"
-            else:
-                target_device = device
-            
-            # 确保多模态投影器在正确设备上
-            if hasattr(model, 'get_model') and hasattr(model.get_model(), 'mm_projector'):
-                model.get_model().mm_projector = model.get_model().mm_projector.to(target_device)
-            
-            # 确保image_newline参数在正确设备上
-            if hasattr(model, 'get_model') and hasattr(model.get_model(), 'image_newline'):
-                if model.get_model().image_newline.device.type == 'meta':
-                    # 如果参数在meta设备上，需要重新初始化
-                    embed_std = 1 / torch.sqrt(torch.tensor(model.config.hidden_size, dtype=model.get_model().image_newline.dtype))
-                    model.get_model().image_newline = torch.nn.Parameter(
-                        torch.randn(model.config.hidden_size, dtype=model.get_model().image_newline.dtype, device=target_device) * embed_std
-                    )
-                else:
-                    model.get_model().image_newline = model.get_model().image_newline.to(target_device)
-
-    # 强制数据类型转换以确保CPU兼容性
-    if device == "cpu" or (device_map == "cpu") or (isinstance(device_map, dict) and all(v == "cpu" for v in device_map.values())):
-        # 在CPU模式下，强制将所有模型参数转换为float32
-        model = model.float()  # 转换主模型
-        
-        # 转换视觉塔
-        if hasattr(model, 'get_vision_tower') and model.get_vision_tower() is not None:
-            vision_tower = model.get_vision_tower()
-            if hasattr(vision_tower, 'vision_tower'):
-                vision_tower.vision_tower = vision_tower.vision_tower.float()
-        
-        # 转换多模态投影器
-        if hasattr(model, 'get_model') and hasattr(model.get_model(), 'mm_projector'):
-            model.get_model().mm_projector = model.get_model().mm_projector.float()
-        
-        # 转换image_newline参数
-        if hasattr(model, 'get_model') and hasattr(model.get_model(), 'image_newline'):
-            if model.get_model().image_newline is not None:
-                model.get_model().image_newline.data = model.get_model().image_newline.data.float()
 
     context_len = getattr(model.config, "max_sequence_length", 2048)
     return tokenizer, model, image_processor, context_len

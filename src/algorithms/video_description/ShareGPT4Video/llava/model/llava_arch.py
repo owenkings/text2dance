@@ -35,8 +35,10 @@ class LlavaMetaModel:
             self.mm_projector = build_vision_projector(config)
 
             if 'unpad' in getattr(config, 'mm_patch_merge_type', ''):
+                # 根据设备类型选择合适的数据类型
+                dtype = torch.float32 if hasattr(self, 'device') and str(self.device).startswith('cpu') else self.dtype
                 self.image_newline = nn.Parameter(
-                    torch.empty(config.hidden_size, dtype=self.dtype)
+                    torch.empty(config.hidden_size, dtype=dtype)
                 )
 
     def get_vision_tower(self):
@@ -79,9 +81,13 @@ class LlavaMetaModel:
             self.mm_projector = build_vision_projector(self.config)
 
             if 'unpad' in mm_patch_merge_type:
-                embed_std = 1 / torch.sqrt(torch.tensor(self.config.hidden_size, dtype=self.dtype))
+                # 根据设备类型选择合适的数据类型
+                device = next(self.parameters()).device if list(self.parameters()) else 'cpu'
+                dtype = torch.float32 if str(device).startswith('cpu') else self.dtype
+                embed_std = 1 / torch.sqrt(torch.tensor(self.config.hidden_size, dtype=dtype))
+                # 确保 image_newline 参数在正确的设备上创建
                 self.image_newline = nn.Parameter(
-                    torch.randn(self.config.hidden_size, dtype=self.dtype) * embed_std
+                    torch.randn(self.config.hidden_size, dtype=dtype, device=device) * embed_std
                 )
         else:
             # In case it is frozen by LoRA
