@@ -474,6 +474,14 @@ class ConfigWidget(QWidget):
         self.max_text_length_spin.setValue(200)
         video_desc_layout.addRow("最大文本长度:", self.max_text_length_spin)
         
+        # 计算设备选择
+        self.device_combo = QComboBox()
+        self.device_combo.addItems(["Auto", "CUDA", "CPU"])
+        self.device_combo.setCurrentText("Auto")
+        self.device_combo.setToolTip("Auto: 自动检测GPU可用性\nCUDA: 强制使用GPU加速\nCPU: 强制使用CPU计算")
+        self.device_combo.currentTextChanged.connect(self._on_cache_path_changed)
+        video_desc_layout.addRow("计算设备:", self.device_combo)
+        
         layout.addWidget(video_desc_group)
         
         # API配置设置组（用于动作描述过滤）
@@ -846,6 +854,7 @@ class ConfigWidget(QWidget):
         self.desc_language_combo.setCurrentText(video_desc_config.get("language", "中文"))
         self.desc_length_combo.setCurrentText(video_desc_config.get("length", "中等"))
         self.max_text_length_spin.setValue(video_desc_config.get("max_text_length", 200))
+        self.device_combo.setCurrentText(video_desc_config.get("device", "Auto"))
         
         api_config = config.get("api", {})
         self.api_endpoint_input.setText(cache_config.get("api_endpoint", api_config.get("endpoint", "")))
@@ -1150,7 +1159,8 @@ class ConfigWidget(QWidget):
                 "sharegpt4video_model_path": self.sharegpt4video_model_input.text(),
                 "language": self.desc_language_combo.currentText(),
                 "length": self.desc_length_combo.currentText(),
-                "max_text_length": self.max_text_length_spin.value()
+                "max_text_length": self.max_text_length_spin.value(),
+                "device": self.device_combo.currentText()
             },
             "api": {
                 "endpoint": self.api_endpoint_input.text(),

@@ -207,13 +207,18 @@ class VideoDescriptionThread(QThread):
     def _process_videos_batch(self):
         """批量处理所有视频"""
         try:
+            # 从配置中获取设备设置
+            device_setting = 'Auto'  # 默认值
+            if hasattr(self, 'config_manager') and self.config_manager:
+                device_setting = self.config_manager.get('algorithms.video_description.device', 'Auto')
+            
             # 构建批量处理命令
             cmd = [
                 'python',
                 'src/algorithms/video_description/ShareGPT4Video/batch_run.py',
                 '--model-path', self.model_path,
                 '--query', self.description_requirement,
-                '--device', 'cuda',
+                '--device', device_setting,
                 '--output-format', 'json'
             ]
             

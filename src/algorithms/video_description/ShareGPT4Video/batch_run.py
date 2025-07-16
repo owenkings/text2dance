@@ -38,17 +38,17 @@ class BatchVideoProcessor:
     实现一次模型加载，多个视频批量推理
     """
     
-    def __init__(self, model_path: str, device: str = 'cuda', conv_mode: str = 'llava_llama_3'):
+    def __init__(self, model_path: str, device: str = 'Auto', conv_mode: str = 'llava_llama_3'):
         """
         初始化批量处理器
         
         Args:
             model_path: 模型路径
-            device: 计算设备 ('cuda' 或 'cpu')
+            device: 计算设备 ('Auto', 'CUDA' 或 'CPU')
             conv_mode: 对话模式
         """
         self.model_path = model_path
-        self.device = device
+        self.device = self._resolve_device(device)
         self.conv_mode = conv_mode
         self.logger = logging.getLogger('BatchVideoProcessor')
         
@@ -61,6 +61,48 @@ class BatchVideoProcessor:
         
         # 加载状态
         self.is_loaded = False
+    
+    def _resolve_device(self, device: str) -> str:
+        """
+        解析设备配置，实现Auto模式的自动检测逻辑
+        
+        Args:
+            device: 用户指定的设备 ('Auto', 'CUDA', 'CPU')
+            
+        Returns:
+            str: 实际使用的设备 ('cuda' 或 'cpu')
+        """
+        if device.upper() == 'CPU':
+            return 'cpu'
+        elif device.upper() == 'CUDA':
+            if torch.cuda.is_available():
+                return 'cuda'
+            else:
+                print("警告: CUDA不可用，自动切换到CPU模式")
+                return 'cpu'
+        elif device.upper() == 'AUTO':
+            # Auto模式：按照用户提供的逻辑图实现
+            if not torch.cuda.is_available():
+                print("检测到无GPU，使用CPU模式")
+                return 'cpu'
+            else:
+                # 检查GPU内存是否大于8GB
+                try:
+                    gpu_memory_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+                    print(f"检测到GPU，显存: {gpu_memory_gb:.1f}GB")
+                    
+                    if gpu_memory_gb > 8:
+                        print("显存大于8GB，使用标准混合模式")
+                        return 'cuda'
+                    else:
+                        print("显存小于等于8GB，使用低显存混合模式")
+                        return 'cuda'  # 仍然使用CUDA，但会在load_model中进行优化
+                except Exception as e:
+                    print(f"GPU内存检测失败: {e}，使用CPU模式")
+                    return 'cpu'
+        else:
+            # 默认情况，尝试使用CUDA
+            return 'cuda' if torch.cuda.is_available() else 'cpu'
         
     def load_model(self) -> bool:
         """
@@ -295,8 +337,8 @@ def parse_batch_arguments():
     # 模型参数
     parser.add_argument('--model-path', default='Lin-Chen/sharegpt4video-8b',
                        help='模型路径 (默认: Lin-Chen/sharegpt4video-8b)')
-    parser.add_argument('--device', default='cuda', choices=['cuda', 'cpu'],
-                       help='计算设备 (默认: cuda)')
+    parser.add_argument('--device', default='Auto', choices=['Auto', 'CUDA', 'CPU'],
+                       help='计算设备 (默认: Auto)')
     parser.add_argument('--conv-mode', default='llava_llama_3',
                        help='对话模式 (默认: llava_llama_3)')
     

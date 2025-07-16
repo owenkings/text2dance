@@ -154,6 +154,10 @@ class ConfigManager(QObject):
                 'pose_3d': {
                     'default': 'rtmpose3d',
                     'models_path': './models/pose_3d'
+                },
+                'video_description': {
+                    'device': 'Auto',
+                    'models_path': './models/video_description'
                 }
             },
             'plugins': {
