@@ -196,7 +196,7 @@ class BatchVideoProcessor:
         Args:
             video_path: 视频文件路径
             query: 查询内容
-            num_frames: 采样帧数
+            num_frames: 采样帧数（为0时自动选择）
             do_sample: 是否使用采样
             top_p: nucleus采样参数
             temperature: 生成温度
@@ -217,6 +217,40 @@ class BatchVideoProcessor:
             if not os.path.exists(video_path):
                 self.logger.error(f"视频文件不存在: {video_path}")
                 return None
+            
+            # 如果num_frames为0，根据视频时长自动选择帧数
+            if num_frames == 0:
+                try:
+                    from decord import VideoReader, cpu
+                    
+                    # 标准化路径
+                    normalized_path = os.path.normpath(video_path)
+                    
+                    # 加载视频获取时长信息
+                    vr = VideoReader(normalized_path, ctx=cpu(0), num_threads=1)
+                    total_frames = len(vr)
+                    fps = vr.get_avg_fps()
+                    duration = total_frames / fps  # 视频时长（秒）
+                    
+                    # 根据视频时长自动选择帧数
+                    if duration <= 10:  # 10秒以内
+                        num_frames = 8
+                    elif duration <= 30:  # 30秒以内
+                        num_frames = 12
+                    elif duration <= 60:  # 1分钟以内
+                        num_frames = 16
+                    elif duration <= 180:  # 3分钟以内
+                        num_frames = 20
+                    elif duration <= 300:  # 5分钟以内
+                        num_frames = 24
+                    else:  # 超过5分钟
+                        num_frames = 32
+                    
+                    self.logger.info(f"视频 {video_path} 时长: {duration:.1f}秒，自动选择帧数: {num_frames}")
+                    
+                except Exception as e:
+                    self.logger.error(f"自动帧数选择失败: {e}，使用默认16帧")
+                    num_frames = 16
             
             # 设置预查询提示
             pre_query_prompt = "The provided image arranges keyframes from a video in a grid view, keyframes are separated with white bands. Answer concisely with overall content and context of the video, highlighting any significant events, characters, or objects that appear throughout the frames."
@@ -468,8 +502,23 @@ def main():
         
         if not video_configs:
             logger.error("没有找到要处理的视频")
-            print("错误: 没有找到要处理的视频")
-            print("请使用 --videos, --video-dir 或 --config-file 参数指定视频")
+            if args.output_format == 'json' and not args.output_file:
+                error_output = {
+                    'summary': {
+                        'total_videos': 0,
+                        'successful_videos': 0,
+                        'failed_videos': 0,
+                        'total_time_seconds': 0,
+                        'average_time_per_video': 0,
+                        'timestamp': datetime.now().isoformat(),
+                        'error': '没有找到要处理的视频'
+                    },
+                    'results': []
+                }
+                print(json.dumps(error_output, ensure_ascii=False, indent=2))
+            elif not args.silent:
+                print("错误: 没有找到要处理的视频")
+                print("请使用 --videos, --video-dir 或 --config-file 参数指定视频")
             return 1
         
         logger.info(f"找到 {len(video_configs)} 个视频待处理")
@@ -490,7 +539,22 @@ def main():
         
         if not processor.load_model():
             logger.error("模型加载失败")
-            print("错误: 模型加载失败")
+            if args.output_format == 'json' and not args.output_file:
+                error_output = {
+                    'summary': {
+                        'total_videos': len(video_configs),
+                        'successful_videos': 0,
+                        'failed_videos': len(video_configs),
+                        'total_time_seconds': 0,
+                        'average_time_per_video': 0,
+                        'timestamp': datetime.now().isoformat(),
+                        'error': '模型加载失败'
+                    },
+                    'results': []
+                }
+                print(json.dumps(error_output, ensure_ascii=False, indent=2))
+            elif not args.silent:
+                print("错误: 模型加载失败")
             return 1
         
         logger.info("模型加载成功")
@@ -558,15 +622,34 @@ def main():
             processor.cleanup()
     
     except KeyboardInterrupt:
-        logger.warning("用户中断执行")
-        print("\n执行被用户中断")
+        if logger:
+            logger.warning("用户中断执行")
+        if not args.silent:
+            print("\n执行被用户中断")
         return 1
     
     except Exception as e:
         if logger:
             logger.error(f"程序执行失败: {str(e)}")
             logger.error(traceback.format_exc())
-        print(f"错误: {e}")
+        
+        # 如果是JSON输出模式且没有指定输出文件，输出错误的JSON格式
+        if args.output_format == 'json' and not args.output_file:
+            error_output = {
+                'summary': {
+                    'total_videos': 0,
+                    'successful_videos': 0,
+                    'failed_videos': 0,
+                    'total_time_seconds': 0,
+                    'average_time_per_video': 0,
+                    'timestamp': datetime.now().isoformat(),
+                    'error': str(e)
+                },
+                'results': []
+            }
+            print(json.dumps(error_output, ensure_ascii=False, indent=2))
+        elif not args.silent:
+            print(f"错误: {e}")
         return 1
     
     finally:

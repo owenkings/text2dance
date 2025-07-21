@@ -410,8 +410,49 @@ def single_test(model, processor, tokenizer, vid_path, qs, pre_query_prompt=None
             vid_path, num_segments=num_frames, return_msg=True)
         logger.info(f"视频加载消息: {msg}")
     else:
-        logger.warning("帧数为0，不输入图像")
-        vid, msg = None, 'num_frames is 0, not inputing image'
+        logger.info("帧数为0，根据视频时长自动选择帧数")
+        # 自动选择帧数：根据视频时长计算合适的帧数
+        try:
+            import os
+            
+            # 标准化路径
+            normalized_path = os.path.normpath(vid_path)
+            
+            # 加载视频获取时长信息
+            vr = VideoReader(normalized_path, ctx=cpu(0), num_threads=1)
+            total_frames = len(vr)
+            fps = vr.get_avg_fps()
+            duration = total_frames / fps  # 视频时长（秒）
+            
+            # 根据视频时长自动选择帧数
+            if duration <= 10:  # 10秒以内
+                auto_num_frames = 8
+            elif duration <= 30:  # 30秒以内
+                auto_num_frames = 12
+            elif duration <= 60:  # 1分钟以内
+                auto_num_frames = 16
+            elif duration <= 180:  # 3分钟以内
+                auto_num_frames = 20
+            elif duration <= 300:  # 5分钟以内
+                auto_num_frames = 24
+            else:  # 超过5分钟
+                auto_num_frames = 32
+            
+            logger.info(f"视频时长: {duration:.1f}秒，自动选择帧数: {auto_num_frames}")
+            print(f"视频时长: {duration:.1f}秒，自动选择帧数: {auto_num_frames}")
+            
+            # 使用自动选择的帧数加载视频
+            vid, msg = load_video(
+                vid_path, num_segments=auto_num_frames, return_msg=True)
+            logger.info(f"自动帧数选择完成，视频加载消息: {msg}")
+            
+        except Exception as e:
+            logger.error(f"自动帧数选择失败: {e}，使用默认16帧")
+            print(f"自动帧数选择失败: {e}，使用默认16帧")
+            # 回退到默认帧数
+            vid, msg = load_video(
+                vid_path, num_segments=16, return_msg=True)
+            logger.info(f"回退到默认帧数，视频加载消息: {msg}")
     
     img_grid = vid
     logger.info("设置对话模板...")

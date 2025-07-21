@@ -156,7 +156,7 @@ class ConfigManager(QObject):
                     'models_path': './models/pose_3d'
                 },
                 'video_description': {
-                    'device': 'Auto',
+                    'device': 'CUDA',  # 默认使用CUDA
                     'models_path': './models/video_description'
                 }
             },
