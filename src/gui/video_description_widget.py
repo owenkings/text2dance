@@ -124,7 +124,7 @@ class VideoDescriptionThread(QThread):
     video_completed = pyqtSignal(str, bool, str, str, float)  # 视频路径, 是否成功, 描述内容, 错误信息, 总耗时
     all_completed = pyqtSignal()
 
-    def __init__(self, videos, description_requirement, model_path, use_action_filter=False, generation_mode="random", max_new_tokens=200, num_frames=16, api_config=None, device="Auto"):
+    def __init__(self, videos, description_requirement, model_path, use_action_filter=False, generation_mode="random", max_new_tokens=200, num_frames=16, api_config=None, device="Auto", enable_multithread=False, thread_count=2):
         super().__init__()
         self.videos = videos
         self.description_requirement = description_requirement
@@ -135,14 +135,28 @@ class VideoDescriptionThread(QThread):
         self.num_frames = num_frames
         self.api_config = api_config or {}
         self.device = device  # 添加设备参数
+        self.enable_multithread = enable_multithread  # 是否启用多线程
+        self.thread_count = thread_count  # 线程数量
         self.is_running = True
         self.results = []
+    
+    def stop(self):
+        """停止处理线程"""
+        self.is_running = False
+        self.quit()
+        self.wait()
     
     def run(self):
         try:
             total_videos = len(self.videos)
-            self.status_updated.emit(f"开始批量处理 {total_videos} 个视频...")
-            self.log_updated.emit("使用优化的批量处理模式 (1次模型加载 + N次推理)")
+            
+            # 检查是否启用多线程处理
+            if self.enable_multithread and self.device in ["CUDA", "Auto"] and total_videos > 1:
+                self.status_updated.emit(f"开始多线程处理 {total_videos} 个视频，使用 {self.thread_count} 个线程...")
+                self.log_updated.emit(f"使用多线程处理模式 ({self.thread_count} 个线程并行处理)")
+            else:
+                self.status_updated.emit(f"开始批量处理 {total_videos} 个视频...")
+                self.log_updated.emit("使用优化的批量处理模式 (1次模型加载 + N次推理)")
             
             # 输出设备信息
             device_info = f"此次运行使用的计算设备: {self.device}"
@@ -157,8 +171,11 @@ class VideoDescriptionThread(QThread):
             # 记录整体开始时间
             overall_start_time = time.time()
             
-            # 使用批量处理脚本
-            success, results = self._process_videos_batch()
+            # 根据设置选择处理方式
+            if self.enable_multithread and self.device in ["CUDA", "Auto"] and total_videos > 1:
+                success, results = self._process_videos_multithread()
+            else:
+                success, results = self._process_videos_batch()
             
             if success and results:
                 # 处理每个视频的结果
@@ -214,6 +231,193 @@ class VideoDescriptionThread(QThread):
         except Exception as e:
             self.status_updated.emit(f"处理过程中发生错误: {str(e)}")
             self.log_updated.emit(f"异常详情: {str(e)}")
+    
+    def _process_videos_multithread(self):
+        """多线程处理视频"""
+        import threading
+        import queue
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        
+        try:
+            total_videos = len(self.videos)
+            self.log_updated.emit(f"准备启动 {self.thread_count} 个处理线程")
+            
+            # 将视频分组，每组分配给一个线程
+            video_chunks = []
+            chunk_size = max(1, total_videos // self.thread_count)
+            
+            for i in range(0, total_videos, chunk_size):
+                chunk = self.videos[i:i + chunk_size]
+                if chunk:  # 确保chunk不为空
+                    video_chunks.append(chunk)
+            
+            # 如果分组数量超过线程数，合并最后的小组
+            while len(video_chunks) > self.thread_count:
+                last_chunk = video_chunks.pop()
+                video_chunks[-1].extend(last_chunk)
+            
+            self.log_updated.emit(f"视频分组完成：{len(video_chunks)} 个组，每组平均 {total_videos/len(video_chunks):.1f} 个视频")
+            
+            all_results = []
+            completed_count = 0
+            
+            # 使用线程池执行器
+            with ThreadPoolExecutor(max_workers=self.thread_count) as executor:
+                # 提交所有任务
+                future_to_chunk = {}
+                for i, chunk in enumerate(video_chunks):
+                    future = executor.submit(self._process_video_chunk, chunk, i)
+                    future_to_chunk[future] = (chunk, i)
+                
+                # 处理完成的任务
+                for future in as_completed(future_to_chunk):
+                    if not self.is_running:
+                        self.log_updated.emit("用户取消多线程处理")
+                        executor.shutdown(wait=False)
+                        return False, []
+                    
+                    chunk, chunk_id = future_to_chunk[future]
+                    try:
+                        success, results = future.result()
+                        if success and results:
+                            all_results.extend(results)
+                            completed_count += len(chunk)
+                            
+                            # 更新进度
+                            progress = int((completed_count / total_videos) * 100)
+                            self.progress_updated.emit(progress)
+                            
+                            self.log_updated.emit(f"线程 {chunk_id} 完成，处理了 {len(chunk)} 个视频")
+                            
+                            # 发送每个视频的完成信号
+                            for result in results:
+                                self.video_completed.emit(
+                                    result['video_path'],
+                                    result['success'],
+                                    result['description'] or "",
+                                    result.get('error_message', ""),
+                                    result.get('processing_time', 0)
+                                )
+                        else:
+                            self.log_updated.emit(f"线程 {chunk_id} 处理失败")
+                            
+                    except Exception as e:
+                        self.log_updated.emit(f"线程 {chunk_id} 发生异常: {str(e)}")
+            
+            if all_results:
+                self.log_updated.emit(f"多线程处理完成，共处理 {len(all_results)} 个视频")
+                return True, all_results
+            else:
+                self.log_updated.emit("多线程处理失败，没有获得任何结果")
+                return False, []
+                
+        except Exception as e:
+            error_msg = f"多线程处理时发生异常: {str(e)}"
+            self.log_updated.emit(error_msg)
+            return False, []
+    
+    def _process_video_chunk(self, video_chunk, chunk_id):
+        """处理一组视频（在单独线程中运行）"""
+        try:
+            self.log_updated.emit(f"线程 {chunk_id} 开始处理 {len(video_chunk)} 个视频")
+            
+            # 构建批量处理命令
+            cmd = [
+                'python',
+                'src/algorithms/video_description/ShareGPT4Video/batch_run.py',
+                '--model-path', self.model_path,
+                '--query', self.description_requirement,
+                '--device', self.device,
+                '--output-format', 'json'
+            ]
+            
+            # 添加这组视频的路径
+            cmd.extend(['--videos'] + video_chunk)
+            
+            # 添加高级参数
+            if self.max_new_tokens > 0:
+                cmd.extend(['--max-new-tokens', str(self.max_new_tokens)])
+            
+            if self.num_frames > 0:
+                cmd.extend(['--num-frames', str(self.num_frames)])
+            else:
+                cmd.extend(['--num-frames', '16'])
+            
+            # 添加生成控制参数
+            if self.generation_mode == "deterministic":
+                cmd.extend(['--do-sample', 'False', '--num-beams', '1'])
+            elif self.generation_mode == "random":
+                cmd.extend(['--do-sample', 'True', '--top-p', '0.9'])
+            elif self.generation_mode == "hybrid":
+                cmd.extend(['--do-sample', 'True', '--top-p', '0.7', '--temperature', '0.8', '--num-beams', '2'])
+            
+            # 设置工作目录
+            import os
+            project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+            
+            # 执行命令
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding='utf-8',
+                errors='replace',
+                cwd=project_root
+            )
+            
+            output, _ = process.communicate()
+            
+            if process.returncode == 0:
+                # 解析JSON结果
+                try:
+                    import json
+                    # 查找JSON输出
+                    lines = output.strip().split('\n')
+                    json_start = -1
+                    
+                    for i, line in enumerate(lines):
+                        if line.strip().startswith('{'):
+                            json_start = i
+                            break
+                    
+                    if json_start != -1:
+                        json_text = '\n'.join(lines[json_start:])
+                        json_output = json.loads(json_text)
+                        
+                        if 'results' in json_output:
+                            results = json_output['results']
+                            self.log_updated.emit(f"线程 {chunk_id} 成功解析 {len(results)} 个结果")
+                            return True, results
+                        else:
+                            self.log_updated.emit(f"线程 {chunk_id} JSON中未找到results字段")
+                            return False, []
+                    else:
+                        self.log_updated.emit(f"线程 {chunk_id} 未找到JSON输出")
+                        return False, []
+                        
+                except json.JSONDecodeError as e:
+                    self.log_updated.emit(f"线程 {chunk_id} JSON解析失败: {str(e)}")
+                    # 创建备用结果
+                    fallback_results = []
+                    for video_path in video_chunk:
+                        fallback_results.append({
+                            'video_path': video_path,
+                            'success': True,
+                            'description': '处理完成，但无法获取详细描述内容（JSON解析失败）',
+                            'error_message': '',
+                            'processing_time': 0,
+                            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        })
+                    return True, fallback_results
+            else:
+                self.log_updated.emit(f"线程 {chunk_id} 处理失败，返回码: {process.returncode}")
+                self.log_updated.emit(f"线程 {chunk_id} 错误输出: {output}")
+                return False, []
+                
+        except Exception as e:
+            self.log_updated.emit(f"线程 {chunk_id} 发生异常: {str(e)}")
+            return False, []
     
     def _process_videos_batch(self):
         """批量处理所有视频"""
@@ -508,6 +712,7 @@ class VideoDescriptionWidget(QWidget):
         self.current_videos = []
         self.video_results = {}  # 存储视频处理结果
         self.processing_thread = None
+        self.is_all_selected = False  # 全选状态标记
         
         # OpenCV视频播放相关
         self.video_capture = None
@@ -596,16 +801,12 @@ class VideoDescriptionWidget(QWidget):
         list_control_layout = QHBoxLayout()
         list_control_layout.addWidget(QLabel("视频列表:"))
         
-        # 添加全选/取消全选按钮
-        self.select_all_btn = QPushButton("全选")
-        self.select_all_btn.clicked.connect(self._select_all_videos)
-        self.select_all_btn.setMaximumWidth(50)
-        list_control_layout.addWidget(self.select_all_btn)
-        
-        self.deselect_all_btn = QPushButton("取消全选")
-        self.deselect_all_btn.clicked.connect(self._deselect_all_videos)
-        self.deselect_all_btn.setMaximumWidth(70)
-        list_control_layout.addWidget(self.deselect_all_btn)
+        # 添加全选/取消全选切换按钮
+        self.select_toggle_btn = QPushButton("全选")
+        self.select_toggle_btn.clicked.connect(self._toggle_select_all)
+        self.select_toggle_btn.setMaximumWidth(70)
+        self.is_all_selected = False  # 跟踪当前选择状态
+        list_control_layout.addWidget(self.select_toggle_btn)
         
         # 添加删除选中视频按钮
         self.delete_selected_btn = QPushButton("删除选中")
@@ -614,19 +815,38 @@ class VideoDescriptionWidget(QWidget):
         self.delete_selected_btn.setStyleSheet("QPushButton { color: #d32f2f; }")
         list_control_layout.addWidget(self.delete_selected_btn)
         
+        # 选择状态显示（移动到删除按钮后方）
+        self.selection_status_label = QLabel("已选择：0/0")
+        self.selection_status_label.setStyleSheet("""
+            QLabel {
+                color: #666;
+                font-size: 12px;
+                margin-left: 5px;
+            }
+        """)
+        self.selection_status_label.setAlignment(Qt.AlignVCenter)  # 垂直居中对齐
+        list_control_layout.addWidget(self.selection_status_label)
+        
         list_control_layout.addStretch()
         upload_layout.addLayout(list_control_layout)
         
         # 视频列表（支持复选框）
         self.video_list = QListWidget()
+        self.video_list.setMinimumHeight(240)  # 减小高度为状态标签留出空间
+        self.video_list.setMaximumHeight(240)  # 设置最大高度，确保不会过度扩展
+        self.video_list.setStyleSheet("""
+            QListWidget {
+                border: 1px solid #ccc;
+                border-radius: 4px;
+                background-color: white;
+            }
+        """)
         self.video_list.itemClicked.connect(self._on_video_selected)
         self.video_list.itemChanged.connect(self._on_video_check_changed)
         upload_layout.addWidget(self.video_list)
         
-        # 选择状态显示
-        self.selection_status_label = QLabel("已选择: 0 个视频")
-        self.selection_status_label.setStyleSheet("color: #666; font-size: 12px;")
-        upload_layout.addWidget(self.selection_status_label)
+        # 添加间距
+        upload_layout.addSpacing(15)
         
         layout.addWidget(upload_group)
         
@@ -648,26 +868,31 @@ class VideoDescriptionWidget(QWidget):
         options_group = QGroupBox("功能选项")
         options_layout = QVBoxLayout(options_group)
         
-        # 功能选项
+        # 功能选项 - 使用网格布局实现一行两列
+        options_grid = QGridLayout()
+        
+        # 第一行
         self.action_filter_checkbox = QCheckBox("只保留动作描述")
         self.action_filter_checkbox.setToolTip("过滤掉场景、物体等描述，专注于人物动作和行为分析")
         self.action_filter_checkbox.stateChanged.connect(self._sync_action_filter_to_center)
-        options_layout.addWidget(self.action_filter_checkbox)
+        options_grid.addWidget(self.action_filter_checkbox, 0, 0)
         
         self.backup_checkbox = QCheckBox("启用备份功能")
         self.backup_checkbox.setToolTip("自动保存处理结果到本地文件，防止数据丢失")
         self.backup_checkbox.stateChanged.connect(self._sync_backup_to_center)
-        options_layout.addWidget(self.backup_checkbox)
+        options_grid.addWidget(self.backup_checkbox, 0, 1)
         
-        # 保留的其他功能选项
+        # 第二行
         self.export_checkbox = QCheckBox("启用导出功能")
-        options_layout.addWidget(self.export_checkbox)
+        options_grid.addWidget(self.export_checkbox, 1, 0)
         
         self.adaptive_playback_checkbox = QCheckBox("启用自适应播放控制")
         self.adaptive_playback_checkbox.setToolTip("使用PID控制器动态调整播放帧率，提供更平滑的播放体验")
         self.adaptive_playback_checkbox.setChecked(True)  # 默认启用
         self.adaptive_playback_checkbox.stateChanged.connect(self._toggle_adaptive_playback)
-        options_layout.addWidget(self.adaptive_playback_checkbox)
+        options_grid.addWidget(self.adaptive_playback_checkbox, 1, 1)
+        
+        options_layout.addLayout(options_grid)
         
         # 计算设备选择
         device_layout = QHBoxLayout()
@@ -683,10 +908,44 @@ class VideoDescriptionWidget(QWidget):
             "• CUDA: 强制使用GPU加速\n"
             "• CPU: 强制使用CPU处理"
         )
+        self.device_combo.currentTextChanged.connect(self._on_device_changed)
         device_layout.addWidget(self.device_combo)
         device_layout.addStretch()
         
         options_layout.addLayout(device_layout)
+        
+        # 多线程处理选项
+        multithread_layout = QHBoxLayout()
+        
+        self.multithread_checkbox = QCheckBox("启用多线程处理")
+        self.multithread_checkbox.setToolTip(
+            "启用多线程处理可以同时处理多个视频，提高处理效率\n"
+            "注意：仅在使用CUDA或Auto设备时可用，CPU模式不支持多线程"
+        )
+        multithread_layout.addWidget(self.multithread_checkbox)
+        
+        # 线程数量选择
+        thread_label = QLabel("线程数量:")
+        multithread_layout.addWidget(thread_label)
+        
+        self.thread_count_spinbox = QSpinBox()
+        self.thread_count_spinbox.setMinimum(1)
+        self.thread_count_spinbox.setMaximum(8)
+        self.thread_count_spinbox.setValue(2)  # 默认2个线程
+        self.thread_count_spinbox.setToolTip(
+            "设置同时处理的线程数量\n"
+            "建议根据GPU显存大小选择：\n"
+            "• 8GB以下显存：1-2个线程\n"
+            "• 8-16GB显存：2-4个线程\n"
+            "• 16GB以上显存：4-8个线程"
+        )
+        multithread_layout.addWidget(self.thread_count_spinbox)
+        
+        multithread_layout.addStretch()
+        options_layout.addLayout(multithread_layout)
+        
+        # 初始化多线程选项状态
+        self._on_device_changed()
         
         layout.addWidget(options_group)
         
@@ -699,7 +958,8 @@ class VideoDescriptionWidget(QWidget):
         scroll_area.setWidgetResizable(True)
         scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        scroll_area.setMaximumHeight(300)  # 限制最大高度以确保滚动功能
+        scroll_area.setMinimumHeight(120)  # 减小最小高度
+        scroll_area.setMaximumHeight(250)  # 减小最大高度
         
         # 创建滚动内容容器
         scroll_content = QWidget()
@@ -1118,6 +1378,20 @@ class VideoDescriptionWidget(QWidget):
         # 自动保存选项同步
         self.auto_save_format_combo.currentTextChanged.connect(self._on_auto_save_format_changed)
     
+    def _on_device_changed(self):
+        """设备选择变化处理"""
+        device = self.device_combo.currentText()
+        
+        # 只有在CUDA模式下才允许多线程处理
+        if device == "CUDA":
+            self.multithread_checkbox.setEnabled(True)
+            self.thread_count_spinbox.setEnabled(True)
+            # 默认不勾选多线程，用户可根据需要手动启用
+        else:  # Auto或CPU模式
+            self.multithread_checkbox.setEnabled(False)
+            self.multithread_checkbox.setChecked(False)
+            self.thread_count_spinbox.setEnabled(False)
+    
     def _upload_video_files(self):
         """上传视频文件"""
         files, _ = QFileDialog.getOpenFileNames(
@@ -1149,8 +1423,11 @@ class VideoDescriptionWidget(QWidget):
                 self._upload_video_folder()
     
     def _add_videos_from_folder(self, folder):
-        """从文件夹添加视频文件"""
+        """从文件夹添加视频文件并读取已有描述文件"""
         video_extensions = ['*.mp4', '*.avi', '*.mov', '*.mkv', '*.wmv', '*.flv', '*.webm']
+        
+        added_count = 0
+        processed_count = 0
         
         for extension in video_extensions:
             for file_path in Path(folder).glob(extension):
@@ -1158,6 +1435,18 @@ class VideoDescriptionWidget(QWidget):
                 if file_str not in self.current_videos:
                     self.current_videos.append(file_str)
                     self._add_video_to_list(file_str)
+                    added_count += 1
+                    
+                    # 检查是否有已存在的描述文件
+                    if self._is_video_processed(file_str):
+                        processed_count += 1
+        
+        # 记录添加结果
+        if added_count > 0:
+            message = f"从文件夹添加了 {added_count} 个视频文件"
+            if processed_count > 0:
+                message += f"，其中 {processed_count} 个已有处理结果"
+            self._log_message(message)
     
     def _select_all_videos(self):
         """全选所有视频"""
@@ -1187,11 +1476,31 @@ class VideoDescriptionWidget(QWidget):
         """视频复选框状态改变"""
         self._update_selection_status()
     
+    def _toggle_select_all(self):
+        """切换全选/取消全选"""
+        if self.is_all_selected:
+            # 当前是全选状态，执行取消全选
+            self._deselect_all_videos()
+        else:
+            # 当前不是全选状态，执行全选
+            self._select_all_videos()
+    
     def _update_selection_status(self):
         """更新选择状态显示"""
         selected_count = len(self._get_selected_videos())
         total_count = self.video_list.count()
-        self.selection_status_label.setText(f"已选择: {selected_count} / {total_count} 个视频")
+        self.selection_status_label.setText(f"已选择：{selected_count}/{total_count}")
+        
+        # 更新切换按钮状态
+        if total_count == 0:
+            self.is_all_selected = False
+            self.select_toggle_btn.setText("全选")
+        elif selected_count == total_count:
+            self.is_all_selected = True
+            self.select_toggle_btn.setText("取消全选")
+        else:
+            self.is_all_selected = False
+            self.select_toggle_btn.setText("全选")
     
     def _delete_selected_videos(self):
         """删除选中的视频"""
@@ -1250,7 +1559,7 @@ class VideoDescriptionWidget(QWidget):
         return result_file.exists()
     
     def _get_result_file_path(self, video_path):
-        """获取结果文件路径"""
+        """获取结果文件路径 - 统一使用视频名+description格式"""
         video_dir = Path(video_path).parent
         video_name = Path(video_path).stem
         return video_dir / f"{video_name}_description.json"
@@ -1730,6 +2039,10 @@ class VideoDescriptionWidget(QWidget):
         # 获取设备设置
         device_setting = self.device_combo.currentText()
         
+        # 获取多线程设置
+        enable_multithread = self.multithread_checkbox.isChecked() and self.multithread_checkbox.isEnabled()
+        thread_count = self.thread_count_spinbox.value()
+        
         # 启动处理线程（只处理选中的视频）
         self.processing_thread = VideoDescriptionThread(
             selected_videos,
@@ -1740,7 +2053,9 @@ class VideoDescriptionWidget(QWidget):
             max_new_tokens,
             num_frames,
             api_config,
-            device_setting
+            device_setting,
+            enable_multithread,
+            thread_count
         )
         
         if hasattr(self, 'center_progress_bar'):
@@ -1957,7 +2272,7 @@ class VideoDescriptionWidget(QWidget):
         event.accept()
     
     def _export_results(self, format_type):
-        """导出结果"""
+        """导出结果 - 每个视频单独导出到视频所在目录"""
         if not self.current_videos:
             QMessageBox.warning(self, "警告", "没有可导出的结果")
             return
@@ -1968,142 +2283,149 @@ class VideoDescriptionWidget(QWidget):
             QMessageBox.warning(self, "警告", "请先选择要导出的视频")
             return
         
-        # 选择导出目录
-        export_dir = QFileDialog.getExistingDirectory(self, "选择导出目录")
-        if not export_dir:
-            return
-        
         try:
-            # 收集选中视频的结果
-            all_results = []
+            exported_count = 0
+            failed_count = 0
+            
+            # 为每个选中的视频单独导出
             for video_path in selected_videos:
                 result_file = self._get_result_file_path(video_path)
                 if result_file.exists():
                     with open(result_file, 'r', encoding='utf-8') as f:
                         result = json.load(f)
-                        result['video_path'] = video_path
-                        result['video_name'] = os.path.basename(video_path)
-                        all_results.append(result)
+                    
+                    # 获取视频所在目录
+                    video_dir = Path(video_path).parent
+                    video_name = Path(video_path).stem
+                    
+                    # 生成导出文件路径
+                    if format_type == 'json':
+                        export_file = video_dir / f"{video_name}_description.json"
+                        self._export_single_video_json(result, video_path, export_file)
+                    elif format_type == 'txt':
+                        export_file = video_dir / f"{video_name}_description.txt"
+                        self._export_single_video_txt(result, video_path, export_file)
+                    elif format_type == 'csv':
+                        export_file = video_dir / f"{video_name}_description.csv"
+                        self._export_single_video_csv(result, video_path, export_file)
+                    elif format_type == 'md':
+                        export_file = video_dir / f"{video_name}_description.md"
+                        self._export_single_video_md(result, video_path, export_file)
+                    
+                    exported_count += 1
+                else:
+                    failed_count += 1
+                    self._log_message(f"未找到视频处理结果: {os.path.basename(video_path)}")
             
-            if not all_results:
-                QMessageBox.warning(self, "警告", "没有找到处理结果")
-                return
-            
-            # 根据格式导出
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            
-            if format_type == 'json':
-                export_file = os.path.join(export_dir, f"video_description_results_{timestamp}.json")
-                with open(export_file, 'w', encoding='utf-8') as f:
-                    json.dump(all_results, f, ensure_ascii=False, indent=2)
-            
-            elif format_type == 'txt':
-                export_file = os.path.join(export_dir, f"video_description_results_{timestamp}.txt")
-                with open(export_file, 'w', encoding='utf-8') as f:
-                    for result in all_results:
-                        f.write(f"视频: {result['video_name']}\n")
-                        
-                        # 显示总耗时
-                        total_time = result.get('total_processing_time')
-                        if total_time is not None:
-                            if total_time < 60:
-                                time_str = f"{total_time:.1f} 秒"
-                            elif total_time < 3600:
-                                minutes = int(total_time // 60)
-                                seconds = total_time % 60
-                                time_str = f"{minutes} 分 {seconds:.1f} 秒"
-                            else:
-                                hours = int(total_time // 3600)
-                                minutes = int((total_time % 3600) // 60)
-                                seconds = total_time % 60
-                                time_str = f"{hours} 小时 {minutes} 分 {seconds:.1f} 秒"
-                            f.write(f"总耗时: {time_str}\n")
-                        else:
-                            # 兼容旧格式
-                            f.write(f"处理时间: {result.get('process_time', '未知')}\n")
-                        
-                        f.write(f"视频时长: {result.get('duration', '未知')}\n")
-                        f.write(f"处理状态: {'成功' if result.get('success', False) else '失败'}\n")
-                        if result.get('success', False):
-                            f.write(f"描述内容: {result.get('description', '无')}\n")
-                        else:
-                            f.write(f"错误信息: {result.get('error_message', '无')}\n")
-                        f.write("-" * 50 + "\n")
-            
-            elif format_type == 'csv':
-                export_file = os.path.join(export_dir, f"video_description_results_{timestamp}.csv")
-                with open(export_file, 'w', newline='', encoding='utf-8-sig') as f:
-                    writer = csv.writer(f)
-                    writer.writerow(['视频名称', '总耗时', '视频时长', '处理状态', '描述内容', '错误信息'])
-                    for result in all_results:
-                        # 格式化总耗时
-                        total_time = result.get('total_processing_time')
-                        if total_time is not None:
-                            if total_time < 60:
-                                time_str = f"{total_time:.1f} 秒"
-                            elif total_time < 3600:
-                                minutes = int(total_time // 60)
-                                seconds = total_time % 60
-                                time_str = f"{minutes} 分 {seconds:.1f} 秒"
-                            else:
-                                hours = int(total_time // 3600)
-                                minutes = int((total_time % 3600) // 60)
-                                seconds = total_time % 60
-                                time_str = f"{hours} 小时 {minutes} 分 {seconds:.1f} 秒"
-                        else:
-                            # 兼容旧格式
-                            time_str = result.get('process_time', '未知')
-                        
-                        writer.writerow([
-                            result['video_name'],
-                            time_str,
-                            result.get('duration', '未知'),
-                            '成功' if result.get('success', False) else '失败',
-                            result.get('description', '无'),
-                            result.get('error_message', '无')
-                        ])
-            
-            elif format_type == 'md':
-                export_file = os.path.join(export_dir, f"video_description_results_{timestamp}.md")
-                with open(export_file, 'w', encoding='utf-8') as f:
-                    f.write("# 视频描述结果\n\n")
-                    for result in all_results:
-                        f.write(f"## {result['video_name']}\n\n")
-                        
-                        # 显示总耗时
-                        total_time = result.get('total_processing_time')
-                        if total_time is not None:
-                            if total_time < 60:
-                                time_str = f"{total_time:.1f} 秒"
-                            elif total_time < 3600:
-                                minutes = int(total_time // 60)
-                                seconds = total_time % 60
-                                time_str = f"{minutes} 分 {seconds:.1f} 秒"
-                            else:
-                                hours = int(total_time // 3600)
-                                minutes = int((total_time % 3600) // 60)
-                                seconds = total_time % 60
-                                time_str = f"{hours} 小时 {minutes} 分 {seconds:.1f} 秒"
-                            f.write(f"- **总耗时**: {time_str}\n")
-                        else:
-                            # 兼容旧格式
-                            f.write(f"- **处理时间**: {result.get('process_time', '未知')}\n")
-                        
-                        f.write(f"- **视频时长**: {result.get('duration', '未知')}\n")
-                        f.write(f"- **处理状态**: {'成功' if result.get('success', False) else '失败'}\n\n")
-                        if result.get('success', False):
-                            f.write(f"### 描述内容\n\n{result.get('description', '无')}\n\n")
-                        else:
-                            f.write(f"### 错误信息\n\n{result.get('error_message', '无')}\n\n")
-                        f.write("---\n\n")
-            
-            QMessageBox.information(self, "导出成功", f"结果已导出到: {export_file}")
+            # 显示导出结果
+            if exported_count > 0:
+                message = f"成功导出 {exported_count} 个视频的描述文件"
+                if failed_count > 0:
+                    message += f"\n{failed_count} 个视频未找到处理结果"
+                QMessageBox.information(self, "导出完成", message)
+                self._log_message(f"导出完成: {exported_count} 成功, {failed_count} 失败")
+            else:
+                QMessageBox.warning(self, "导出失败", "没有找到任何处理结果")
             
         except Exception as e:
             QMessageBox.critical(self, "导出失败", f"导出过程中发生错误: {str(e)}")
+            self._log_message(f"导出失败: {str(e)}")
+    
+    def _export_single_video_json(self, result, video_path, export_file):
+        """导出单个视频的JSON格式描述"""
+        # 构建导出数据
+        export_data = {
+            "video_name": os.path.basename(video_path),
+            "video_relative_path": os.path.relpath(video_path, Path(video_path).parent),
+            "video_duration": result.get('duration', '未知'),
+            "processing_time": self._format_processing_time(result.get('total_processing_time')),
+            "processing_status": '成功' if result.get('success', False) else '失败',
+            "description": result.get('description', '无') if result.get('success', False) else None,
+            "error_message": result.get('error_message', '无') if not result.get('success', False) else None,
+            "processed_at": result.get('processed_at', datetime.now().isoformat()),
+            "model_info": result.get('model_info', {}),
+            "device_info": result.get('device_info', '未知')
+        }
+        
+        with open(export_file, 'w', encoding='utf-8') as f:
+            json.dump(export_data, f, ensure_ascii=False, indent=2)
+    
+    def _export_single_video_txt(self, result, video_path, export_file):
+        """导出单个视频的TXT格式描述"""
+        with open(export_file, 'w', encoding='utf-8') as f:
+            f.write(f"视频名称: {os.path.basename(video_path)}\n")
+            f.write(f"视频相对路径: {os.path.relpath(video_path, Path(video_path).parent)}\n")
+            f.write(f"视频时长: {result.get('duration', '未知')}\n")
+            f.write(f"处理时长: {self._format_processing_time(result.get('total_processing_time'))}\n")
+            f.write(f"处理状态: {'成功' if result.get('success', False) else '失败'}\n")
+            f.write(f"处理时间: {result.get('processed_at', '未知')}\n")
+            f.write(f"设备信息: {result.get('device_info', '未知')}\n")
+            f.write("-" * 50 + "\n")
+            
+            if result.get('success', False):
+                f.write(f"视频描述:\n{result.get('description', '无')}\n")
+            else:
+                f.write(f"错误信息:\n{result.get('error_message', '无')}\n")
+    
+    def _export_single_video_csv(self, result, video_path, export_file):
+        """导出单个视频的CSV格式描述"""
+        import csv
+        with open(export_file, 'w', newline='', encoding='utf-8-sig') as f:
+            writer = csv.writer(f)
+            writer.writerow(['字段', '值'])
+            writer.writerow(['视频名称', os.path.basename(video_path)])
+            writer.writerow(['视频相对路径', os.path.relpath(video_path, Path(video_path).parent)])
+            writer.writerow(['视频时长', result.get('duration', '未知')])
+            writer.writerow(['处理时长', self._format_processing_time(result.get('total_processing_time'))])
+            writer.writerow(['处理状态', '成功' if result.get('success', False) else '失败'])
+            writer.writerow(['处理时间', result.get('processed_at', '未知')])
+            writer.writerow(['设备信息', result.get('device_info', '未知')])
+            
+            if result.get('success', False):
+                writer.writerow(['视频描述', result.get('description', '无')])
+            else:
+                writer.writerow(['错误信息', result.get('error_message', '无')])
+    
+    def _export_single_video_md(self, result, video_path, export_file):
+        """导出单个视频的Markdown格式描述"""
+        with open(export_file, 'w', encoding='utf-8') as f:
+            f.write(f"# {os.path.basename(video_path)} 视频描述\n\n")
+            f.write("## 基本信息\n\n")
+            f.write(f"- **视频名称**: {os.path.basename(video_path)}\n")
+            f.write(f"- **视频相对路径**: {os.path.relpath(video_path, Path(video_path).parent)}\n")
+            f.write(f"- **视频时长**: {result.get('duration', '未知')}\n")
+            f.write(f"- **处理时长**: {self._format_processing_time(result.get('total_processing_time'))}\n")
+            f.write(f"- **处理状态**: {'成功' if result.get('success', False) else '失败'}\n")
+            f.write(f"- **处理时间**: {result.get('processed_at', '未知')}\n")
+            f.write(f"- **设备信息**: {result.get('device_info', '未知')}\n\n")
+            
+            if result.get('success', False):
+                f.write("## 视频描述\n\n")
+                f.write(f"{result.get('description', '无')}\n")
+            else:
+                f.write("## 错误信息\n\n")
+                f.write(f"{result.get('error_message', '无')}\n")
+    
+    def _format_processing_time(self, total_time):
+        """格式化处理时间"""
+        if total_time is not None:
+            if total_time < 60:
+                return f"{total_time:.1f} 秒"
+            elif total_time < 3600:
+                minutes = int(total_time // 60)
+                seconds = total_time % 60
+                return f"{minutes} 分 {seconds:.1f} 秒"
+            else:
+                hours = int(total_time // 3600)
+                minutes = int((total_time % 3600) // 60)
+                seconds = total_time % 60
+                return f"{hours} 小时 {minutes} 分 {seconds:.1f} 秒"
+        return "未知"
+            
+
     
     def _handle_auto_save(self):
-        """处理自动保存功能"""
+        """处理自动保存功能 - 每个视频单独保存到视频所在目录"""
         if not self.current_videos:
             QMessageBox.warning(self, "警告", "没有可保存的结果")
             return
@@ -2125,147 +2447,60 @@ class VideoDescriptionWidget(QWidget):
             }
             selected_format = format_map.get(format_text, "json")
             
-            # 询问保存地址
-            save_dir = QFileDialog.getExistingDirectory(self, "选择保存目录")
-            if not save_dir:
-                return
-            
-            # 执行自动保存
-            self._auto_save_results(selected_format, save_dir, selected_videos)
+            # 直接执行自动保存到各视频所在目录
+            self._auto_save_results(selected_format, selected_videos)
             
         except Exception as e:
             QMessageBox.critical(self, "自动保存失败", f"自动保存过程中发生错误: {str(e)}")
     
-    def _auto_save_results(self, format_type, save_dir, selected_videos=None):
-        """执行自动保存"""
+    def _auto_save_results(self, format_type, selected_videos=None):
+        """执行自动保存 - 每个视频单独保存到视频所在目录"""
         try:
             # 如果没有指定选中视频，则使用所有视频
             videos_to_save = selected_videos if selected_videos is not None else self.current_videos
             
-            # 收集选中视频的结果
-            all_results = []
+            saved_count = 0
+            failed_count = 0
+            
+            # 为每个视频单独保存
             for video_path in videos_to_save:
                 result_file = self._get_result_file_path(video_path)
                 if result_file.exists():
                     with open(result_file, 'r', encoding='utf-8') as f:
                         result = json.load(f)
-                        result['video_path'] = video_path
-                        result['video_name'] = os.path.basename(video_path)
-                        all_results.append(result)
+                    
+                    # 获取视频所在目录
+                    video_dir = Path(video_path).parent
+                    video_name = Path(video_path).stem
+                    
+                    # 生成保存文件路径
+                    if format_type == 'json':
+                        save_file = video_dir / f"{video_name}_description.json"
+                        self._export_single_video_json(result, video_path, save_file)
+                    elif format_type == 'txt':
+                        save_file = video_dir / f"{video_name}_description.txt"
+                        self._export_single_video_txt(result, video_path, save_file)
+                    elif format_type == 'csv':
+                        save_file = video_dir / f"{video_name}_description.csv"
+                        self._export_single_video_csv(result, video_path, save_file)
+                    elif format_type == 'md':
+                        save_file = video_dir / f"{video_name}_description.md"
+                        self._export_single_video_md(result, video_path, save_file)
+                    
+                    saved_count += 1
+                else:
+                    failed_count += 1
+                    self._log_message(f"未找到视频处理结果: {os.path.basename(video_path)}")
             
-            if not all_results:
-                QMessageBox.warning(self, "警告", "没有找到处理结果")
-                return
-            
-            # 生成文件名
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            
-            if format_type == 'json':
-                save_file = os.path.join(save_dir, f"video_description_results_{timestamp}.json")
-                with open(save_file, 'w', encoding='utf-8') as f:
-                    json.dump(all_results, f, ensure_ascii=False, indent=2)
-            
-            elif format_type == 'txt':
-                save_file = os.path.join(save_dir, f"video_description_results_{timestamp}.txt")
-                with open(save_file, 'w', encoding='utf-8') as f:
-                    for result in all_results:
-                        f.write(f"视频: {result['video_name']}\n")
-                        
-                        # 显示总耗时
-                        total_time = result.get('total_processing_time')
-                        if total_time is not None:
-                            if total_time < 60:
-                                time_str = f"{total_time:.1f} 秒"
-                            elif total_time < 3600:
-                                minutes = int(total_time // 60)
-                                seconds = total_time % 60
-                                time_str = f"{minutes} 分 {seconds:.1f} 秒"
-                            else:
-                                hours = int(total_time // 3600)
-                                minutes = int((total_time % 3600) // 60)
-                                seconds = total_time % 60
-                                time_str = f"{hours} 小时 {minutes} 分 {seconds:.1f} 秒"
-                            f.write(f"总耗时: {time_str}\n")
-                        else:
-                            f.write(f"处理时间: {result.get('process_time', '未知')}\n")
-                        
-                        f.write(f"视频时长: {result.get('duration', '未知')}\n")
-                        f.write(f"处理状态: {'成功' if result.get('success', False) else '失败'}\n")
-                        if result.get('success', False):
-                            f.write(f"描述内容: {result.get('description', '无')}\n")
-                        else:
-                            f.write(f"错误信息: {result.get('error_message', '无')}\n")
-                        f.write("-" * 50 + "\n")
-            
-            elif format_type == 'csv':
-                import csv
-                save_file = os.path.join(save_dir, f"video_description_results_{timestamp}.csv")
-                with open(save_file, 'w', newline='', encoding='utf-8-sig') as f:
-                    writer = csv.writer(f)
-                    writer.writerow(['视频名称', '总耗时', '视频时长', '处理状态', '描述内容', '错误信息'])
-                    for result in all_results:
-                        # 格式化总耗时
-                        total_time = result.get('total_processing_time')
-                        if total_time is not None:
-                            if total_time < 60:
-                                time_str = f"{total_time:.1f} 秒"
-                            elif total_time < 3600:
-                                minutes = int(total_time // 60)
-                                seconds = total_time % 60
-                                time_str = f"{minutes} 分 {seconds:.1f} 秒"
-                            else:
-                                hours = int(total_time // 3600)
-                                minutes = int((total_time % 3600) // 60)
-                                seconds = total_time % 60
-                                time_str = f"{hours} 小时 {minutes} 分 {seconds:.1f} 秒"
-                        else:
-                            time_str = result.get('process_time', '未知')
-                        
-                        writer.writerow([
-                            result['video_name'],
-                            time_str,
-                            result.get('duration', '未知'),
-                            '成功' if result.get('success', False) else '失败',
-                            result.get('description', '无'),
-                            result.get('error_message', '无')
-                        ])
-            
-            elif format_type == 'md':
-                save_file = os.path.join(save_dir, f"video_description_results_{timestamp}.md")
-                with open(save_file, 'w', encoding='utf-8') as f:
-                    f.write("# 视频描述结果\n\n")
-                    for result in all_results:
-                        f.write(f"## {result['video_name']}\n\n")
-                        
-                        # 显示总耗时
-                        total_time = result.get('total_processing_time')
-                        if total_time is not None:
-                            if total_time < 60:
-                                time_str = f"{total_time:.1f} 秒"
-                            elif total_time < 3600:
-                                minutes = int(total_time // 60)
-                                seconds = total_time % 60
-                                time_str = f"{minutes} 分 {seconds:.1f} 秒"
-                            else:
-                                hours = int(total_time // 3600)
-                                minutes = int((total_time % 3600) // 60)
-                                seconds = total_time % 60
-                                time_str = f"{hours} 小时 {minutes} 分 {seconds:.1f} 秒"
-                            f.write(f"- **总耗时**: {time_str}\n")
-                        else:
-                            f.write(f"- **处理时间**: {result.get('process_time', '未知')}\n")
-                        
-                        f.write(f"- **视频时长**: {result.get('duration', '未知')}\n")
-                        f.write(f"- **处理状态**: {'成功' if result.get('success', False) else '失败'}\n\n")
-                        if result.get('success', False):
-                            f.write(f"### 描述内容\n\n{result.get('description', '无')}\n\n")
-                        else:
-                            f.write(f"### 错误信息\n\n{result.get('error_message', '无')}\n\n")
-                        f.write("---\n\n")
-            
-            # 显示成功消息
-            QMessageBox.information(self, "自动保存成功", f"结果已自动保存到: {save_file}")
-            self._log_message(f"自动保存完成: {save_file}")
+            # 显示保存结果
+            if saved_count > 0:
+                message = f"成功自动保存 {saved_count} 个视频的描述文件到各自目录"
+                if failed_count > 0:
+                    message += f"\n{failed_count} 个视频未找到处理结果"
+                QMessageBox.information(self, "自动保存完成", message)
+                self._log_message(f"自动保存完成: {saved_count} 成功, {failed_count} 失败")
+            else:
+                QMessageBox.warning(self, "自动保存失败", "没有找到任何处理结果")
             
         except Exception as e:
             QMessageBox.critical(self, "自动保存失败", f"自动保存过程中发生错误: {str(e)}")

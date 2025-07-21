@@ -43,7 +43,7 @@ class Application(QApplication):
         
         # 基本属性
         self.app_name = "视频处理爬虫工具"
-        self.app_version = "3.1.0"
+        self.app_version = "3.2.0"
         self.app_author = "开发团队"
         self.app_organization = "VideoTools"
         
