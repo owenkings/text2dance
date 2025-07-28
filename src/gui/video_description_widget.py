@@ -124,19 +124,20 @@ class VideoDescriptionThread(QThread):
     video_completed = pyqtSignal(str, bool, str, str, float)  # 视频路径, 是否成功, 描述内容, 错误信息, 总耗时
     all_completed = pyqtSignal()
 
-    def __init__(self, videos, description_requirement, model_path, use_action_filter=False, generation_mode="random", max_new_tokens=200, num_frames=16, api_config=None, device="Auto", enable_multithread=False, thread_count=2):
+    def __init__(self, videos, description_requirement, model_path, use_action_filter=False, generation_mode="random", description_length=300, num_frames=16, api_config=None, device="Auto", enable_multithread=False, thread_count=2, top_p=0.9):
         super().__init__()
         self.videos = videos
         self.description_requirement = description_requirement
         self.model_path = model_path
         self.use_action_filter = use_action_filter
         self.generation_mode = generation_mode  # "deterministic" 或 "random"
-        self.max_new_tokens = max_new_tokens
+        self.description_length = description_length  # 描述长度要求（字符数）
         self.num_frames = num_frames
         self.api_config = api_config or {}
         self.device = device  # 添加设备参数
         self.enable_multithread = enable_multithread  # 是否启用多线程
         self.thread_count = thread_count  # 线程数量
+        self.top_p = top_p  # Top-p参数
         self.is_running = True
         self.results = []
     
@@ -334,9 +335,14 @@ class VideoDescriptionThread(QThread):
             # 添加这组视频的路径
             cmd.extend(['--videos'] + video_chunk)
             
-            # 添加高级参数
-            if self.max_new_tokens > 0:
-                cmd.extend(['--max-new-tokens', str(self.max_new_tokens)])
+            # 根据描述长度要求动态设置max_new_tokens和更新提示词
+            # 字符数转换为大致的token数（中文约1.5字符/token，英文约4字符/token）
+            estimated_tokens = max(100, int(self.description_length * 0.8))  # 保守估计
+            cmd.extend(['--max-new-tokens', str(estimated_tokens)])
+            
+            # 在提示词中添加长度要求
+            enhanced_query = f"{self.description_requirement} The total length of the description should be approximately {self.description_length} characters."
+            cmd[cmd.index('--query') + 1] = enhanced_query
             
             if self.num_frames > 0:
                 cmd.extend(['--num-frames', str(self.num_frames)])
@@ -347,9 +353,9 @@ class VideoDescriptionThread(QThread):
             if self.generation_mode == "deterministic":
                 cmd.extend(['--do-sample', 'False', '--num-beams', '1'])
             elif self.generation_mode == "random":
-                cmd.extend(['--do-sample', 'True', '--top-p', '0.9'])
+                cmd.extend(['--do-sample', 'True', '--top-p', str(self.top_p)])
             elif self.generation_mode == "hybrid":
-                cmd.extend(['--do-sample', 'True', '--top-p', '0.7', '--temperature', '0.8', '--num-beams', '2'])
+                cmd.extend(['--do-sample', 'True', '--top-p', str(self.top_p), '--temperature', '0.8', '--num-beams', '2'])
             
             # 设置工作目录
             import os
@@ -438,12 +444,16 @@ class VideoDescriptionThread(QThread):
             # 添加所有视频路径
             cmd.extend(['--videos'] + self.videos)
             
-            # 添加高级参数
-            if self.max_new_tokens > 0:
-                cmd.extend(['--max-new-tokens', str(self.max_new_tokens)])
-                self.log_updated.emit(f"设置最大生成长度: {self.max_new_tokens}")
-            else:
-                self.log_updated.emit("使用默认生成长度")
+            # 根据描述长度要求动态设置max_new_tokens和更新提示词
+            # 字符数转换为大致的token数（中文约1.5字符/token，英文约4字符/token）
+            estimated_tokens = max(100, int(self.description_length * 0.8))  # 保守估计
+            cmd.extend(['--max-new-tokens', str(estimated_tokens)])
+            self.log_updated.emit(f"根据描述长度要求({self.description_length}字符)设置最大生成长度: {estimated_tokens} tokens")
+            
+            # 在提示词中添加长度要求
+            enhanced_query = f"{self.description_requirement} The total length of the description should be approximately {self.description_length} characters."
+            cmd[cmd.index('--query') + 1] = enhanced_query
+            self.log_updated.emit(f"已在提示词中添加长度要求: {self.description_length}字符")
             
             # 处理帧数设置
             if self.num_frames > 0:
@@ -458,11 +468,11 @@ class VideoDescriptionThread(QThread):
                 cmd.extend(['--do-sample', 'False', '--num-beams', '1'])
                 self.log_updated.emit("使用确定性生成模式 (do_sample=False, num_beams=1)")
             elif self.generation_mode == "random":
-                cmd.extend(['--do-sample', 'True', '--top-p', '0.9'])
-                self.log_updated.emit("使用随机采样生成模式 (do_sample=True, top_p=0.9)")
+                cmd.extend(['--do-sample', 'True', '--top-p', str(self.top_p)])
+                self.log_updated.emit(f"使用随机采样生成模式 (do_sample=True, top_p={self.top_p})")
             elif self.generation_mode == "hybrid":
-                cmd.extend(['--do-sample', 'True', '--top-p', '0.7', '--temperature', '0.8', '--num-beams', '2'])
-                self.log_updated.emit("使用混合策略模式 (do_sample=True, top_p=0.7, temperature=0.8, num_beams=2)")
+                cmd.extend(['--do-sample', 'True', '--top-p', str(self.top_p), '--temperature', '0.8', '--num-beams', '2'])
+                self.log_updated.emit(f"使用混合策略模式 (do_sample=True, top_p={self.top_p}, temperature=0.8, num_beams=2)")
             
             # 记录执行的命令
             cmd_str = ' '.join(f'"{arg}"' if ' ' in arg else arg for arg in cmd)
@@ -894,7 +904,7 @@ class VideoDescriptionWidget(QWidget):
         
         options_layout.addLayout(options_grid)
         
-        # 计算设备选择
+        # 计算设备选择和采样参数（同一行）
         device_layout = QHBoxLayout()
         device_label = QLabel("计算设备:")
         device_layout.addWidget(device_label)
@@ -910,8 +920,28 @@ class VideoDescriptionWidget(QWidget):
         )
         self.device_combo.currentTextChanged.connect(self._on_device_changed)
         device_layout.addWidget(self.device_combo)
-        device_layout.addStretch()
         
+        # 添加间距
+        device_layout.addSpacing(50)
+        
+        # Top-p参数控制（与计算设备同一行，但在第二列位置）
+        top_p_label = QLabel("采样参数:")
+        device_layout.addWidget(top_p_label)
+        
+        self.top_p_spinbox = QDoubleSpinBox()
+        self.top_p_spinbox.setRange(0.8, 1.0)
+        self.top_p_spinbox.setSingleStep(0.01)
+        self.top_p_spinbox.setDecimals(2)
+        self.top_p_spinbox.setValue(0.9)  # 默认值0.9
+        self.top_p_spinbox.setToolTip(
+            "控制生成文本的多样性和详细程度:\n"
+            "• 0.8-0.85: 生成简洁、聚焦的描述\n"
+            "• 0.9: 平衡的描述详细程度（推荐）\n"
+            "• 0.95-1.0: 生成更详细、更丰富的描述"
+        )
+        device_layout.addWidget(self.top_p_spinbox)
+        
+        device_layout.addStretch()
         options_layout.addLayout(device_layout)
         
         # 多线程处理选项
@@ -1145,13 +1175,28 @@ class VideoDescriptionWidget(QWidget):
             "混合策略: 结合确定性和随机性"
         )
         
-        tokens_label = QLabel("最大生成长度:")
+        tokens_label = QLabel("描述长度要求:")
         tokens_label.setStyleSheet("font-weight: bold; color: #2c3e50;")
-        self.center_max_tokens_spinbox = QSpinBox()
-        self.center_max_tokens_spinbox.setRange(0, 2048)
-        self.center_max_tokens_spinbox.setValue(200)
-        self.center_max_tokens_spinbox.setSpecialValueText("无限制")
-        self.center_max_tokens_spinbox.setToolTip("控制生成描述的最大token数量\n推荐值: 100-500")
+        self.center_description_length_combo = QComboBox()
+        self.center_description_length_combo.addItems(["简要描述(150字符)", "标准描述(300字符)", "详细描述(500字符)", "非常详细(800字符)", "自定义长度"])
+        self.center_description_length_combo.setCurrentText("标准描述(300字符)")
+        self.center_description_length_combo.setToolTip(
+            "选择描述的详细程度:\n"
+            "• 简要描述: 约150字符，快速概览\n"
+            "• 标准描述: 约300字符，平衡详细度\n"
+            "• 详细描述: 约500字符，全面分析\n"
+            "• 非常详细: 约800字符，深度描述\n"
+            "• 自定义长度: 手动设置字符数量"
+        )
+        self.center_description_length_combo.currentTextChanged.connect(self._on_description_length_changed)
+        
+        # 自定义长度输入框（初始隐藏）
+        self.center_custom_length_spinbox = QSpinBox()
+        self.center_custom_length_spinbox.setRange(100, 2000)
+        self.center_custom_length_spinbox.setValue(300)
+        self.center_custom_length_spinbox.setSuffix(" 字符")
+        self.center_custom_length_spinbox.setVisible(False)
+        self.center_custom_length_spinbox.setToolTip("自定义描述长度（字符数）")
         
         # 第二行：采样帧数和自动保存选项
         frames_label = QLabel("采样帧数:")
@@ -1176,7 +1221,8 @@ class VideoDescriptionWidget(QWidget):
         grid_layout.addWidget(mode_label, 0, 0)
         grid_layout.addWidget(self.center_generation_mode_combo, 0, 1)
         grid_layout.addWidget(tokens_label, 0, 3)
-        grid_layout.addWidget(self.center_max_tokens_spinbox, 0, 4)
+        grid_layout.addWidget(self.center_description_length_combo, 0, 4)
+        grid_layout.addWidget(self.center_custom_length_spinbox, 0, 5)
         
         grid_layout.addWidget(frames_label, 1, 0)
         grid_layout.addWidget(self.center_num_frames_spinbox, 1, 1)
@@ -1476,6 +1522,13 @@ class VideoDescriptionWidget(QWidget):
         """视频复选框状态改变"""
         self._update_selection_status()
     
+    def _on_description_length_changed(self, text):
+        """描述长度要求改变时的回调"""
+        if text == "自定义长度":
+            self.center_custom_length_spinbox.setVisible(True)
+        else:
+            self.center_custom_length_spinbox.setVisible(False)
+    
     def _toggle_select_all(self):
         """切换全选/取消全选"""
         if self.is_all_selected:
@@ -1657,7 +1710,8 @@ class VideoDescriptionWidget(QWidget):
                 if result.get('success', False):
                     result_text += f"\n描述内容:\n{result.get('description', '无')}"
                 else:
-                    result_text += f"\n错误信息:\n{result.get('error_message', '无')}"
+                    error_msg = result.get('error_message') or '无'
+                    result_text += f"\n错误信息:\n{error_msg}"
                 
                 self.result_text.setPlainText(result_text)
                 
@@ -2029,9 +2083,24 @@ class VideoDescriptionWidget(QWidget):
         else:
             generation_mode = "random"  # 默认值
         
-        # 获取高级参数
-        max_new_tokens = self.center_max_tokens_spinbox.value()
+        # 获取描述长度要求并转换为字符数
+        description_length_text = self.center_description_length_combo.currentText()
+        if description_length_text == "简要描述(150字符)":
+            description_length = 150
+        elif description_length_text == "标准描述(300字符)":
+            description_length = 300
+        elif description_length_text == "详细描述(500字符)":
+            description_length = 500
+        elif description_length_text == "非常详细(800字符)":
+            description_length = 800
+        elif description_length_text == "自定义长度":
+            description_length = self.center_custom_length_spinbox.value()
+        else:
+            description_length = 300  # 默认值
+        
+        # 获取其他参数
         num_frames = self.center_num_frames_spinbox.value()
+        top_p = self.top_p_spinbox.value()
         
         # 获取API配置
         api_config = self._get_api_config()
@@ -2050,12 +2119,13 @@ class VideoDescriptionWidget(QWidget):
             self.model_path,
             self.action_filter_checkbox.isChecked(),
             generation_mode,
-            max_new_tokens,
+            description_length,
             num_frames,
             api_config,
             device_setting,
             enable_multithread,
-            thread_count
+            thread_count,
+            top_p
         )
         
         if hasattr(self, 'center_progress_bar'):
@@ -2332,20 +2402,13 @@ class VideoDescriptionWidget(QWidget):
             self._log_message(f"导出失败: {str(e)}")
     
     def _export_single_video_json(self, result, video_path, export_file):
-        """导出单个视频的JSON格式描述"""
-        # 构建导出数据
-        export_data = {
-            "video_name": os.path.basename(video_path),
-            "video_relative_path": os.path.relpath(video_path, Path(video_path).parent),
-            "video_duration": result.get('duration', '未知'),
-            "processing_time": self._format_processing_time(result.get('total_processing_time')),
-            "processing_status": '成功' if result.get('success', False) else '失败',
-            "description": result.get('description', '无') if result.get('success', False) else None,
-            "error_message": result.get('error_message', '无') if not result.get('success', False) else None,
-            "processed_at": result.get('processed_at', datetime.now().isoformat()),
-            "model_info": result.get('model_info', {}),
-            "device_info": result.get('device_info', '未知')
-        }
+        """导出单个视频的JSON格式描述 - 保持原始格式"""
+        # 直接使用原始结果格式，确保与读取逻辑兼容
+        export_data = result.copy()  # 复制原始数据
+        
+        # 确保error_message字段正确处理None值
+        if not export_data.get('success', False) and export_data.get('error_message') is None:
+            export_data['error_message'] = '无'
         
         with open(export_file, 'w', encoding='utf-8') as f:
             json.dump(export_data, f, ensure_ascii=False, indent=2)
@@ -2365,7 +2428,8 @@ class VideoDescriptionWidget(QWidget):
             if result.get('success', False):
                 f.write(f"视频描述:\n{result.get('description', '无')}\n")
             else:
-                f.write(f"错误信息:\n{result.get('error_message', '无')}\n")
+                error_msg = result.get('error_message') or '无'
+                f.write(f"错误信息:\n{error_msg}\n")
     
     def _export_single_video_csv(self, result, video_path, export_file):
         """导出单个视频的CSV格式描述"""
@@ -2384,7 +2448,8 @@ class VideoDescriptionWidget(QWidget):
             if result.get('success', False):
                 writer.writerow(['视频描述', result.get('description', '无')])
             else:
-                writer.writerow(['错误信息', result.get('error_message', '无')])
+                error_msg = result.get('error_message') or '无'
+                writer.writerow(['错误信息', error_msg])
     
     def _export_single_video_md(self, result, video_path, export_file):
         """导出单个视频的Markdown格式描述"""
@@ -2404,7 +2469,8 @@ class VideoDescriptionWidget(QWidget):
                 f.write(f"{result.get('description', '无')}\n")
             else:
                 f.write("## 错误信息\n\n")
-                f.write(f"{result.get('error_message', '无')}\n")
+                error_msg = result.get('error_message') or '无'
+                f.write(f"{error_msg}\n")
     
     def _format_processing_time(self, total_time):
         """格式化处理时间"""

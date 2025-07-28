@@ -1,11 +1,6 @@
 # 格式：每行一个配置项，使用 key=value 的形式
-# 缓存路径配置
 cache_path=E:\Tiany\huggingface
-
-# ShareGPT4Video 模型配置
 sharegpt4video_model_path=Lin-Chen/sharegpt4video-8b
-
-# API 配置
 api_endpoint=https://api.openai.com/v1/chat/completions
 api_key=
 api_model=gpt-3.5-turbo

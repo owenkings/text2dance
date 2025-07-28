@@ -86,3 +86,4 @@ cx-freeze>=6.12.0
 # Security
 cryptography>=37.0.0
 keyring>=23.8.0
+loguru

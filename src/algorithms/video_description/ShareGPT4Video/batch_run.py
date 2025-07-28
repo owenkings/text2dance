@@ -189,7 +189,7 @@ class BatchVideoProcessor:
                            top_p: float = 0.9,
                            temperature: float = 1.0,
                            max_new_tokens: int = 200,
-                           num_beams: int = 1) -> Optional[str]:
+                           num_beams: int = 1) -> tuple[Optional[str], Optional[str]]:
         """
         处理单个视频
         
@@ -204,19 +204,21 @@ class BatchVideoProcessor:
             num_beams: 束搜索束数
             
         Returns:
-            Optional[str]: 生成的描述，失败时返回None
+            tuple[Optional[str], Optional[str]]: (生成的描述, 错误信息)，成功时返回(描述, None)，失败时返回(None, 错误信息)
         """
         if not self.is_loaded:
-            self.logger.error("模型未加载，请先调用load_model()")
-            return None
+            error_msg = "模型未加载，请先调用load_model()"
+            self.logger.error(error_msg)
+            return None, error_msg
             
         try:
             self.logger.info(f"开始处理视频: {video_path}")
             
             # 检查视频文件是否存在
             if not os.path.exists(video_path):
-                self.logger.error(f"视频文件不存在: {video_path}")
-                return None
+                error_msg = f"视频文件不存在: {video_path}"
+                self.logger.error(error_msg)
+                return None, error_msg
             
             # 如果num_frames为0，根据视频时长自动选择帧数
             if num_frames == 0:
@@ -273,12 +275,13 @@ class BatchVideoProcessor:
             )
             
             self.logger.info(f"视频处理完成: {video_path}")
-            return result
+            return result, None
             
         except Exception as e:
-            self.logger.error(f"处理视频失败 {video_path}: {str(e)}")
+            error_msg = f"处理视频失败 {video_path}: {str(e)}"
+            self.logger.error(error_msg)
             self.logger.error(traceback.format_exc())
-            return None
+            return None, error_msg
     
     def process_videos_batch(self, video_configs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
@@ -317,7 +320,7 @@ class BatchVideoProcessor:
             
             # 处理单个视频
             start_time = datetime.now()
-            description = self.process_single_video(video_path, query, **params)
+            description, error_message = self.process_single_video(video_path, query, **params)
             end_time = datetime.now()
             
             # 记录结果
@@ -326,6 +329,7 @@ class BatchVideoProcessor:
                 'query': query,
                 'description': description,
                 'success': description is not None,
+                'error_message': error_message or '',
                 'processing_time': (end_time - start_time).total_seconds(),
                 'timestamp': end_time.isoformat(),
                 'parameters': params
@@ -336,7 +340,7 @@ class BatchVideoProcessor:
             if description:
                 self.logger.info(f"成功处理: {video_path}")
             else:
-                self.logger.error(f"处理失败: {video_path}")
+                self.logger.error(f"处理失败: {video_path} - {error_message}")
         
         self.logger.info(f"批量处理完成，成功: {sum(1 for r in results if r['success'])}/{total_videos}")
         return results
