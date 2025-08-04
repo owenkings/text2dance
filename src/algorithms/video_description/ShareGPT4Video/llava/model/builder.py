@@ -22,6 +22,51 @@ if sys.platform.startswith('win'):
 # 设置为 None 时会自动从 cache_config.txt 文件读取
 USER_CACHE_PATH = None  # 例如: r"D:\MyCache\huggingface"
 
+# ==================== 模块级环境变量设置 ====================
+# 在模块导入时立即设置环境变量，确保所有HuggingFace组件使用统一缓存路径
+try:
+    cache_base_path = None
+    
+    # 获取缓存路径（复用get_cache_path逻辑但简化版本）
+    if USER_CACHE_PATH:
+        cache_base_path = USER_CACHE_PATH
+    else:
+        # 读取配置文件
+        # builder.py -> model -> llava -> ShareGPT4Video -> video_description -> algorithms -> src -> text2dance (6层)
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))))
+        config_file = os.path.join(project_root, "cache_config.txt")
+        
+        if os.path.exists(config_file):
+            try:
+                with open(config_file, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith('#') and '=' in line:
+                            key, value = line.split('=', 1)
+                            if key.strip() == 'cache_path':
+                                cache_base_path = value.strip()
+                                break
+            except Exception:
+                pass
+    
+    # 如果成功获取到缓存路径，设置环境变量
+    if cache_base_path and os.path.exists(cache_base_path):
+        bnb_cache_path = os.path.join(cache_base_path, "bnb_cache")
+        
+        # 设置HuggingFace相关环境变量
+        os.environ["HF_HOME"] = cache_base_path
+        os.environ["HUGGINGFACE_HUB_CACHE"] = cache_base_path
+        os.environ["TRANSFORMERS_CACHE"] = cache_base_path
+        os.environ["BNB_CACHE_DIR"] = bnb_cache_path
+        
+        # 确保目录存在
+        os.makedirs(cache_base_path, exist_ok=True)
+        os.makedirs(bnb_cache_path, exist_ok=True)
+        
+except Exception:
+    # 如果设置失败，静默忽略，使用默认路径
+    pass
+
 # ==================== 自动配置逻辑 ====================
 
 def get_cache_path():
