@@ -42,6 +42,8 @@ class MainWindow(QMainWindow):
         # 子组件
         self.crawler_widget = None
         self.video_processing_widget = None
+        self.video_description_widget = None
+        self.pose_estimation_widget = None
         self.algorithm_widget = None
         self.config_widget = None
         self.plugin_widget = None
@@ -74,6 +76,10 @@ class MainWindow(QMainWindow):
             self.crawler_widget.config_manager = config_manager
         if hasattr(self, 'video_edit_widget') and self.video_edit_widget:
             self.video_edit_widget.config_manager = config_manager
+        if hasattr(self, 'video_description_widget') and self.video_description_widget:
+            self.video_description_widget.config_manager = config_manager
+        if hasattr(self, 'pose_estimation_widget') and self.pose_estimation_widget:
+            self.pose_estimation_widget.config_manager = config_manager
         if hasattr(self, 'config_widget') and self.config_widget:
             self.config_widget.config_manager = config_manager
         if hasattr(self, 'log_widget') and self.log_widget:
@@ -87,6 +93,10 @@ class MainWindow(QMainWindow):
             self.crawler_widget.plugin_manager = plugin_manager
         if hasattr(self, 'video_edit_widget') and self.video_edit_widget:
             self.video_edit_widget.plugin_manager = plugin_manager
+        if hasattr(self, 'video_description_widget') and self.video_description_widget:
+            self.video_description_widget.plugin_manager = plugin_manager
+        if hasattr(self, 'pose_estimation_widget') and self.pose_estimation_widget:
+            self.pose_estimation_widget.plugin_manager = plugin_manager
     
     def _init_ui(self):
         """初始化用户界面"""
@@ -119,6 +129,7 @@ class MainWindow(QMainWindow):
         self.tab_widget.addTab(self.crawler_widget, "🕷️ 爬虫")
         self.tab_widget.addTab(self.video_edit_widget, "🎬 视频编辑")
         self.tab_widget.addTab(self.video_description_widget, "📝 视频描述")
+        self.tab_widget.addTab(self.pose_estimation_widget, "🤸 姿势估计")
         self.tab_widget.addTab(self.config_widget, "⚙️ 配置")
         
         # 任务管理器
@@ -149,6 +160,10 @@ class MainWindow(QMainWindow):
             # 视频描述模块
             from .video_description_widget import VideoDescriptionWidget
             self.video_description_widget = VideoDescriptionWidget(self.config_manager)
+            
+            # 姿势估计模块
+            from .pose_estimation_widget import PoseEstimationWidget
+            self.pose_estimation_widget = PoseEstimationWidget(self.config_manager)
             
             # 配置模块
             self.config_widget = ConfigWidget(self.config_manager)
