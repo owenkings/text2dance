@@ -188,7 +188,7 @@ class BatchVideoProcessor:
                            do_sample: bool = True,
                            top_p: float = 0.9,
                            temperature: float = 1.0,
-                           max_new_tokens: int = 200,
+                           max_new_tokens: Optional[int] = None,
                            num_beams: int = 1) -> tuple[Optional[str], Optional[str]]:
         """
         处理单个视频
@@ -257,22 +257,28 @@ class BatchVideoProcessor:
             # 设置预查询提示
             pre_query_prompt = "The provided image arranges keyframes from a video in a grid view, keyframes are separated with white bands. Answer concisely with overall content and context of the video, highlighting any significant events, characters, or objects that appear throughout the frames."
             
+            # 构建single_test参数
+            test_params = {
+                'model': self.model,
+                'processor': self.processor,
+                'tokenizer': self.tokenizer,
+                'vid_path': video_path,
+                'qs': query,
+                'pre_query_prompt': pre_query_prompt,
+                'num_frames': num_frames,
+                'conv_mode': self.conv_mode,
+                'do_sample': do_sample,
+                'top_p': top_p,
+                'temperature': temperature,
+                'num_beams': num_beams
+            }
+            
+            # 只有当max_new_tokens被明确设置时才添加该参数
+            if max_new_tokens is not None:
+                test_params['max_new_tokens'] = max_new_tokens
+            
             # 调用单个测试函数
-            result = single_test(
-                model=self.model,
-                processor=self.processor,
-                tokenizer=self.tokenizer,
-                vid_path=video_path,
-                qs=query,
-                pre_query_prompt=pre_query_prompt,
-                num_frames=num_frames,
-                conv_mode=self.conv_mode,
-                do_sample=do_sample,
-                top_p=top_p,
-                temperature=temperature,
-                max_new_tokens=max_new_tokens,
-                num_beams=num_beams
-            )
+            result = single_test(**test_params)
             
             self.logger.info(f"视频处理完成: {video_path}")
             return result, None
@@ -314,9 +320,13 @@ class BatchVideoProcessor:
                 'do_sample': config.get('do_sample', True),
                 'top_p': config.get('top_p', 0.9),
                 'temperature': config.get('temperature', 1.0),
-                'max_new_tokens': config.get('max_new_tokens', 200),
                 'num_beams': config.get('num_beams', 1)
             }
+            
+            # 只有当max_new_tokens被明确设置且大于0时才添加该参数
+            max_new_tokens = config.get('max_new_tokens')
+            if max_new_tokens is not None and max_new_tokens > 0:
+                params['max_new_tokens'] = max_new_tokens
             
             # 处理单个视频
             start_time = datetime.now()

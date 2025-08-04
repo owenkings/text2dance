@@ -81,9 +81,11 @@ def get_cache_path():
             print(f"[WARNING] 读取配置文件失败: {e}")
 
     # 4. 配置文件不存在或无效时，创建完整配置文件
-    default_config = """# 格式：每行一个配置项，使用 key=value 的形式
-# 缓存路径配置
-cache_path=E:\\Tiany\\huggingface
+    # 使用相对路径指向项目的model文件夹
+    relative_model_path = os.path.join(project_root, "model")
+    default_config = f"""# 格式：每行一个配置项，使用 key=value 的形式
+# 缓存路径配置（相对于项目根目录）
+cache_path={relative_model_path}
 
 # ShareGPT4Video 模型配置
 sharegpt4video_model_path=Lin-Chen/sharegpt4video-8b
@@ -105,7 +107,8 @@ api_model=gpt-3.5-turbo
         raise SystemExit(f"配置文件创建失败: {e}")
 
     # 5. 返回默认路径（确保路径存在和可写）
-    default_path = r"E:\Tiany\huggingface"
+    # 使用相对路径指向项目的model文件夹
+    default_path = os.path.join(project_root, "model")
     try:
         os.makedirs(default_path, exist_ok=True)
         # 检查写入权限

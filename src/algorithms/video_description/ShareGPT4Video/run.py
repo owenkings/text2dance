@@ -276,7 +276,7 @@ def video_answer(prompt, model, processor, tokenizer, img_grid, do_sample=True,
     return outputs
 
 
-def single_test(model, processor, tokenizer, vid_path, qs, pre_query_prompt=None,  num_frames=16, conv_mode="plain", do_sample=True, top_p=0.9, temperature=1.0, max_new_tokens=200, num_beams=1):
+def single_test(model, processor, tokenizer, vid_path, qs, pre_query_prompt=None,  num_frames=16, conv_mode="plain", do_sample=True, top_p=0.9, temperature=1.0, max_new_tokens=None, num_beams=1):
     # 获取日志记录器
     logger = logging.getLogger('ShareGPT4Video.single_test')
     
@@ -473,10 +473,27 @@ def single_test(model, processor, tokenizer, vid_path, qs, pre_query_prompt=None
     
     logger.info("开始生成回答...")
     logger.info(f"生成参数: do_sample={do_sample}, top_p={top_p}, temperature={temperature}, max_new_tokens={max_new_tokens}, num_beams={num_beams}")
-    llm_response = video_answer(prompt, model=model, processor=processor, tokenizer=tokenizer,
-                                do_sample=do_sample, img_grid=img_grid, max_new_tokens=max_new_tokens, 
-                                top_p=top_p, temperature=temperature, num_beams=num_beams,
-                                print_res=False, silent_mode=True)
+    
+    # 构建video_answer参数
+    answer_params = {
+        'prompt': prompt,
+        'model': model,
+        'processor': processor,
+        'tokenizer': tokenizer,
+        'do_sample': do_sample,
+        'img_grid': img_grid,
+        'top_p': top_p,
+        'temperature': temperature,
+        'num_beams': num_beams,
+        'print_res': False,
+        'silent_mode': True
+    }
+    
+    # 只有当max_new_tokens不为None时才添加该参数
+    if max_new_tokens is not None:
+        answer_params['max_new_tokens'] = max_new_tokens
+    
+    llm_response = video_answer(**answer_params)
     
     logger.info(f"生成的回答长度: {len(llm_response) if llm_response else 0} 字符")
     logger.info("单个视频测试完成")
@@ -507,8 +524,8 @@ def parse_arguments():
                        help='nucleus采样的累积概率阈值 (默认: 0.9)')
     parser.add_argument('--temperature', type=float, default=1.0,
                        help='生成温度 (默认: 1.0)')
-    parser.add_argument('--max_new_tokens', type=int, default=200,
-                       help='最大生成token数 (默认: 200)')
+    parser.add_argument('--max_new_tokens', type=int, default=None,
+                       help='最大生成token数 (默认: 无限制)')
     parser.add_argument('--num_beams', type=int, default=1,
                        help='束搜索的束数 (默认: 1)')
     parser.add_argument('--num_frames', type=int, default=16,

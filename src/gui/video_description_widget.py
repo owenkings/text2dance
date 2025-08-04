@@ -337,12 +337,19 @@ class VideoDescriptionThread(QThread):
             
             # 根据描述长度要求动态设置max_new_tokens和更新提示词
             # 字符数转换为大致的token数（中文约1.5字符/token，英文约4字符/token）
-            estimated_tokens = max(100, int(self.description_length * 0.8))  # 保守估计
-            cmd.extend(['--max-new-tokens', str(estimated_tokens)])
+            if self.description_length > 0:
+                estimated_tokens = max(100, int(self.description_length * 0.8))  # 保守估计
+                cmd.extend(['--max-new-tokens', str(estimated_tokens)])
+            else:
+                # 无限制生成，不设置max_new_tokens参数
+                pass
             
-            # 在提示词中添加长度要求
-            enhanced_query = f"{self.description_requirement} The total length of the description should be approximately {self.description_length} characters."
-            cmd[cmd.index('--query') + 1] = enhanced_query
+            # 根据描述长度设置token限制和提示词
+            if self.description_length > 0:
+                # 在提示词中添加长度要求
+                enhanced_query = f"{self.description_requirement} The total length of the description should be approximately {self.description_length} characters."
+                cmd[cmd.index('--query') + 1] = enhanced_query
+            # 如果是无限制模式，保持原始提示词不变
             
             if self.num_frames > 0:
                 cmd.extend(['--num-frames', str(self.num_frames)])
@@ -446,14 +453,18 @@ class VideoDescriptionThread(QThread):
             
             # 根据描述长度要求动态设置max_new_tokens和更新提示词
             # 字符数转换为大致的token数（中文约1.5字符/token，英文约4字符/token）
-            estimated_tokens = max(100, int(self.description_length * 0.8))  # 保守估计
-            cmd.extend(['--max-new-tokens', str(estimated_tokens)])
-            self.log_updated.emit(f"根据描述长度要求({self.description_length}字符)设置最大生成长度: {estimated_tokens} tokens")
-            
-            # 在提示词中添加长度要求
-            enhanced_query = f"{self.description_requirement} The total length of the description should be approximately {self.description_length} characters."
-            cmd[cmd.index('--query') + 1] = enhanced_query
-            self.log_updated.emit(f"已在提示词中添加长度要求: {self.description_length}字符")
+            if self.description_length > 0:
+                estimated_tokens = max(100, int(self.description_length * 0.8))  # 保守估计
+                cmd.extend(['--max-new-tokens', str(estimated_tokens)])
+                self.log_updated.emit(f"根据描述长度要求({self.description_length}字符)设置最大生成长度: {estimated_tokens} tokens")
+                
+                # 在提示词中添加长度要求
+                enhanced_query = f"{self.description_requirement} The total length of the description should be approximately {self.description_length} characters."
+                cmd[cmd.index('--query') + 1] = enhanced_query
+                self.log_updated.emit(f"已在提示词中添加长度要求: {self.description_length}字符")
+            else:
+                # 无限制生成，不设置max_new_tokens参数，也不在提示词中添加长度限制
+                self.log_updated.emit("设置为无限制生成模式，不限制输出长度")
             
             # 处理帧数设置
             if self.num_frames > 0:
@@ -1178,7 +1189,7 @@ class VideoDescriptionWidget(QWidget):
         tokens_label = QLabel("描述长度要求:")
         tokens_label.setStyleSheet("font-weight: bold; color: #2c3e50;")
         self.center_description_length_combo = QComboBox()
-        self.center_description_length_combo.addItems(["简要描述(150字符)", "标准描述(300字符)", "详细描述(500字符)", "非常详细(800字符)", "自定义长度"])
+        self.center_description_length_combo.addItems(["简要描述(150字符)", "标准描述(300字符)", "详细描述(500字符)", "非常详细(800字符)", "无限制生成", "自定义长度"])
         self.center_description_length_combo.setCurrentText("标准描述(300字符)")
         self.center_description_length_combo.setToolTip(
             "选择描述的详细程度:\n"
@@ -1186,17 +1197,19 @@ class VideoDescriptionWidget(QWidget):
             "• 标准描述: 约300字符，平衡详细度\n"
             "• 详细描述: 约500字符，全面分析\n"
             "• 非常详细: 约800字符，深度描述\n"
+            "• 无限制生成: 不限制输出长度，生成完整详细描述\n"
             "• 自定义长度: 手动设置字符数量"
         )
         self.center_description_length_combo.currentTextChanged.connect(self._on_description_length_changed)
         
         # 自定义长度输入框（初始隐藏）
         self.center_custom_length_spinbox = QSpinBox()
-        self.center_custom_length_spinbox.setRange(100, 2000)
+        self.center_custom_length_spinbox.setRange(0, 2000)
         self.center_custom_length_spinbox.setValue(300)
         self.center_custom_length_spinbox.setSuffix(" 字符")
+        self.center_custom_length_spinbox.setSpecialValueText("无限制")
         self.center_custom_length_spinbox.setVisible(False)
-        self.center_custom_length_spinbox.setToolTip("自定义描述长度（字符数）")
+        self.center_custom_length_spinbox.setToolTip("自定义描述长度（字符数）\n0: 无限制生成\n100-2000: 指定字符数限制")
         
         # 第二行：采样帧数和自动保存选项
         frames_label = QLabel("采样帧数:")
@@ -2093,6 +2106,8 @@ class VideoDescriptionWidget(QWidget):
             description_length = 500
         elif description_length_text == "非常详细(800字符)":
             description_length = 800
+        elif description_length_text == "无限制生成":
+            description_length = 0  # 0表示无限制
         elif description_length_text == "自定义长度":
             description_length = self.center_custom_length_spinbox.value()
         else:
