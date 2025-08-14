@@ -705,3 +705,15 @@ tail -f logs/app.log
 ---
 
 **注意**: 请遵守相关法律法规，仅用于学习和研究目的。使用本工具下载的内容应符合版权法和网站服务条款。
+
+
+运行程序的代码：
+生成fbx文件：
+第一步：conda activate base
+第二步：python src/algorithms/pose3d/main/run_demo.py --vid_file data/sample_video.mp4 --save_pkl --save_fbx --skeleton_only
+python src/algorithms/pose3d/main/run_demo.py --vid_file "data/sample_video.mp4" --save_pkl --no_render --gpu 0
+python src/algorithms/pose3d/main/run_demo.py --vid_file "data/【20分钟 BASI普拉提 全身训练｜增强灵活性与力量 垫上普拉提跟练】Mira普拉提 初学者课程.f30016_split_171_281.mp4" --save_pkl --no_render --gpu 0
+第三步：fbx_env_py37\Scripts\python.exe fbx_test_files\improved_pkl_to_fbx_converter.py
+
+2D和3D对齐：
+python src\algorithms\pose3d\test_pose_2d_3d\run_flexible_alignment.py -v data/sample_video.mp4 -p output/sample_video/pmce_output.pkl
