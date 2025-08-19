@@ -26,10 +26,135 @@ from PyQt5.QtWidgets import (
     QListWidget, QListWidgetItem, QFrame, QSlider,
     QScrollArea, QTreeWidget, QTreeWidgetItem, QShortcut,
     QDialog, QAbstractItemView, QSizePolicy, QApplication,
-    QButtonGroup, QRadioButton
+    QButtonGroup, QRadioButton, QFormLayout
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize, QMutex, QUrl
 from PyQt5.QtGui import QFont, QPixmap, QKeySequence, QImage, QIcon, QMovie
+
+class CustomAPIDialog(QDialog):
+    """自定义API模型配置对话框"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("自定义API模型配置")
+        self.setModal(True)
+        self.setFixedSize(500, 350)
+        
+        layout = QVBoxLayout(self)
+        
+        # 说明文字
+        info_label = QLabel("请填写您的API模型配置信息：")
+        info_label.setStyleSheet("font-weight: bold; color: #2c3e50; margin-bottom: 10px;")
+        layout.addWidget(info_label)
+        
+        # 表单布局
+        form_layout = QFormLayout()
+        
+        # API端点
+        self.endpoint_edit = QLineEdit()
+        self.endpoint_edit.setPlaceholderText("如：https://api.openai.com/v1/chat/completions")
+        self.endpoint_edit.setToolTip("API服务的完整端点URL地址")
+        form_layout.addRow("API端点 (必填):", self.endpoint_edit)
+        
+        # API密钥
+        api_key_layout = QHBoxLayout()
+        self.api_key_edit = QLineEdit()
+        self.api_key_edit.setEchoMode(QLineEdit.Password)
+        self.api_key_edit.setPlaceholderText("输入您的API密钥")
+        self.api_key_edit.setToolTip("用于身份验证的API密钥")
+        api_key_layout.addWidget(self.api_key_edit)
+        
+        self.show_key_btn = QPushButton("显示")
+        self.show_key_btn.setMaximumWidth(50)
+        self.show_key_btn.clicked.connect(self._toggle_key_visibility)
+        api_key_layout.addWidget(self.show_key_btn)
+        
+        form_layout.addRow("API密钥 (必填):", api_key_layout)
+        
+        # 模型名称
+        self.model_name_edit = QLineEdit()
+        self.model_name_edit.setPlaceholderText("如：gpt-4-vision-preview")
+        self.model_name_edit.setToolTip("API服务中的具体模型名称")
+        form_layout.addRow("模型名称 (必填):", self.model_name_edit)
+        
+        # 自定义显示名称
+        self.display_name_edit = QLineEdit()
+        self.display_name_edit.setPlaceholderText("如：我的GPT-4模型")
+        self.display_name_edit.setToolTip("在界面中显示的自定义名称")
+        form_layout.addRow("显示名称 (必填):", self.display_name_edit)
+        
+        layout.addLayout(form_layout)
+        
+        # 添加间距
+        layout.addSpacing(20)
+        
+        # 按钮布局
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+        
+        self.cancel_btn = QPushButton("取消")
+        self.cancel_btn.clicked.connect(self.reject)
+        button_layout.addWidget(self.cancel_btn)
+        
+        self.ok_btn = QPushButton("确认")
+        self.ok_btn.setStyleSheet(
+            "QPushButton {"
+            "    background-color: #3498db;"
+            "    color: white;"
+            "    border: none;"
+            "    padding: 8px 16px;"
+            "    border-radius: 4px;"
+            "    font-weight: bold;"
+            "}"
+            "QPushButton:hover {"
+            "    background-color: #2980b9;"
+            "}"
+        )
+        self.ok_btn.clicked.connect(self._validate_and_accept)
+        button_layout.addWidget(self.ok_btn)
+        
+        layout.addLayout(button_layout)
+    
+    def _toggle_key_visibility(self):
+        """切换API密钥显示/隐藏"""
+        if self.api_key_edit.echoMode() == QLineEdit.Password:
+            self.api_key_edit.setEchoMode(QLineEdit.Normal)
+            self.show_key_btn.setText("隐藏")
+        else:
+            self.api_key_edit.setEchoMode(QLineEdit.Password)
+            self.show_key_btn.setText("显示")
+    
+    def _validate_and_accept(self):
+        """验证输入并接受对话框"""
+        # 检查必填字段
+        if not self.endpoint_edit.text().strip():
+            QMessageBox.warning(self, "输入错误", "请填写API端点")
+            self.endpoint_edit.setFocus()
+            return
+        
+        if not self.api_key_edit.text().strip():
+            QMessageBox.warning(self, "输入错误", "请填写API密钥")
+            self.api_key_edit.setFocus()
+            return
+        
+        if not self.model_name_edit.text().strip():
+            QMessageBox.warning(self, "输入错误", "请填写模型名称")
+            self.model_name_edit.setFocus()
+            return
+        
+        if not self.display_name_edit.text().strip():
+            QMessageBox.warning(self, "输入错误", "请填写显示名称")
+            self.display_name_edit.setFocus()
+            return
+        
+        # 验证URL格式
+        endpoint = self.endpoint_edit.text().strip()
+        if not (endpoint.startswith('http://') or endpoint.startswith('https://')):
+            QMessageBox.warning(self, "输入错误", "API端点必须以http://或https://开头")
+            self.endpoint_edit.setFocus()
+            return
+        
+        self.accept()
 
 class FrameRateMonitor:
     """帧率监控器"""
@@ -549,9 +674,26 @@ class VideoDescriptionThread(QThread):
                         response_data = response.json()
                         description = response_data.get('choices', [{}])[0].get('message', {}).get('content', '')
                         
+                        # 提取token使用量信息
+                        usage_info = response_data.get('usage', {})
+                        prompt_tokens = usage_info.get('prompt_tokens', 0)
+                        completion_tokens = usage_info.get('completion_tokens', 0)
+                        total_tokens = usage_info.get('total_tokens', 0)
+                        
+                        # 提取账户余额信息（如果API提供）
+                        account_info = response_data.get('account', {})
+                        remaining_balance = account_info.get('remaining_balance', 'N/A')
+                        
                         if description:
                             processing_time = time.time() - start_time
+                            
+                            # 显示token使用量信息
+                            token_info = f"Token使用: 输入{prompt_tokens}, 输出{completion_tokens}, 总计{total_tokens}"
+                            if remaining_balance != 'N/A':
+                                token_info += f", 余额: {remaining_balance}"
+                            
                             self.log_updated.emit(f"{video_name}: API处理成功，耗时 {processing_time:.2f}秒")
+                            self.log_updated.emit(f"{video_name}: {token_info}")
                             
                             results.append({
                                 'video_path': video_path,
@@ -559,7 +701,13 @@ class VideoDescriptionThread(QThread):
                                 'description': description,
                                 'error_message': '',
                                 'processing_time': processing_time,
-                                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                'token_usage': {
+                                    'prompt_tokens': prompt_tokens,
+                                    'completion_tokens': completion_tokens,
+                                    'total_tokens': total_tokens
+                                },
+                                'account_balance': remaining_balance
                             })
                         else:
                             error_msg = "API返回空描述"
@@ -1113,26 +1261,32 @@ class VideoDescriptionWidget(QWidget):
         # 功能选项 - 使用网格布局实现一行两列
         options_grid = QGridLayout()
         
-        # 第一行
+        # 第一行：只保留动作描述 和 自适应播放控制
         self.action_filter_checkbox = QCheckBox("只保留动作描述")
         self.action_filter_checkbox.setToolTip("过滤掉场景、物体等描述，专注于人物动作和行为分析")
         self.action_filter_checkbox.stateChanged.connect(self._sync_action_filter_to_center)
         options_grid.addWidget(self.action_filter_checkbox, 0, 0)
         
-        self.backup_checkbox = QCheckBox("启用备份功能")
-        self.backup_checkbox.setToolTip("自动保存处理结果到本地文件，防止数据丢失")
-        self.backup_checkbox.stateChanged.connect(self._sync_backup_to_center)
-        options_grid.addWidget(self.backup_checkbox, 0, 1)
-        
-        # 第二行
-        self.export_checkbox = QCheckBox("启用导出功能")
-        options_grid.addWidget(self.export_checkbox, 1, 0)
-        
         self.adaptive_playback_checkbox = QCheckBox("启用自适应播放控制")
         self.adaptive_playback_checkbox.setToolTip("使用PID控制器动态调整播放帧率，提供更平滑的播放体验")
         self.adaptive_playback_checkbox.setChecked(True)  # 默认启用
         self.adaptive_playback_checkbox.stateChanged.connect(self._toggle_adaptive_playback)
-        options_grid.addWidget(self.adaptive_playback_checkbox, 1, 1)
+        options_grid.addWidget(self.adaptive_playback_checkbox, 0, 1)
+        
+        # 第二行：模型选择功能（与计算设备对齐）
+        model_label = QLabel("选择模型:")
+        options_grid.addWidget(model_label, 1, 0)
+        
+        self.model_selection_combo = QComboBox()
+        self.model_selection_combo.addItems([
+            "ShareVideoGPT4（本地模型）",
+            "火山大模型①", 
+            "添加API模型"
+        ])
+        self.model_selection_combo.setCurrentText("ShareVideoGPT4（本地模型）")  # 默认选择本地模型
+        self.model_selection_combo.setToolTip("选择用于视频描述的AI模型")
+        self.model_selection_combo.currentTextChanged.connect(self._on_model_selection_changed)
+        options_grid.addWidget(self.model_selection_combo, 1, 1)
         
         options_layout.addLayout(options_grid)
         
@@ -1635,6 +1789,7 @@ class VideoDescriptionWidget(QWidget):
         
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
+        self.log_text.setAcceptRichText(True)  # 启用HTML格式支持
         log_layout.addWidget(self.log_text)
         
         tab_widget.addTab(log_tab, "处理日志")
@@ -1789,9 +1944,8 @@ class VideoDescriptionWidget(QWidget):
             is_api_mode = model_preset != "ShareVideoGPT4（本地模型）"
             
             if is_api_mode:
-                # 显示API配置，禁用本地模型相关配置
-                self.api_config_group.setVisible(True)
-                self.api_config_group.setEnabled(True)
+                # 隐藏API配置（配置保存在文件中），禁用本地模型相关配置
+                self.api_config_group.setVisible(False)
                 
                 # 禁用本地模型相关功能
                 self.device_combo.setEnabled(False)
@@ -1819,12 +1973,6 @@ class VideoDescriptionWidget(QWidget):
                 
                 # 取消多线程选择
                 self.multithread_checkbox.setChecked(False)
-                
-                # 加载API配置
-                api_config = video_desc_config.get('api_config', {})
-                self.api_endpoint_edit.setText(api_config.get('endpoint', 'https://ark.cn-beijing.volces.com/api/v3/chat/completions'))
-                self.api_key_edit.setText(api_config.get('api_key', 'fa1f2df2-73f8-44b1-99a0-09834047ab51'))
-                self.api_model_combo.setCurrentText(api_config.get('model', 'doubao-1-5-pro-32k-250115'))
                 
                 # 记录当前模式
                 self._log_message(f"当前使用API模式: {model_preset}")
@@ -2132,6 +2280,28 @@ class VideoDescriptionWidget(QWidget):
                     result = json.load(f)
                 
                 result_text = f"视频: {os.path.basename(video_path)}\n"
+                
+                # 显示生成日期时间
+                generated_at = result.get('generated_at') or result.get('processed_at')
+                if generated_at:
+                    try:
+                        from datetime import datetime
+                        # 尝试解析时间戳
+                        if isinstance(generated_at, (int, float)):
+                            dt = datetime.fromtimestamp(generated_at)
+                        else:
+                            dt = datetime.fromisoformat(generated_at.replace('Z', '+00:00'))
+                        result_text += f"生成时间: {dt.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                    except:
+                        result_text += f"生成时间: {generated_at}\n"
+                else:
+                    result_text += "生成时间: 未知\n"
+                
+                # 显示使用的模型
+                model_name = result.get('model_name', '未知')
+                result_text += f"使用模型: {model_name}\n"
+                
+
                 
                 # 显示总耗时
                 total_time = result.get('total_processing_time')
@@ -2562,12 +2732,12 @@ class VideoDescriptionWidget(QWidget):
         enable_multithread = self.multithread_checkbox.isChecked() and self.multithread_checkbox.isEnabled()
         thread_count = self.thread_count_spinbox.value()
         
-        # 从配置中获取算法类型
-        algorithm_type = "本地模型"  # 默认值
-        if hasattr(self, 'config_manager') and self.config_manager:
-            algorithm_config = self.config_manager.get('algorithms', {})
-            video_desc_config = algorithm_config.get('video_description', {})
-            algorithm_type = video_desc_config.get('algorithm_type', '本地模型')
+        # 根据当前选择的模型确定算法类型
+        current_model = self.model_selection_combo.currentText()
+        if current_model == "ShareVideoGPT4（本地模型）":
+            algorithm_type = "本地模型"
+        else:
+            algorithm_type = "API调用"
         
         # 启动处理线程（只处理选中的视频）
         self.processing_thread = VideoDescriptionThread(
@@ -2616,6 +2786,9 @@ class VideoDescriptionWidget(QWidget):
         if success:
             self._log_message(f"✅ {video_name} 处理完成")
             
+            # 获取当前使用的模型名称
+            current_model = self.model_selection_combo.currentText()
+            
             # 保存结果
             self._save_video_result(video_path, {
                 'success': True,
@@ -2623,13 +2796,18 @@ class VideoDescriptionWidget(QWidget):
                 'error_message': '',
                 'processed_at': actual_timestamp,  # 使用实际生成描述的时间
                 'total_processing_time': total_processing_time,
-                'duration': self._get_video_duration(video_path)
+                'duration': self._get_video_duration(video_path),
+                'model_name': current_model,  # 添加使用的模型名称
+                'generated_at': actual_timestamp  # 添加生成时间（与processed_at相同，但语义更明确）
             })
             
             # 更新列表显示
             self._update_video_list_item(video_path, True)
         else:
             self._log_message(f"❌ {video_name} 处理失败: {error_msg}")
+            
+            # 获取当前使用的模型名称
+            current_model = self.model_selection_combo.currentText()
             
             # 保存错误结果
             self._save_video_result(video_path, {
@@ -2638,7 +2816,9 @@ class VideoDescriptionWidget(QWidget):
                 'error_message': error_msg,
                 'processed_at': actual_timestamp,  # 使用实际处理的时间
                 'total_processing_time': total_processing_time,
-                'duration': self._get_video_duration(video_path)
+                'duration': self._get_video_duration(video_path),
+                'model_name': current_model,  # 添加使用的模型名称
+                'generated_at': actual_timestamp  # 添加生成时间
             })
             
             # 更新列表显示
@@ -2653,6 +2833,10 @@ class VideoDescriptionWidget(QWidget):
         """所有视频处理完成"""
         self._log_message("所有视频处理完成！")
         
+        # 统计总token消耗和获取账户余额（仅API调用模式）
+        if hasattr(self.processing_thread, 'algorithm_type') and self.processing_thread.algorithm_type == "API调用":
+            self._show_total_token_usage_and_balance()
+        
         # 刷新视频列表状态显示
         self._refresh_video_list_status()
         
@@ -2665,16 +2849,44 @@ class VideoDescriptionWidget(QWidget):
         # 检查是否启用自动保存
         if self.auto_save_format_combo.currentText() != "关闭":
             self._handle_auto_save()
-        
-        # 如果启用了导出功能，询问是否导出
-        elif self.export_checkbox.isChecked():
-            reply = QMessageBox.question(
-                self, "导出结果", "处理完成，是否导出结果？",
-                QMessageBox.Yes | QMessageBox.No
-            )
+    
+    def _show_total_token_usage_and_balance(self):
+        """显示总token消耗和账户余额（蓝色字体）"""
+        try:
+            total_prompt_tokens = 0
+            total_completion_tokens = 0
+            total_tokens = 0
+            latest_balance = None
             
-            if reply == QMessageBox.Yes:
-                self._export_results('json')
+            # 遍历所有处理结果，统计token使用量
+            for result in getattr(self.processing_thread, 'results', []):
+                token_usage = result.get('token_usage')
+                if token_usage:
+                    total_prompt_tokens += token_usage.get('prompt_tokens', 0)
+                    total_completion_tokens += token_usage.get('completion_tokens', 0)
+                    total_tokens += token_usage.get('total_tokens', 0)
+                
+                # 获取最新的账户余额
+                account_balance = result.get('account_balance')
+                if account_balance and account_balance != 'N/A':
+                    latest_balance = account_balance
+            
+            # 如果有token使用量，显示统计信息
+            if total_tokens > 0:
+                # 使用普通格式显示
+                token_msg = f"📊 本次运行总Token消耗: 输入{total_prompt_tokens}, 输出{total_completion_tokens}, 总计{total_tokens}"
+                self._log_message(token_msg)
+                
+                # 显示账户余额
+                if latest_balance:
+                    balance_msg = f"💰 当前账户余额: {latest_balance}"
+                    self._log_message(balance_msg)
+                else:
+                    balance_msg = f"💰 账户余额信息: 未提供"
+                    self._log_message(balance_msg)
+            
+        except Exception as e:
+            self._log_message(f"统计token使用量时发生错误: {str(e)}")
     
     def _save_video_result(self, video_path, result):
         """保存视频结果"""
@@ -2787,6 +2999,25 @@ class VideoDescriptionWidget(QWidget):
         # 发送状态信号
         self.status_changed.emit(message)
     
+    def _log_message_html(self, html_message):
+        """记录HTML格式的日志消息（支持颜色和样式）"""
+        timestamp = datetime.now().strftime('%H:%M:%S')
+        formatted_message = f"<span style='color: #666;'>[{timestamp}]</span> {html_message}"
+        
+        # 使用insertHtml来插入HTML格式的消息
+        cursor = self.log_text.textCursor()
+        cursor.movePosition(cursor.End)
+        cursor.insertHtml(formatted_message + "<br>")
+        
+        # 自动滚动到底部
+        scrollbar = self.log_text.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+        
+        # 发送状态信号（去除HTML标签）
+        import re
+        plain_text = re.sub(r'<[^>]+>', '', html_message)
+        self.status_changed.emit(plain_text)
+    
     def closeEvent(self, event):
         """窗口关闭事件"""
         # 停止视频播放并释放资源
@@ -2885,10 +3116,31 @@ class VideoDescriptionWidget(QWidget):
         with open(export_file, 'w', encoding='utf-8') as f:
             f.write(f"视频名称: {os.path.basename(video_path)}\n")
             f.write(f"视频相对路径: {os.path.relpath(video_path, Path(video_path).parent)}\n")
+            
+            # 添加生成日期时间
+            generated_at = result.get('generated_at') or result.get('processed_at')
+            if generated_at:
+                try:
+                    from datetime import datetime
+                    if isinstance(generated_at, (int, float)):
+                        dt = datetime.fromtimestamp(generated_at)
+                    else:
+                        dt = datetime.fromisoformat(generated_at.replace('Z', '+00:00'))
+                    f.write(f"生成时间: {dt.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                except:
+                    f.write(f"生成时间: {generated_at}\n")
+            else:
+                f.write("生成时间: 未知\n")
+            
+            # 添加使用的模型
+            model_name = result.get('model_name', '未知')
+            f.write(f"使用模型: {model_name}\n")
+            
+
+            
             f.write(f"视频时长: {result.get('duration', '未知')}\n")
             f.write(f"处理时长: {self._format_processing_time(result.get('total_processing_time'))}\n")
             f.write(f"处理状态: {'成功' if result.get('success', False) else '失败'}\n")
-            f.write(f"处理时间: {result.get('processed_at', '未知')}\n")
             f.write(f"设备信息: {result.get('device_info', '未知')}\n")
             f.write("-" * 50 + "\n")
             
@@ -2906,10 +3158,31 @@ class VideoDescriptionWidget(QWidget):
             writer.writerow(['字段', '值'])
             writer.writerow(['视频名称', os.path.basename(video_path)])
             writer.writerow(['视频相对路径', os.path.relpath(video_path, Path(video_path).parent)])
+            
+            # 添加生成日期时间
+            generated_at = result.get('generated_at') or result.get('processed_at')
+            if generated_at:
+                try:
+                    from datetime import datetime
+                    if isinstance(generated_at, (int, float)):
+                        dt = datetime.fromtimestamp(generated_at)
+                    else:
+                        dt = datetime.fromisoformat(generated_at.replace('Z', '+00:00'))
+                    writer.writerow(['生成时间', dt.strftime('%Y-%m-%d %H:%M:%S')])
+                except:
+                    writer.writerow(['生成时间', generated_at])
+            else:
+                writer.writerow(['生成时间', '未知'])
+            
+            # 添加使用的模型
+            model_name = result.get('model_name', '未知')
+            writer.writerow(['使用模型', model_name])
+            
+
+            
             writer.writerow(['视频时长', result.get('duration', '未知')])
             writer.writerow(['处理时长', self._format_processing_time(result.get('total_processing_time'))])
             writer.writerow(['处理状态', '成功' if result.get('success', False) else '失败'])
-            writer.writerow(['处理时间', result.get('processed_at', '未知')])
             writer.writerow(['设备信息', result.get('device_info', '未知')])
             
             if result.get('success', False):
@@ -2925,10 +3198,31 @@ class VideoDescriptionWidget(QWidget):
             f.write("## 基本信息\n\n")
             f.write(f"- **视频名称**: {os.path.basename(video_path)}\n")
             f.write(f"- **视频相对路径**: {os.path.relpath(video_path, Path(video_path).parent)}\n")
+            
+            # 添加生成日期时间
+            generated_at = result.get('generated_at') or result.get('processed_at')
+            if generated_at:
+                try:
+                    from datetime import datetime
+                    if isinstance(generated_at, (int, float)):
+                        dt = datetime.fromtimestamp(generated_at)
+                    else:
+                        dt = datetime.fromisoformat(generated_at.replace('Z', '+00:00'))
+                    f.write(f"- **生成时间**: {dt.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                except:
+                    f.write(f"- **生成时间**: {generated_at}\n")
+            else:
+                f.write("- **生成时间**: 未知\n")
+            
+            # 添加使用的模型
+            model_name = result.get('model_name', '未知')
+            f.write(f"- **使用模型**: {model_name}\n")
+            
+
+            
             f.write(f"- **视频时长**: {result.get('duration', '未知')}\n")
             f.write(f"- **处理时长**: {self._format_processing_time(result.get('total_processing_time'))}\n")
             f.write(f"- **处理状态**: {'成功' if result.get('success', False) else '失败'}\n")
-            f.write(f"- **处理时间**: {result.get('processed_at', '未知')}\n")
             f.write(f"- **设备信息**: {result.get('device_info', '未知')}\n\n")
             
             if result.get('success', False):
@@ -3057,10 +3351,149 @@ class VideoDescriptionWidget(QWidget):
         # 这里可以添加同步逻辑，目前暂时为空
         pass
     
-    def _sync_backup_to_center(self, state):
-        """同步备份功能到中间面板"""
-        # 这里可以添加同步逻辑，目前暂时为空
+    def _on_model_selection_changed(self, model_name):
+        """模型选择变化处理"""
+        if model_name == "添加API模型":
+            dialog = CustomAPIDialog(self)
+            if dialog.exec_() == QDialog.Accepted:
+                # 保存自定义模型配置
+                custom_config = {
+                    'endpoint': dialog.endpoint_edit.text(),
+                    'api_key': dialog.api_key_edit.text(),
+                    'model': dialog.model_name_edit.text(),
+                    'display_name': dialog.display_name_edit.text()
+                }
+                self._save_custom_api_model(custom_config)
+                # 添加到下拉框并选中
+                self.model_selection_combo.addItem(custom_config['display_name'])
+                self.model_selection_combo.setCurrentText(custom_config['display_name'])
+            else:
+                # 用户取消，恢复之前的选择
+                self.model_selection_combo.setCurrentIndex(0)
+                return
+        
+        # 更新UI状态和日志
+        self._update_model_ui_state(model_name)
+        self._log_message(f"已切换到模型: {model_name}")
+        
+        # 保存到配置
+        self._save_model_selection(model_name)
+    
+    def _update_model_ui_state(self, model_name):
+        """根据模型选择更新UI状态"""
+        is_local_model = model_name == "ShareVideoGPT4（本地模型）"
+        
+        if is_local_model:
+            # 本地模型：启用本地相关功能，隐藏API配置
+            self.api_config_group.setVisible(False)
+            self.device_combo.setEnabled(True)
+            self.multithread_checkbox.setEnabled(True)
+            self.thread_count_spinbox.setEnabled(True)
+            self.top_p_spinbox.setEnabled(True)
+            if hasattr(self, 'center_generation_mode_combo'):
+                self.center_generation_mode_combo.setEnabled(True)
+            if hasattr(self, 'center_num_frames_spinbox'):
+                self.center_num_frames_spinbox.setEnabled(True)
+            
+            # 恢复控件正常样式
+            self.device_combo.setStyleSheet("")
+            self.multithread_checkbox.setStyleSheet("")
+            self.thread_count_spinbox.setStyleSheet("")
+            self.top_p_spinbox.setStyleSheet("")
+            if hasattr(self, 'center_generation_mode_combo'):
+                self.center_generation_mode_combo.setStyleSheet("")
+            if hasattr(self, 'center_num_frames_spinbox'):
+                self.center_num_frames_spinbox.setStyleSheet("")
+        else:
+            # API模型：禁用本地功能，隐藏API配置（配置保存在文件中）
+            self.api_config_group.setVisible(False)
+            self.device_combo.setEnabled(False)
+            self.multithread_checkbox.setEnabled(False)
+            self.thread_count_spinbox.setEnabled(False)
+            self.top_p_spinbox.setEnabled(False)
+            if hasattr(self, 'center_generation_mode_combo'):
+                self.center_generation_mode_combo.setEnabled(False)
+            if hasattr(self, 'center_num_frames_spinbox'):
+                self.center_num_frames_spinbox.setEnabled(False)
+            
+            # 设置禁用样式
+            disabled_style = "color: #999; background-color: #f5f5f5;"
+            self.device_combo.setStyleSheet(disabled_style)
+            self.multithread_checkbox.setStyleSheet(disabled_style)
+            self.thread_count_spinbox.setStyleSheet(disabled_style)
+            self.top_p_spinbox.setStyleSheet(disabled_style)
+            if hasattr(self, 'center_generation_mode_combo'):
+                self.center_generation_mode_combo.setStyleSheet(disabled_style)
+            if hasattr(self, 'center_num_frames_spinbox'):
+                self.center_num_frames_spinbox.setStyleSheet(disabled_style)
+            
+            # 将API配置保存到配置文件中
+            self._save_api_config_to_file(model_name)
+    
+    def _save_api_config_to_file(self, model_name):
+        """将API配置保存到配置文件中"""
+        try:
+            if hasattr(self, 'config_manager') and self.config_manager:
+                # 根据模型名称设置API配置
+                if model_name == "火山大模型①":
+                    api_config = {
+                        'endpoint': 'https://ark.cn-beijing.volces.com/api/v3/chat/completions',
+                        'api_key': 'fa1f2df2-73f8-44b1-99a0-09834047ab51',
+                        'model': 'doubao-1-5-pro-32k-250115'
+                    }
+                elif model_name.startswith('自定义API模型'):
+                    # 从自定义模型列表中获取配置
+                    custom_models = self.config_manager.get('algorithms.video_description.custom_api_models', [])
+                    for custom_model in custom_models:
+                        if custom_model.get('display_name') == model_name:
+                            api_config = {
+                                'endpoint': custom_model.get('endpoint', ''),
+                                'api_key': custom_model.get('api_key', ''),
+                                'model': custom_model.get('model', '')
+                            }
+                            break
+                    else:
+                        return  # 未找到对应的自定义模型配置
+                else:
+                    return  # 未知的API模型
+                
+                # 保存API配置到配置管理器
+                self.config_manager.set('algorithms.video_description.api_endpoint', api_config['endpoint'])
+                self.config_manager.set('algorithms.video_description.api_key', api_config['api_key'])
+                self.config_manager.set('algorithms.video_description.api_model', api_config['model'])
+                self.config_manager.save_config()
+                
+                self._log_message(f"已将{model_name}的API配置保存到配置文件")
+                
+        except Exception as e:
+            self._log_message(f"保存API配置到文件失败: {str(e)}")
+    
+    def _set_api_config_for_model(self, model_name):
+        """根据模型名称设置API配置（已废弃，配置直接保存到文件）"""
+        # 此方法已废弃，API配置现在直接保存到配置文件中
         pass
+    
+    def _save_model_selection(self, model_name):
+        """保存模型选择到配置"""
+        try:
+            if hasattr(self, 'config_manager') and self.config_manager:
+                self.config_manager.set('algorithms.video_description.current_model', model_name)
+                self.config_manager.save_config()
+        except Exception as e:
+            self._log_message(f"保存模型选择失败: {str(e)}")
+    
+    def _save_custom_api_model(self, custom_config):
+        """保存自定义API模型配置"""
+        try:
+            if hasattr(self, 'config_manager') and self.config_manager:
+                # 获取现有的自定义模型列表
+                custom_models = self.config_manager.get('algorithms.video_description.custom_api_models', [])
+                custom_models.append(custom_config)
+                self.config_manager.set('algorithms.video_description.custom_api_models', custom_models)
+                self.config_manager.save_config()
+                self._log_message(f"已保存自定义API模型: {custom_config['display_name']}")
+        except Exception as e:
+            self._log_message(f"保存自定义API模型失败: {str(e)}")
     
     def _on_config_changed(self, config: Dict[str, Any]):
         """处理配置变化"""

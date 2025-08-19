@@ -179,8 +179,14 @@ class BatchVideoProcessor:
             return True
             
         except Exception as e:
-            self.logger.error(f"模型加载失败: {str(e)}")
-            self.logger.error(traceback.format_exc())
+            # 检查是否为网络连接问题
+            error_str = str(e).lower()
+            if any(keyword in error_str for keyword in ['connecttimeouterror', 'localentrynotfounderror', 'connection to huggingface.co timed out', 'max retries exceeded', 'cannot find the requested files in the local cache']):
+                self.logger.error("网络连接问题：无法连接到 `https://huggingface.co` 下载模型文件。请检查网络连接或配置离线模式。")
+                self.logger.error(f"详细错误信息: {str(e)}")
+            else:
+                self.logger.error(f"模型加载失败: {str(e)}")
+                self.logger.error(traceback.format_exc())
             return False
     
     def process_single_video(self, video_path: str, query: str, 
@@ -552,7 +558,11 @@ def main():
             print("正在加载模型...")
         
         if not processor.load_model():
-            logger.error("模型加载失败")
+            # 在处理结果前再次记录网络连接错误信息，方便用户查看
+            logger.error("批量处理失败")
+            logger.error("批量处理脚本执行失败")
+            logger.error("网络连接问题：无法连接到 https://huggingface.co 下载模型文件。请检查网络连接或配置离线模式")
+            
             if args.output_format == 'json' and not args.output_file:
                 error_output = {
                     'summary': {
@@ -562,13 +572,13 @@ def main():
                         'total_time_seconds': 0,
                         'average_time_per_video': 0,
                         'timestamp': datetime.now().isoformat(),
-                        'error': '模型加载失败'
+                        'error': '网络连接问题：无法连接到 https://huggingface.co 下载模型文件'
                     },
                     'results': []
                 }
                 print(json.dumps(error_output, ensure_ascii=False, indent=2))
             elif not args.silent:
-                print("错误: 模型加载失败")
+                print("错误: 网络连接问题，无法连接到 https://huggingface.co 下载模型文件")
             return 1
         
         logger.info("模型加载成功")
@@ -668,6 +678,19 @@ def main():
     
     finally:
         if logger:
+            # 计算总耗时
+            try:
+                if 'start_time' in locals():
+                    total_time = (datetime.now() - start_time).total_seconds()
+                    logger.info(f"批量处理完成，总耗时: {total_time:.2f}秒")
+                    logger.info(f"平均每个视频: {total_time:.2f}秒")
+                else:
+                    logger.info("批量处理完成，总耗时: 0.00秒")
+                    logger.info("平均每个视频: 0.00秒")
+            except:
+                logger.info("批量处理完成")
+            
+            logger.info("所有视频处理完成！")
             logger.info("="*80)
             logger.info("ShareGPT4Video 批量处理程序运行结束")
             logger.info(f"结束时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")

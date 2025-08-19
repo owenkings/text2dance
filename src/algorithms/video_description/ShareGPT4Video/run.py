@@ -726,8 +726,15 @@ def main():
                         logger.info("所有组件保持在CPU")
                     
                 except Exception as e:
-                    error_msg = f"模型加载失败: {str(e)}"
-                    logger.error(error_msg)
+                    # 检查是否为网络连接问题
+                    error_str = str(e).lower()
+                    if any(keyword in error_str for keyword in ['connecttimeouterror', 'localentrynotfounderror', 'connection to huggingface.co timed out', 'max retries exceeded', 'cannot find the requested files in the local cache']):
+                        error_msg = "网络连接问题：无法连接到 `https://huggingface.co` 下载模型文件。请检查网络连接或配置离线模式。"
+                        logger.error(f"网络连接错误: {str(e)}")
+                    else:
+                        error_msg = f"模型加载失败: {str(e)}"
+                        logger.error(error_msg)
+                    
                     if args.output_format == 'json':
                         print(ResultFormatter.format_error_output(error_msg, "ModelLoadError"))
                     else:
