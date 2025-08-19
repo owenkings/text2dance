@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-改进的PKL to FBX转换器
+改进的PKL to FBX转换器 - 基于参考FBX文件的真实比例
 创建包含网格和完整骨骼结构的人体模型
 """
 
@@ -9,6 +9,7 @@ import pickle
 import numpy as np
 import os
 import sys
+import math
 
 # 添加 FBX SDK 路径
 fbx_sdk_path = r"C:\Program Files\Autodesk\FBX\FBX SDK\2020.3.2\lib\vs2017\x64\release"
@@ -21,6 +22,28 @@ except ImportError:
     print("错误: 无法导入 FBX SDK")
     print("请确保已正确安装 Autodesk FBX SDK 2020.3.2")
     sys.exit(1)
+
+# 参考FBX文件的人体比例配置（直接从jingang_13_c+_004.fbx提取）
+REFERENCE_PROPORTIONS = {
+    # 骨骼长度比例
+    'bone_length_ratios': {
+        'thigh_to_calf': 1.093,
+        'upper_arm_to_forearm': 0.676,
+        'arm_to_leg': 0.526,
+    },
+    # 参考骨骼长度 (单位: FBX单位)
+    'reference_lengths': {
+        'hips_to_spine': 8.507,
+        'left_upper_arm': 16.137,
+        'left_forearm': 23.853,
+        'left_thigh': 39.703,
+        'left_calf': 36.340,
+        'spine_to_spine1': 12.036022,
+        'spine1_to_spine2': 12.036022,
+        'spine2_to_neck': 21.887209,
+        'neck_to_head': 10.131214
+    }
+}
 
 def load_pkl_data(pkl_file_path):
     """
@@ -58,6 +81,254 @@ def load_pkl_data(pkl_file_path):
         print(f"加载 PKL 文件失败: {e}")
         return None
 
+def calculate_bone_length(pos1, pos2):
+    """计算两个位置之间的距离"""
+    dx = pos2[0] - pos1[0]
+    dy = pos2[1] - pos1[1]
+    dz = pos2[2] - pos1[2]
+    return math.sqrt(dx*dx + dy*dy + dz*dz)
+
+def calculate_reference_based_positions(joints_data, joint_index_map, scale_factor):
+    """基于参考FBX文件的比例计算骨骼位置 - 精确比例版本"""
+    try:
+        bone_positions = {}
+        
+        # 获取关键关节位置
+        def get_joint_pos(joint_name):
+            if joint_name in joint_index_map:
+                idx = joint_index_map[joint_name]
+                pos = joints_data[idx]
+                # 坐标系转换
+                return (
+                    float(pos[0]) * scale_factor,
+                    float(-pos[2]) * scale_factor,
+                    float(pos[1]) * scale_factor
+                )
+            return None
+        
+        # 获取基础关节位置
+        nose_pos = get_joint_pos('nose')
+        left_shoulder_pos = get_joint_pos('left_shoulder')
+        right_shoulder_pos = get_joint_pos('right_shoulder')
+        left_hip_pos = get_joint_pos('left_hip')
+        right_hip_pos = get_joint_pos('right_hip')
+        left_elbow_pos = get_joint_pos('left_elbow')
+        right_elbow_pos = get_joint_pos('right_elbow')
+        left_wrist_pos = get_joint_pos('left_wrist')
+        right_wrist_pos = get_joint_pos('right_wrist')
+        left_knee_pos = get_joint_pos('left_knee')
+        right_knee_pos = get_joint_pos('right_knee')
+        left_ankle_pos = get_joint_pos('left_ankle')
+        right_ankle_pos = get_joint_pos('right_ankle')
+        
+        if not all([nose_pos, left_shoulder_pos, right_shoulder_pos, left_hip_pos, right_hip_pos]):
+            print("警告: 缺少关键关节数据，使用默认位置")
+            return {}
+        
+        # 计算中心点
+        hip_center = (
+            (left_hip_pos[0] + right_hip_pos[0]) / 2,
+            (left_hip_pos[1] + right_hip_pos[1]) / 2,
+            (left_hip_pos[2] + right_hip_pos[2]) / 2
+        )
+        
+        shoulder_center = (
+            (left_shoulder_pos[0] + right_shoulder_pos[0]) / 2,
+            (left_shoulder_pos[1] + right_shoulder_pos[1]) / 2,
+            (left_shoulder_pos[2] + right_shoulder_pos[2]) / 2
+        )
+        
+        # 计算躯干长度作为整体缩放参考
+        torso_length = calculate_bone_length(hip_center, shoulder_center)
+        
+        # 使用参考比例
+        ref_lengths = REFERENCE_PROPORTIONS['reference_lengths']
+        ref_ratios = REFERENCE_PROPORTIONS['bone_length_ratios']
+        
+        # 计算全局缩放比例（基于躯干长度）
+        reference_torso_length = ref_lengths['hips_to_spine'] * 3  # 估算的躯干长度
+        global_scale = torso_length / reference_torso_length if reference_torso_length > 0 else 1.0
+        
+        # 设置骨骼位置
+        bone_positions['Hips'] = hip_center
+        
+        # 脊椎骨骼
+        spine_offset_y = ref_lengths['hips_to_spine'] * global_scale
+        bone_positions['Spine'] = (
+            hip_center[0],
+            hip_center[1] + spine_offset_y * 0.3,
+            hip_center[2]
+        )
+        
+        bone_positions['Spine1'] = (
+            hip_center[0],
+            hip_center[1] + spine_offset_y * 0.6,
+            hip_center[2]
+        )
+        
+        bone_positions['Spine2'] = shoulder_center
+        
+        # 颈部和头部
+        neck_offset_y = spine_offset_y * 0.2
+        bone_positions['Neck'] = (
+            shoulder_center[0],
+            shoulder_center[1] + neck_offset_y,
+            shoulder_center[2]
+        )
+        
+        bone_positions['Head'] = (
+            nose_pos[0] if nose_pos else shoulder_center[0],
+            shoulder_center[1] + neck_offset_y * 2,
+            nose_pos[2] if nose_pos else shoulder_center[2]
+        )
+        
+        # 手臂骨骼 - 使用固定的参考比例（完全基于参考FBX文件）
+        def calculate_arm_positions(shoulder_pos, elbow_pos, wrist_pos, is_left=True):
+            """计算手臂骨骼位置，使用固定的参考比例"""
+            prefix = 'Left' if is_left else 'Right'
+            
+            # 计算手臂方向向量
+            if elbow_pos and wrist_pos:
+                # 从肩膀到手腕的总向量
+                total_arm_vector = (
+                    wrist_pos[0] - shoulder_pos[0],
+                    wrist_pos[1] - shoulder_pos[1],
+                    wrist_pos[2] - shoulder_pos[2]
+                )
+                total_arm_length = math.sqrt(sum(v*v for v in total_arm_vector))
+                
+                if total_arm_length > 0:
+                    # 严格按照参考比例重新分配手臂长度
+                    upper_arm_ratio = REFERENCE_PROPORTIONS['bone_length_ratios']['upper_arm_to_forearm']  # 0.676
+                    # 如果上臂/前臂 = 0.676，那么前臂/上臂 = 1/0.676 = 1.479
+                    # 总长度 = 上臂 + 前臂 = 上臂 + 上臂*1.479 = 上臂*(1 + 1.479) = 上臂*2.479
+                    # 所以：上臂 = 总长度 / 2.479，前臂 = 总长度 * 1.479 / 2.479
+                    actual_upper_arm = total_arm_length * upper_arm_ratio / (upper_arm_ratio + 1)
+                    actual_forearm = total_arm_length / (upper_arm_ratio + 1)
+                    
+                    # 调试输出
+                    print(f"调试 {prefix}手臂: 总长度={total_arm_length:.3f}, 上臂={actual_upper_arm:.3f}, 前臂={actual_forearm:.3f}, 比例={actual_upper_arm/actual_forearm:.3f}")
+                    
+                    # 单位方向向量
+                    unit_vector = (
+                        total_arm_vector[0] / total_arm_length,
+                        total_arm_vector[1] / total_arm_length,
+                        total_arm_vector[2] / total_arm_length
+                    )
+                    
+                    # 计算肘部位置（从肩膀开始，沿着手臂方向，距离为上臂长度）
+                    elbow_position = (
+                        shoulder_pos[0] + unit_vector[0] * actual_upper_arm,
+                        shoulder_pos[1] + unit_vector[1] * actual_upper_arm,
+                        shoulder_pos[2] + unit_vector[2] * actual_upper_arm
+                    )
+                    
+                    # 计算手腕位置（从肘部开始，沿着手臂方向，距离为前臂长度）
+                    wrist_position = (
+                        elbow_position[0] + unit_vector[0] * actual_forearm,
+                        elbow_position[1] + unit_vector[1] * actual_forearm,
+                        elbow_position[2] + unit_vector[2] * actual_forearm
+                    )
+                    
+                    return {
+                        f'{prefix}Shoulder': shoulder_pos,
+                        f'{prefix}Arm': elbow_position,      # 上臂终点（肘部）
+                        f'{prefix}ForeArm': wrist_position,  # 前臂终点（手腕）
+                        f'{prefix}Hand': wrist_position
+                    }
+            
+            # 如果数据不完整，使用原始位置
+            positions = {f'{prefix}Shoulder': shoulder_pos}
+            if elbow_pos:
+                positions[f'{prefix}Arm'] = elbow_pos
+                positions[f'{prefix}ForeArm'] = elbow_pos
+            if wrist_pos:
+                positions[f'{prefix}Hand'] = wrist_pos
+            return positions
+        
+        # 计算左臂和右臂
+        left_arm_positions = calculate_arm_positions(left_shoulder_pos, left_elbow_pos, left_wrist_pos, True)
+        right_arm_positions = calculate_arm_positions(right_shoulder_pos, right_elbow_pos, right_wrist_pos, False)
+        
+        bone_positions.update(left_arm_positions)
+        bone_positions.update(right_arm_positions)
+        
+        # 腿部骨骼 - 使用固定的参考比例（完全基于参考FBX文件）
+        def calculate_leg_positions(hip_pos, knee_pos, ankle_pos, is_left=True):
+            """计算腿部骨骼位置，使用固定的参考比例"""
+            prefix = 'Left' if is_left else 'Right'
+            
+            # 计算腿部方向向量
+            if knee_pos and ankle_pos:
+                # 从髋部到脚踝的总向量
+                total_leg_vector = (
+                    ankle_pos[0] - hip_pos[0],
+                    ankle_pos[1] - hip_pos[1],
+                    ankle_pos[2] - hip_pos[2]
+                )
+                total_leg_length = math.sqrt(sum(v*v for v in total_leg_vector))
+                
+                if total_leg_length > 0:
+                    # 严格按照参考比例重新分配腿部长度
+                    thigh_ratio = REFERENCE_PROPORTIONS['bone_length_ratios']['thigh_to_calf']  # 1.093
+                    # 如果大腿/小腿 = 1.093，那么小腿/大腿 = 1/1.093 = 0.915
+                    # 总长度 = 大腿 + 小腿 = 大腿 + 大腿*0.915 = 大腿*(1 + 0.915) = 大腿*1.915
+                    # 所以：大腿 = 总长度 / 1.915，小腿 = 总长度 * 0.915 / 1.915
+                    actual_thigh = total_leg_length * thigh_ratio / (thigh_ratio + 1)
+                    actual_calf = total_leg_length / (thigh_ratio + 1)
+                    
+                    # 调试输出
+                    print(f"调试 {prefix}腿部: 总长度={total_leg_length:.3f}, 大腿={actual_thigh:.3f}, 小腿={actual_calf:.3f}, 比例={actual_thigh/actual_calf:.3f}")
+                    
+                    # 单位方向向量
+                    unit_vector = (
+                        total_leg_vector[0] / total_leg_length,
+                        total_leg_vector[1] / total_leg_length,
+                        total_leg_vector[2] / total_leg_length
+                    )
+                    
+                    # 计算膝盖位置（从髋部开始，沿着腿部方向，距离为大腿长度）
+                    knee_position = (
+                        hip_pos[0] + unit_vector[0] * actual_thigh,
+                        hip_pos[1] + unit_vector[1] * actual_thigh,
+                        hip_pos[2] + unit_vector[2] * actual_thigh
+                    )
+                    
+                    # 计算脚踝位置（从膝盖开始，沿着腿部方向，距离为小腿长度）
+                    ankle_position = (
+                        knee_position[0] + unit_vector[0] * actual_calf,
+                        knee_position[1] + unit_vector[1] * actual_calf,
+                        knee_position[2] + unit_vector[2] * actual_calf
+                    )
+                    
+                    return {
+                        f'{prefix}UpLeg': hip_pos,
+                        f'{prefix}Leg': knee_position,
+                        f'{prefix}Foot': ankle_position
+                    }
+            
+            # 如果数据不完整，使用原始位置
+            positions = {f'{prefix}UpLeg': hip_pos}
+            if knee_pos:
+                positions[f'{prefix}Leg'] = knee_pos
+            if ankle_pos:
+                positions[f'{prefix}Foot'] = ankle_pos
+            return positions
+        
+        # 计算左腿和右腿
+        left_leg_positions = calculate_leg_positions(left_hip_pos, left_knee_pos, left_ankle_pos, True)
+        right_leg_positions = calculate_leg_positions(right_hip_pos, right_knee_pos, right_ankle_pos, False)
+        
+        bone_positions.update(left_leg_positions)
+        bone_positions.update(right_leg_positions)
+        
+        print(f"基于参考比例计算了 {len(bone_positions)} 个骨骼位置")
+        return bone_positions
+        
+    except Exception as e:
+        print(f"计算参考比例位置时出错: {e}")
+        return {}
+
 def create_human_mesh(scene, vertices_data):
     """
     创建人体网格
@@ -82,14 +353,15 @@ def create_human_mesh(scene, vertices_data):
         mesh.InitControlPoints(vertices_count)
         control_points = mesh.GetControlPoints()
         
-        # 设置顶点位置（缩放到合适大小）
-        scale_factor = 100.0  # 放大100倍
+        # 设置顶点位置（缩放到合适大小并应用坐标系转换）
+        scale_factor = 10.0  # 缩放因子
         for i in range(vertices_count):
             x, y, z = first_frame[i]
+            # 原始坐标系转换为Maya坐标系：绕X轴旋转90度使头朝向上方
             control_points[i] = fbx.FbxVector4(
                 float(x) * scale_factor,
-                float(y) * scale_factor,
-                float(z) * scale_factor
+                float(-z) * scale_factor,  # 原Z轴变为Y轴，取负值
+                float(y) * scale_factor    # 原Y轴变为Z轴
             )
         
         # 创建简单的三角形面（连接相邻顶点）
@@ -242,6 +514,9 @@ def create_human_skeleton(scene, joints3d_data):
         else:
             first_frame = joints3d_data
         
+        # 计算基于参考比例的骨骼位置
+        bone_positions = calculate_reference_based_positions(first_frame, joint_index_map, scale_factor)
+        
         # 创建所有骨骼节点
         for bone_name, bone_info in skeleton_hierarchy.items():
             # 创建骨骼属性
@@ -260,26 +535,23 @@ def create_human_skeleton(scene, joints3d_data):
             bone_node = fbx.FbxNode.Create(scene, bone_name)
             bone_node.SetNodeAttribute(skeleton_attr)
             
-            # 设置初始位置（基于对应的COCO关节）
-            coco_joint = bone_info['coco_joint']
-            if coco_joint in joint_index_map:
-                joint_idx = joint_index_map[coco_joint]
-                joint_pos = first_frame[joint_idx]
-                
-                # 应用缩放和偏移
-                pos_x = float(joint_pos[0]) * scale_factor
-                pos_y = float(joint_pos[1]) * scale_factor
-                pos_z = float(joint_pos[2]) * scale_factor
-                
-                # 为不同骨骼添加适当的偏移
-                if 'Spine' in bone_name:
-                    pos_y += 20.0  # 脊椎向上偏移
-                elif 'Neck' in bone_name:
-                    pos_y += 40.0  # 颈部向上偏移
-                elif 'Head' in bone_name:
-                    pos_y += 60.0  # 头部向上偏移
-                
+            # 使用计算出的位置
+            if bone_name in bone_positions:
+                pos_x, pos_y, pos_z = bone_positions[bone_name]
                 bone_node.LclTranslation.Set(fbx.FbxDouble3(pos_x, pos_y, pos_z))
+            else:
+                # 回退到原始方法
+                coco_joint = bone_info['coco_joint']
+                if coco_joint in joint_index_map:
+                    joint_idx = joint_index_map[coco_joint]
+                    joint_pos = first_frame[joint_idx]
+                    
+                    # 应用缩放和坐标系转换
+                    pos_x = float(joint_pos[0]) * scale_factor
+                    pos_y = float(-joint_pos[2]) * scale_factor
+                    pos_z = float(joint_pos[1]) * scale_factor
+                    
+                    bone_node.LclTranslation.Set(fbx.FbxDouble3(pos_x, pos_y, pos_z))
             
             bone_nodes[bone_name] = bone_node
         
@@ -442,11 +714,12 @@ def create_improved_fbx(joints3d_data, mesh_data, output_path, person_id=0):
                         
                         joint_pos = joints3d_data[frame_idx][joint_idx]
                         
-                        # 应用缩放
+                        # 应用缩放因子和坐标系转换
+                        # 原始坐标系转换为Maya坐标系：绕X轴旋转90度使头朝向上方
                         scaled_pos = [
                             float(joint_pos[0]) * scale_factor,
-                            float(joint_pos[1]) * scale_factor,
-                            float(joint_pos[2]) * scale_factor
+                            float(-joint_pos[2]) * scale_factor,  # 原Z轴变为Y轴，取负值
+                            float(joint_pos[1]) * scale_factor    # 原Y轴变为Z轴
                         ]
                         
                         # 为不同骨骼添加偏移
@@ -513,6 +786,7 @@ def main():
     主函数
     """
     # 输入和输出文件路径
+    # 输入和输出文件路径
     pkl_file = r"e:\image_3d\text2dance\output\sample_video\pmce_output.pkl"
     output_fbx = r"e:\image_3d\text2dance\output\sample_video\improved_human_model.fbx"
 
@@ -521,6 +795,7 @@ def main():
 
     # pkl_file = r"e:\image_3d\text2dance\output\【20分钟 BASI普拉提 全身训练｜增强灵活性与力量 垫上普拉提跟练】Mira普拉提 初学者课程.f30016_split_171_281\pmce_output.pkl"
     # output_fbx = r"e:\image_3d\text2dance\output\【20分钟 BASI普拉提 全身训练｜增强灵活性与力量 垫上普拉提跟练】Mira普拉提 初学者课程.f30016_split_171_281\improved_dance_model.fbx"
+    
     
     print("=== 改进的 PKL to FBX 转换器 ===")
     print(f"输入文件: {pkl_file}")

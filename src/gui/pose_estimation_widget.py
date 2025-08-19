@@ -38,14 +38,14 @@ class PoseEstimationThread(QThread):
     video_completed = pyqtSignal(str, bool, str, str, float)  # 视频路径, 是否成功, 输出路径, 错误信息, 总耗时
     all_completed = pyqtSignal()
 
-    def __init__(self, videos, output_dir, pose_model="ViTPose", output_format="fbx", enable_3d=True, enable_mesh=False):
+    def __init__(self, videos, output_dir, pose_model, output_format, enable_3d):
         super().__init__()
         self.videos = videos
         self.output_dir = output_dir
         self.pose_model = pose_model
         self.output_format = output_format
         self.enable_3d = enable_3d
-        self.enable_mesh = enable_mesh
+        self.enable_mesh = False  # 可以根据需要设置
         self.is_running = True
         self.results = []
     
@@ -76,10 +76,10 @@ class PoseEstimationThread(QThread):
                     processing_time = time.time() - start_time
                     
                     if success:
-                        self.log_updated.emit(f"✓ 处理完成: {output_path} (耗时: {processing_time:.2f}秒)")
+                        self.log_updated.emit(f"[SUCCESS] 处理完成: {output_path} (耗时: {processing_time:.2f}秒)")
                         self.video_completed.emit(video_path, True, output_path, "", processing_time)
                     else:
-                        self.log_updated.emit(f"✗ 处理失败: {error_msg}")
+                        self.log_updated.emit(f"[ERROR] 处理失败: {error_msg}")
                         self.video_completed.emit(video_path, False, "", error_msg, processing_time)
                     
                     # 更新进度
@@ -88,7 +88,7 @@ class PoseEstimationThread(QThread):
                     
                 except Exception as e:
                     error_msg = f"处理视频时发生错误: {str(e)}"
-                    self.log_updated.emit(f"✗ {error_msg}")
+                    self.log_updated.emit(f"[ERROR] {error_msg}")
                     self.video_completed.emit(video_path, False, "", error_msg, 0)
             
             self.status_updated.emit("所有视频处理完成")
@@ -101,46 +101,175 @@ class PoseEstimationThread(QThread):
     def _process_single_video(self, video_path):
         """处理单个视频"""
         try:
-            # 构建输出路径
             video_name = Path(video_path).stem
-            if self.output_format == "fbx":
-                output_path = os.path.join(self.output_dir, f"{video_name}.fbx")
-                script_name = "run_demo_fbx.py"
-            else:
-                output_path = os.path.join(self.output_dir, f"{video_name}_output")
-                script_name = "run_demo.py"
-            
-            # 构建命令
             pose3d_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "algorithms", "pose3d")
-            script_path = os.path.join(pose3d_dir, "main", script_name)
             
-            cmd = [
-                "python", script_path,
-                "--video_path", video_path,
-                "--output_path", output_path
+            # 第一步：运行 run_demo.py 生成 PKL 文件
+            self.log_updated.emit(f"步骤1: 运行姿势估计生成PKL文件...")
+            
+            # 构建输出目录 - 使用项目根目录的绝对路径
+            project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+            output_dir = os.path.join(project_root, "output", video_name)
+            os.makedirs(output_dir, exist_ok=True)
+            
+            # 运行 run_demo.py
+            run_demo_script = os.path.join(pose3d_dir, "main", "run_demo.py")
+            demo_cmd = [
+                "python", run_demo_script,
+                "--vid_file", video_path,
+                "--save_pkl",
+                "--no_render",
+                "--gpu", "0"
             ]
             
-            if self.enable_3d:
-                cmd.extend(["--enable_3d", "true"])
+            self.log_updated.emit(f"执行命令: {' '.join(demo_cmd)}")
             
-            if self.enable_mesh:
-                cmd.extend(["--enable_mesh", "true"])
+            # 设置工作目录为项目根目录，确保输出保存到正确位置
+            project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
             
-            # 执行命令
-            self.log_updated.emit(f"执行命令: {' '.join(cmd)}")
+            # 设置环境变量以确保UTF-8编码
+            env = os.environ.copy()
+            env['PYTHONIOENCODING'] = 'utf-8'
+            env['PYTHONLEGACYWINDOWSSTDIO'] = '1'
             
             result = subprocess.run(
-                cmd,
+                demo_cmd,
                 capture_output=True,
                 text=True,
-                cwd=pose3d_dir
+                env=env,
+                cwd=project_root
             )
             
-            if result.returncode == 0:
-                return True, output_path, ""
+            if result.returncode != 0:
+                error_msg = result.stderr or result.stdout or "run_demo.py执行失败"
+                return False, "", f"步骤1失败: {error_msg}"
+            
+            self.log_updated.emit("[SUCCESS] PKL文件生成成功")
+            
+            # 第二步：根据输出格式选择相应的处理脚本
+            output_paths = []
+            
+            if self.output_format == "FBX文件" or self.output_format == "两者都有":
+                # FBX模式：运行 improved_pkl_to_fbx_converter.py
+                self.log_updated.emit(f"步骤2a: 转换PKL文件为FBX格式...")
+                
+                converter_script = os.path.join(pose3d_dir, "main", "improved_pkl_to_fbx_converter.py")
+                
+                # 使用FBX专用的Python环境
+                project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+                fbx_python = os.path.join(project_root, "fbx_env_py37", "Scripts", "python.exe")
+                
+                converter_cmd = [
+                    fbx_python, converter_script,
+                    "--video_file", video_path,
+                    "--output_dir", output_dir
+                ]
+                
+                self.log_updated.emit(f"执行命令: {' '.join(converter_cmd)}")
+                
+                # 设置环境变量以确保UTF-8编码
+                env = os.environ.copy()
+                env['PYTHONIOENCODING'] = 'utf-8'
+                env['PYTHONLEGACYWINDOWSSTDIO'] = '1'
+                
+                result = subprocess.run(
+                    converter_cmd,
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                    cwd=project_root
+                )
+                
+                if result.returncode != 0:
+                    error_msg = result.stderr or result.stdout or "FBX转换失败"
+                    return False, "", f"步骤2a失败: {error_msg}"
+                
+                fbx_output_path = os.path.join(output_dir, f"improved_{video_name}_model.fbx")
+                output_paths.append(fbx_output_path)
+                self.log_updated.emit(f"[SUCCESS] FBX文件生成成功: {fbx_output_path}")
+            
+            if self.output_format == "2D和3D对齐视频" or self.output_format == "两者都有":
+                # 视频模式：运行 run_flexible_alignment.py
+                step_name = "步骤2b" if self.output_format == "两者都有" else "步骤2"
+                self.log_updated.emit(f"{step_name}: 生成2D和3D人体对齐视频...")
+                
+                alignment_script = os.path.join(pose3d_dir, "test_pose_2d_3d", "run_flexible_alignment.py")
+                pkl_file = os.path.join(output_dir, "pmce_output.pkl")
+                
+                alignment_cmd = [
+                    "python", alignment_script,
+                    "-v", video_path,
+                    "-p", pkl_file
+                ]
+                
+                self.log_updated.emit(f"执行命令: {' '.join(alignment_cmd)}")
+                
+                # 设置环境变量以确保UTF-8编码
+                env = os.environ.copy()
+                env['PYTHONIOENCODING'] = 'utf-8'
+                env['PYTHONLEGACYWINDOWSSTDIO'] = '1'
+                
+                result = subprocess.run(
+                    alignment_cmd,
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                    cwd=project_root
+                )
+                
+                if result.returncode != 0:
+                    error_msg = result.stderr or result.stdout or "视频生成失败"
+                    return False, "", f"{step_name}失败: {error_msg}"
+                
+                # 查找实际生成的视频文件
+                # run_flexible_alignment.py 可能生成不同格式的文件名
+                possible_patterns = [
+                    f"{video_name}_PERSON_*_3D_ALIGNMENT.mp4",
+                    f"{video_name}_SINGLE_3D_ALIGNMENT.mp4",
+                    f"{video_name}_MULTI_PERSON_3D_ALIGNMENT.mp4",
+                    f"{video_name}_AUTO_SINGLE_3D_ALIGNMENT.mp4"
+                ]
+                
+                video_output_path = None
+                import glob
+                
+                # 首先在输出目录中查找
+                for pattern in possible_patterns:
+                    matches = glob.glob(os.path.join(output_dir, pattern))
+                    if matches:
+                        video_output_path = matches[0]
+                        break
+                
+                # 如果在输出目录没找到，在项目根目录查找
+                if not video_output_path:
+                    for pattern in possible_patterns:
+                        matches = glob.glob(os.path.join(project_root, pattern))
+                        if matches:
+                            video_output_path = matches[0]
+                            # 将文件移动到正确的输出目录
+                            import shutil
+                            new_path = os.path.join(output_dir, os.path.basename(video_output_path))
+                            shutil.move(video_output_path, new_path)
+                            video_output_path = new_path
+                            break
+                
+                if not video_output_path:
+                    # 如果还是没找到，使用默认路径但给出警告
+                    video_output_path = os.path.join(output_dir, f"{video_name}_2d_3d_output.mp4")
+                    self.log_updated.emit(f"[WARNING] 未找到生成的视频文件，请检查输出目录")
+                else:
+                    self.log_updated.emit(f"[SUCCESS] 2D和3D人体对齐视频生成成功: {video_output_path}")
+                
+                output_paths.append(video_output_path)
+            
+            # 返回主要输出路径（如果有多个文件，返回输出目录）
+            if len(output_paths) > 1:
+                output_path = output_dir  # 返回输出目录路径
+                self.log_updated.emit(f"[SUCCESS] 所有文件已生成到目录: {output_dir}")
             else:
-                error_msg = result.stderr or result.stdout or "未知错误"
-                return False, "", error_msg
+                output_path = output_paths[0] if output_paths else output_dir
+            
+            return True, output_path, ""
                 
         except Exception as e:
             return False, "", str(e)
@@ -266,91 +395,48 @@ class PoseEstimationWidget(QWidget):
         
         layout.addWidget(upload_group)
         
-        # 姿势估计参数区域
-        params_group = QGroupBox("姿势估计参数")
-        params_layout = QVBoxLayout(params_group)
+        # 输出格式选择区域
+        output_group = QGroupBox("输出格式")
+        output_layout = QVBoxLayout(output_group)
         
-        # 输出格式选择
-        format_layout = QHBoxLayout()
-        format_layout.addWidget(QLabel("输出格式:"))
+        # 单选按钮组
+        self.output_format_group = QButtonGroup()
         
-        self.output_format_combo = QComboBox()
-        self.output_format_combo.addItems(["FBX格式", "自定义格式"])
-        self.output_format_combo.setCurrentText("FBX格式")
-        self.output_format_combo.setToolTip("选择姿势估计结果的输出格式")
-        format_layout.addWidget(self.output_format_combo)
+        # FBX文件选项
+        self.fbx_radio = QRadioButton("FBX文件")
+        self.fbx_radio.setToolTip("生成标准3D动画格式文件，兼容Maya、Blender等3D软件")
+        self.fbx_radio.setChecked(True)  # 默认选中
+        self.output_format_group.addButton(self.fbx_radio, 0)
+        output_layout.addWidget(self.fbx_radio)
         
-        params_layout.addLayout(format_layout)
+        # 2D和3D对齐视频选项
+        self.alignment_radio = QRadioButton("2D和3D对齐视频")
+        self.alignment_radio.setToolTip("生成带姿势标注的对齐视频文件")
+        self.output_format_group.addButton(self.alignment_radio, 1)
+        output_layout.addWidget(self.alignment_radio)
         
-        # 处理模式选择
-        mode_layout = QHBoxLayout()
-        mode_layout.addWidget(QLabel("处理模式:"))
+        # 两者都有选项
+        self.both_radio = QRadioButton("两者都有")
+        self.both_radio.setToolTip("同时生成FBX文件和2D和3D对齐视频")
+        self.output_format_group.addButton(self.both_radio, 2)
+        output_layout.addWidget(self.both_radio)
         
-        self.processing_mode_combo = QComboBox()
-        self.processing_mode_combo.addItems(["3D姿势估计", "人体网格重建"])
-        self.processing_mode_combo.setCurrentText("3D姿势估计")
-        self.processing_mode_combo.setToolTip("选择姿势估计的处理模式")
-        mode_layout.addWidget(self.processing_mode_combo)
-        
-        params_layout.addLayout(mode_layout)
-        
-        # 质量设置
-        quality_layout = QHBoxLayout()
-        quality_layout.addWidget(QLabel("处理质量:"))
-        
-        self.quality_combo = QComboBox()
-        self.quality_combo.addItems(["快速", "标准", "高质量"])
-        self.quality_combo.setCurrentText("标准")
-        self.quality_combo.setToolTip("选择处理质量，影响速度和精度")
-        quality_layout.addWidget(self.quality_combo)
-        
-        params_layout.addLayout(quality_layout)
-        
-        layout.addWidget(params_group)
-        
-        # 功能选项区域
-        options_group = QGroupBox("功能选项")
-        options_layout = QVBoxLayout(options_group)
-        
-        # 功能选项复选框
-        self.enable_smoothing_checkbox = QCheckBox("启用平滑处理")
-        self.enable_smoothing_checkbox.setToolTip("对姿势估计结果进行平滑处理，减少抖动")
-        self.enable_smoothing_checkbox.setChecked(True)
-        options_layout.addWidget(self.enable_smoothing_checkbox)
-        
-        self.enable_optimization_checkbox = QCheckBox("启用优化算法")
-        self.enable_optimization_checkbox.setToolTip("使用优化算法提高姿势估计精度")
-        self.enable_optimization_checkbox.setChecked(True)
-        options_layout.addWidget(self.enable_optimization_checkbox)
-        
-        self.save_intermediate_checkbox = QCheckBox("保存中间结果")
-        self.save_intermediate_checkbox.setToolTip("保存处理过程中的中间结果文件")
-        options_layout.addWidget(self.save_intermediate_checkbox)
-        
-        layout.addWidget(options_group)
+        layout.addWidget(output_group)
         
         # 参数说明区域
-        info_group = QGroupBox("参数说明")
+        info_group = QGroupBox("输出格式说明")
         info_layout = QVBoxLayout(info_group)
         
         info_text = QLabel(
             "<b>📋 输出格式说明：</b><br>"
-            "• <b>FBX格式</b>：标准3D动画格式，兼容主流3D软件<br>"
-            "• <b>自定义格式</b>：项目专用格式，包含更多细节信息<br><br>"
-            
-            "<b>🎯 处理模式说明：</b><br>"
-            "• <b>3D姿势估计</b>：提取人体关键点的3D坐标<br>"
-            "• <b>人体网格重建</b>：重建完整的人体3D网格模型<br><br>"
-            
-            "<b>⚡ 质量设置说明：</b><br>"
-            "• <b>快速</b>：处理速度快，适合预览和测试<br>"
-            "• <b>标准</b>：平衡速度和质量，推荐日常使用<br>"
-            "• <b>高质量</b>：最高精度，适合最终输出<br><br>"
+            "• <b>FBX文件</b>：标准3D动画格式，兼容Maya、Blender等3D软件<br>"
+            "• <b>2D和3D对齐视频</b>：生成带姿势标注的对齐视频文件<br>"
+            "• <b>两者都有</b>：同时生成FBX文件和2D和3D对齐视频<br><br>"
             
             "<b>💡 使用建议：</b><br>"
-            "• 首次使用建议选择标准质量进行测试<br>"
-            "• 启用平滑处理可以显著改善结果质量<br>"
-            "• 处理长视频时建议启用优化算法"
+            "• FBX文件适合导入3D软件进行动画制作和后期处理<br>"
+            "• 2D和3D对齐视频适合直接查看姿势估计和跟踪效果<br>"
+            "• 两者都有可以满足不同用途的需求，但处理时间会更长"
         )
         info_text.setWordWrap(True)
         info_text.setStyleSheet(
@@ -946,29 +1032,42 @@ class PoseEstimationWidget(QWidget):
             return
         
         # 获取参数
-        output_format = self.output_format_combo.currentText()
-        processing_mode = self.processing_mode_combo.currentText()
-        quality = self.quality_combo.currentText()
-        enable_smoothing = self.enable_smoothing_checkbox.isChecked()
-        enable_optimization = self.enable_optimization_checkbox.isChecked()
-        save_intermediate = self.save_intermediate_checkbox.isChecked()
+        # 根据单选按钮获取输出格式
+        if self.fbx_radio.isChecked():
+            output_format = "FBX文件"
+        elif self.alignment_radio.isChecked():
+            output_format = "2D和3D对齐视频"
+        elif self.both_radio.isChecked():
+            output_format = "两者都有"
+        else:
+            output_format = "FBX文件"  # 默认值
+        # 使用默认参数
+        processing_mode = "3D姿势估计"
+        quality = "标准"
+        enable_smoothing = True
+        enable_optimization = True
+        save_intermediate = False
+        
+        # 确定输出目录 - 使用项目根目录的绝对路径
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+        output_dir = os.path.join(project_root, "output", "pose_estimation_results")
+        # 注意：不在这里创建目录，而是在实际需要时创建
         
         # 创建处理线程
         self.processing_thread = PoseEstimationThread(
             videos=selected_videos,
+            output_dir=output_dir,
+            pose_model=processing_mode,
             output_format=output_format,
-            processing_mode=processing_mode,
-            quality=quality,
-            enable_smoothing=enable_smoothing,
-            enable_optimization=enable_optimization,
-            save_intermediate=save_intermediate
+            enable_3d=(processing_mode == "人体网格重建")
         )
         
         # 连接信号
         self.processing_thread.progress_updated.connect(self.progress_bar.setValue)
         self.processing_thread.status_updated.connect(self.status_label.setText)
         self.processing_thread.log_updated.connect(self._log_message)
-        self.processing_thread.finished.connect(self._on_processing_finished)
+        self.processing_thread.video_completed.connect(self._on_video_completed)
+        self.processing_thread.all_completed.connect(self._on_processing_finished)
         
         # 更新UI状态
         self.start_btn.setEnabled(False)
@@ -984,6 +1083,14 @@ class PoseEstimationWidget(QWidget):
         if self.processing_thread and self.processing_thread.isRunning():
             self.processing_thread.stop()
             self._log_message("正在停止处理...")
+    
+    def _on_video_completed(self, video_path, success, output_path, error_msg, processing_time):
+        """单个视频处理完成回调"""
+        video_name = os.path.basename(video_path)
+        if success:
+            self._log_message(f"[SUCCESS] {video_name} 处理成功 - 输出: {output_path} - 耗时: {processing_time:.1f}秒")
+        else:
+            self._log_message(f"[ERROR] {video_name} 处理失败 - 错误: {error_msg} - 耗时: {processing_time:.1f}秒")
     
     def _on_processing_finished(self):
         """处理完成"""
@@ -1082,61 +1189,3 @@ class PoseEstimationWidget(QWidget):
         
         # 播放定时器
         self.play_timer.timeout.connect(self._update_frame)
-
-# 添加处理线程类
-class PoseEstimationThread(QThread):
-    """姿势估计处理线程"""
-    
-    progress_updated = pyqtSignal(int)
-    status_updated = pyqtSignal(str)
-    log_updated = pyqtSignal(str)
-    finished = pyqtSignal()
-    
-    def __init__(self, videos, output_format, processing_mode, quality, 
-                 enable_smoothing, enable_optimization, save_intermediate):
-        super().__init__()
-        self.videos = videos
-        self.output_format = output_format
-        self.processing_mode = processing_mode
-        self.quality = quality
-        self.enable_smoothing = enable_smoothing
-        self.enable_optimization = enable_optimization
-        self.save_intermediate = save_intermediate
-        self.is_running = True
-    
-    def stop(self):
-        """停止处理"""
-        self.is_running = False
-        self.quit()
-        self.wait()
-    
-    def run(self):
-        """运行处理线程"""
-        try:
-            total_videos = len(self.videos)
-            
-            for i, video_path in enumerate(self.videos):
-                if not self.is_running:
-                    break
-                
-                self.status_updated.emit(f"正在处理: {os.path.basename(video_path)}")
-                self.log_updated.emit(f"开始处理视频 {i+1}/{total_videos}: {video_path}")
-                
-                # 模拟处理过程
-                import time
-                for j in range(10):
-                    if not self.is_running:
-                        break
-                    time.sleep(0.5)
-                    progress = int((i * 10 + j + 1) / (total_videos * 10) * 100)
-                    self.progress_updated.emit(progress)
-                
-                self.log_updated.emit(f"✓ 处理完成: {video_path}")
-            
-            self.status_updated.emit("所有视频处理完成")
-            self.finished.emit()
-            
-        except Exception as e:
-            self.status_updated.emit(f"处理过程中发生错误: {str(e)}")
-            self.log_updated.emit(f"错误: {str(e)}")
-            self.finished.emit()

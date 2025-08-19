@@ -22,6 +22,86 @@ except ImportError:
     print("请确保已正确安装 Autodesk FBX SDK 2020.3.2")
     sys.exit(1)
 
+def transform_coordinates(x, y, z, coordinate_system='maya'):
+    """
+    坐标系转换函数 - 参考 save_obj 函数的坐标变换逻辑
+    将原始坐标系转换为目标坐标系
+    
+    Args:
+        x, y, z: 原始坐标
+        coordinate_system: 坐标系类型 ('maya', 'blender', 'matplotlib')
+    
+    Returns:
+        转换后的坐标 (x', y', z')
+    """
+    import numpy as np
+    
+    # 将单个坐标点转换为数组格式以便矩阵运算
+    v = np.array([[float(x), float(y), float(z)]])
+    
+    # 应用与 StableAligner 一致的基础旋转变换
+    rx, ry, rz = 0.1, 0.0, 0.0
+    
+    # 计算旋转矩阵的三角函数值
+    cos_rx, sin_rx = np.cos(rx), np.sin(rx)
+    cos_ry, sin_ry = np.cos(ry), np.sin(ry)
+    cos_rz, sin_rz = np.cos(rz), np.sin(rz)
+    
+    # 构建XYZ轴旋转矩阵
+    R_x = np.array([[1, 0, 0], [0, cos_rx, -sin_rx], [0, sin_rx, cos_rx]])
+    R_y = np.array([[cos_ry, 0, sin_ry], [0, 1, 0], [-sin_ry, 0, cos_ry]])
+    R_z = np.array([[cos_rz, -sin_rz, 0], [sin_rz, cos_rz, 0], [0, 0, 1]])
+    
+    # 按照 Z-Y-X 顺序组合旋转矩阵
+    R = R_z @ R_y @ R_x
+    
+    # 应用基础旋转变换
+    transformed_vertices = (R @ v.T).T
+    
+    # 根据目标坐标系应用不同的变换
+    if coordinate_system == 'maya':
+        # Maya坐标系：Y轴向上，Z轴向前，X轴向右
+        # 进行Y轴和Z轴翻转，然后绕Y轴逆时针旋转45度
+        vertices_final = transformed_vertices.copy()
+        vertices_final[:, 1] = -vertices_final[:, 1]  # Y轴翻转，解决倒立问题
+        vertices_final[:, 2] = -vertices_final[:, 2]  # Z轴翻转，解决面向屏幕后方的问题
+        
+        # 绕Y轴逆时针旋转45度：x' = √2/2 * x + √2/2 * z, y' = y, z' = -√2/2 * x + √2/2 * z
+        temp_vertices = vertices_final.copy()
+        sqrt2_half = np.sqrt(2) / 2
+        vertices_final[:, 0] = sqrt2_half * temp_vertices[:, 0] + sqrt2_half * temp_vertices[:, 2]   # x' = √2/2 * x + √2/2 * z
+        vertices_final[:, 1] = temp_vertices[:, 1]   # y' = y (保持不变)
+        vertices_final[:, 2] = -sqrt2_half * temp_vertices[:, 0] + sqrt2_half * temp_vertices[:, 2]  # z' = -√2/2 * x + √2/2 * z
+        
+    elif coordinate_system == 'blender':
+        # Blender坐标系：Z轴向上，Y轴向前，X轴向右
+        vertices_final = transformed_vertices.copy()
+        vertices_final[:, 0] = transformed_vertices[:, 0]   # X保持不变
+        vertices_final[:, 1] = -transformed_vertices[:, 1]  # Y = -原Y（向前）
+        vertices_final[:, 2] = transformed_vertices[:, 2]   # Z = 原Z（向上）
+        
+    elif coordinate_system == 'matplotlib':
+        # 应用与 render_stable_3d_model 完全相同的坐标系变换序列
+        # 第一步坐标变换：x->x, y->z, z->-y
+        temp_vertices = transformed_vertices.copy()
+        temp_vertices[:, 0] = transformed_vertices[:, 0]
+        temp_vertices[:, 1] = transformed_vertices[:, 2]
+        temp_vertices[:, 2] = -transformed_vertices[:, 1]
+        
+        # 第二步坐标变换：x->-y, y->x, z->z
+        vertices_final = temp_vertices.copy()
+        vertices_final[:, 0] = -temp_vertices[:, 1]
+        vertices_final[:, 1] = temp_vertices[:, 0]
+        vertices_final[:, 2] = temp_vertices[:, 2]
+        
+    else:
+        # 默认：不进行额外坐标变换
+        vertices_final = transformed_vertices
+    
+    # 返回转换后的单个坐标点
+    result = vertices_final[0]
+    return float(result[0]), float(result[1]), float(result[2])
+
 def load_pkl_data(pkl_file_path):
     """
     加载 pkl 文件并分析其结构
@@ -86,10 +166,12 @@ def create_human_mesh(scene, vertices_data):
         scale_factor = 100.0  # 放大100倍
         for i in range(vertices_count):
             x, y, z = first_frame[i]
+            # 应用坐标系转换
+            transformed_x, transformed_y, transformed_z = transform_coordinates(x, y, z, coordinate_system='maya')
             control_points[i] = fbx.FbxVector4(
-                float(x) * scale_factor,
-                float(y) * scale_factor,
-                float(z) * scale_factor
+                transformed_x * scale_factor,
+                transformed_y * scale_factor,
+                transformed_z * scale_factor
             )
         
         # 创建简单的三角形面（连接相邻顶点）
@@ -266,10 +348,13 @@ def create_human_skeleton(scene, joints3d_data):
                 joint_idx = joint_index_map[coco_joint]
                 joint_pos = first_frame[joint_idx]
                 
-                # 应用缩放和偏移
-                pos_x = float(joint_pos[0]) * scale_factor
-                pos_y = float(joint_pos[1]) * scale_factor
-                pos_z = float(joint_pos[2]) * scale_factor
+                # 应用坐标系转换和缩放
+                transformed_x, transformed_y, transformed_z = transform_coordinates(
+                    joint_pos[0], joint_pos[1], joint_pos[2], coordinate_system='maya'
+                )
+                pos_x = transformed_x * scale_factor
+                pos_y = transformed_y * scale_factor
+                pos_z = transformed_z * scale_factor
                 
                 # 为不同骨骼添加适当的偏移
                 if 'Spine' in bone_name:
@@ -442,11 +527,14 @@ def create_improved_fbx(joints3d_data, mesh_data, output_path, person_id=0):
                         
                         joint_pos = joints3d_data[frame_idx][joint_idx]
                         
-                        # 应用缩放
+                        # 应用坐标系转换和缩放
+                        transformed_x, transformed_y, transformed_z = transform_coordinates(
+                            joint_pos[0], joint_pos[1], joint_pos[2], coordinate_system='maya'
+                        )
                         scaled_pos = [
-                            float(joint_pos[0]) * scale_factor,
-                            float(joint_pos[1]) * scale_factor,
-                            float(joint_pos[2]) * scale_factor
+                            transformed_x * scale_factor,
+                            transformed_y * scale_factor,
+                            transformed_z * scale_factor
                         ]
                         
                         # 为不同骨骼添加偏移
@@ -513,14 +601,14 @@ def main():
     主函数
     """
     # 输入和输出文件路径
-    pkl_file = r"e:\image_3d\text2dance\output\sample_video\pmce_output.pkl"
-    output_fbx = r"e:\image_3d\text2dance\fbx_test_files\improved_human_model.fbx"
+    # pkl_file = r"e:\image_3d\text2dance\output\sample_video\pmce_output.pkl"
+    # output_fbx = r"e:\image_3d\text2dance\output\sample_video\improved_human_model.fbx"
 
     # pkl_file = r"e:\image_3d\text2dance\output\twodance\pmce_output.pkl"
-    # output_fbx = r"e:\image_3d\text2dance\fbx_test_files\improved_twohuman_model.fbx"
+    # output_fbx = r"e:\image_3d\text2dance\output\twodance\improved_twohuman_model.fbx"
 
-    # pkl_file = r"e:\image_3d\text2dance\output\【20分钟 BASI普拉提 全身训练｜增强灵活性与力量 垫上普拉提跟练】Mira普拉提 初学者课程.f30016_split_171_281\pmce_output.pkl"
-    # output_fbx = r"e:\image_3d\text2dance\fbx_test_files\improved_dance_model.fbx"
+    pkl_file = r"e:\image_3d\text2dance\output\【20分钟 BASI普拉提 全身训练｜增强灵活性与力量 垫上普拉提跟练】Mira普拉提 初学者课程.f30016_split_171_281\pmce_output.pkl"
+    output_fbx = r"e:\image_3d\text2dance\output\【20分钟 BASI普拉提 全身训练｜增强灵活性与力量 垫上普拉提跟练】Mira普拉提 初学者课程.f30016_split_171_281\improved_dance_model.fbx"
     
     print("=== 改进的 PKL to FBX 转换器 ===")
     print(f"输入文件: {pkl_file}")
