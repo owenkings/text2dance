@@ -1658,8 +1658,8 @@ class VideoDescriptionWidget(QWidget):
         auto_save_label = QLabel("启用自动保存:")
         auto_save_label.setStyleSheet("font-weight: bold; color: #2c3e50;")
         self.auto_save_format_combo = QComboBox()
-        self.auto_save_format_combo.addItems(["关闭", "JSON格式", "TXT格式", "CSV格式", "MD格式"])
-        self.auto_save_format_combo.setToolTip("选择自动保存的文件格式，选择'关闭'则不启用自动保存")
+        self.auto_save_format_combo.addItems(["关闭", "JSON格式", "TXT格式", "CSV格式", "MD格式", "全部格式"])
+        self.auto_save_format_combo.setToolTip("选择自动保存的文件格式，选择'关闭'则不启用自动保存，选择'全部格式'则同时导出所有类型的文件")
         
         # 添加到网格布局 (行, 列)
         grid_layout.addWidget(mode_label, 0, 0)
@@ -3266,19 +3266,89 @@ class VideoDescriptionWidget(QWidget):
         try:
             # 根据下拉框选择确定格式
             format_text = self.auto_save_format_combo.currentText()
-            format_map = {
-                "JSON格式": "json",
-                "TXT格式": "txt", 
-                "CSV格式": "csv",
-                "MD格式": "md"
-            }
-            selected_format = format_map.get(format_text, "json")
             
-            # 直接执行自动保存到各视频所在目录
-            self._auto_save_results(selected_format, selected_videos)
+            if format_text == "全部格式":
+                # 导出所有格式
+                formats = ["json", "txt", "csv", "md"]
+                self._auto_save_all_formats(formats, selected_videos)
+            else:
+                format_map = {
+                    "JSON格式": "json",
+                    "TXT格式": "txt", 
+                    "CSV格式": "csv",
+                    "MD格式": "md"
+                }
+                selected_format = format_map.get(format_text, "json")
+                
+                # 直接执行自动保存到各视频所在目录
+                self._auto_save_results(selected_format, selected_videos)
             
         except Exception as e:
             QMessageBox.critical(self, "自动保存失败", f"自动保存过程中发生错误: {str(e)}")
+    
+    def _auto_save_all_formats(self, formats, selected_videos=None):
+        """执行全部格式自动保存 - 每个视频保存所有格式到视频同名文件夹的description子目录"""
+        try:
+            # 如果没有指定选中视频，则使用所有视频
+            videos_to_save = selected_videos if selected_videos is not None else self.current_videos
+            
+            total_saved_count = 0
+            failed_videos = 0
+            format_names = {"json": "JSON", "txt": "TXT", "csv": "CSV", "md": "MD"}
+            
+            for video_path in videos_to_save:
+                if video_path in self.video_results:
+                    result = self.video_results[video_path]
+                    video_name = Path(video_path).stem
+                    
+                    # 创建description文件夹
+                    video_dir = Path(video_path).parent
+                    description_folder = video_dir / "description"
+                    description_folder.mkdir(exist_ok=True)
+                    
+                    video_saved_count = 0
+                    for format_type in formats:
+                        try:
+                            if format_type == 'json':
+                                save_file = description_folder / f"{video_name}_description.json"
+                                self._export_single_video_json(result, video_path, save_file)
+                            elif format_type == 'txt':
+                                save_file = description_folder / f"{video_name}_description.txt"
+                                self._export_single_video_txt(result, video_path, save_file)
+                            elif format_type == 'csv':
+                                save_file = description_folder / f"{video_name}_description.csv"
+                                self._export_single_video_csv(result, video_path, save_file)
+                            elif format_type == 'md':
+                                save_file = description_folder / f"{video_name}_description.md"
+                                self._export_single_video_md(result, video_path, save_file)
+                            
+                            video_saved_count += 1
+                            total_saved_count += 1
+                        except Exception as e:
+                            self._log_message(f"保存{format_names[format_type]}格式失败 ({os.path.basename(video_path)}): {str(e)}")
+                    
+                    if video_saved_count > 0:
+                        self._log_message(f"视频 {os.path.basename(video_path)} 成功保存 {video_saved_count} 种格式")
+                    else:
+                        failed_videos += 1
+                else:
+                    failed_videos += 1
+                    self._log_message(f"未找到视频处理结果: {os.path.basename(video_path)}")
+            
+            # 显示保存结果
+            if total_saved_count > 0:
+                video_count = len(videos_to_save) - failed_videos
+                message = f"成功为 {video_count} 个视频导出了全部格式文件（共 {total_saved_count} 个文件）到各自的description文件夹"
+                if failed_videos > 0:
+                    message += f"\n{failed_videos} 个视频未找到处理结果"
+                QMessageBox.information(self, "全部格式自动保存完成", message)
+                self._log_message(f"全部格式自动保存完成: {total_saved_count} 个文件成功, {failed_videos} 个视频失败")
+            else:
+                QMessageBox.warning(self, "自动保存失败", "没有找到任何处理结果")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "自动保存失败", f"自动保存过程中发生错误: {str(e)}")
+            self._log_message(f"全部格式自动保存失败: {str(e)}")
     
     def _auto_save_results(self, format_type, selected_videos=None):
         """执行自动保存 - 每个视频单独保存到视频同名文件夹的description子目录"""
