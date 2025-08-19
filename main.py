@@ -33,6 +33,15 @@ from pathlib import Path
 project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
 
+# 早期初始化缓存管理器（在导入其他模块之前）
+try:
+    from src.core.cache_manager import get_cache_manager
+    cache_manager = get_cache_manager()
+    print(f"✅ 缓存管理器已初始化，缓存路径: {cache_manager.get_cache_path()}")
+except Exception as e:
+    print(f"⚠️ 缓存管理器初始化失败: {e}")
+    print("将使用系统默认缓存路径")
+
 # NumPy兼容性检查和修复
 # NumPy兼容性检查和修复
 import os

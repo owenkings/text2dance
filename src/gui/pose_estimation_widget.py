@@ -760,6 +760,8 @@ class PoseEstimationWidget(QWidget):
         video_path = item.data(Qt.UserRole)
         if video_path:
             self._load_video(video_path)
+            # 显示结果（如果有）
+            self._show_video_result(video_path)
     
     def _on_video_check_changed(self, item):
         """视频复选框状态改变"""
@@ -1054,6 +1056,9 @@ class PoseEstimationWidget(QWidget):
         # 这里传递None，让处理线程根据每个视频的路径动态创建输出目录
         output_dir = None
         
+        # 记录当前输出格式
+        self._current_output_format = output_format
+        
         # 创建处理线程
         self.processing_thread = PoseEstimationThread(
             videos=selected_videos,
@@ -1092,6 +1097,18 @@ class PoseEstimationWidget(QWidget):
             self._log_message(f"[SUCCESS] {video_name} 处理成功 - 输出: {output_path} - 耗时: {processing_time:.1f}秒")
         else:
             self._log_message(f"[ERROR] {video_name} 处理失败 - 错误: {error_msg} - 耗时: {processing_time:.1f}秒")
+        
+        # 保存处理结果到JSON文件
+        self._save_video_result(video_path, {
+            'video_path': video_path,
+            'success': success,
+            'output_path': output_path,
+            'error_message': error_msg,
+            'processing_time': processing_time,
+            'processed_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+            'output_format': getattr(self, '_current_output_format', 'FBX文件'),
+            'device_info': 'GPU' if hasattr(self, 'processing_thread') else 'CPU'
+        })
     
     def _on_processing_finished(self):
         """处理完成"""
@@ -1099,6 +1116,9 @@ class PoseEstimationWidget(QWidget):
         self.stop_btn.setEnabled(False)
         self.status_label.setText("处理完成")
         self._log_message("所有视频处理完成")
+        
+        # 刷新视频列表状态显示
+        self._refresh_video_list_status()
     
     def _export_results(self, format_type):
         """导出结果"""
@@ -1163,6 +1183,9 @@ class PoseEstimationWidget(QWidget):
         self.video_list.itemClicked.connect(self._on_video_selected)
         self.video_list.itemChanged.connect(self._on_video_check_changed)
         
+        # 初始化时刷新视频列表状态
+        QTimer.singleShot(100, self._refresh_video_list_status)
+        
         # 播放控制相关
         self.backward_btn.clicked.connect(self._backward_10s)
         self.play_btn.clicked.connect(self._toggle_playback)
@@ -1189,3 +1212,110 @@ class PoseEstimationWidget(QWidget):
         
         # 播放定时器
         self.play_timer.timeout.connect(self._update_frame)
+    
+    def _get_result_file_path(self, video_path):
+        """获取结果文件路径 - 统一使用视频名+pose_result格式"""
+        from pathlib import Path
+        video_dir = Path(video_path).parent
+        video_name = Path(video_path).stem
+        return video_dir / f"{video_name}_pose_result.json"
+    
+    def _save_video_result(self, video_path, result):
+        """保存视频结果"""
+        try:
+            import json
+            result_file = self._get_result_file_path(video_path)
+            with open(result_file, 'w', encoding='utf-8') as f:
+                json.dump(result, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            self._log_message(f"保存结果失败: {str(e)}")
+    
+    def _load_video_result(self, video_path):
+        """加载视频结果"""
+        try:
+            import json
+            result_file = self._get_result_file_path(video_path)
+            if result_file.exists():
+                with open(result_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+        except Exception as e:
+            self._log_message(f"加载结果失败: {str(e)}")
+        return None
+    
+    def _has_video_result(self, video_path):
+        """检查视频是否有处理结果"""
+        result_file = self._get_result_file_path(video_path)
+        return result_file.exists()
+    
+    def _refresh_video_list_status(self):
+        """刷新视频列表状态显示"""
+        for i in range(self.video_list.count()):
+            item = self.video_list.item(i)
+            video_path = item.data(Qt.UserRole)
+            video_name = os.path.basename(video_path)
+            
+            # 保存当前复选框状态
+            current_check_state = item.checkState()
+            
+            # 检查是否有处理结果
+            if self._has_video_result(video_path):
+                try:
+                    result = self._load_video_result(video_path)
+                    if result:
+                        # 根据处理结果更新显示
+                        if result.get('success', False):
+                            item.setText(f"✅ {video_name}")
+                        else:
+                            item.setText(f"❌ {video_name}")
+                except Exception as e:
+                    # 如果读取结果文件失败，保持原状态
+                    self._log_message(f"读取结果文件失败: {str(e)}")
+                    if not item.text().startswith(("✅", "❌")):
+                        item.setText(video_name)
+            else:
+                # 如果没有结果文件，显示未处理状态
+                if not item.text().startswith(("✅", "❌")):
+                    item.setText(video_name)
+            
+            # 恢复复选框状态
+            item.setCheckState(current_check_state)
+    
+    def _show_video_result(self, video_path):
+        """显示视频结果"""
+        result = self._load_video_result(video_path)
+        
+        if result:
+            try:
+                import json
+                result_text = f"视频: {os.path.basename(video_path)}\n"
+                result_text += f"处理状态: {'成功' if result.get('success', False) else '失败'}\n"
+                result_text += f"输出格式: {result.get('output_format', '未知')}\n"
+                result_text += f"处理时间: {result.get('processed_at', '未知')}\n"
+                result_text += f"处理耗时: {result.get('processing_time', 0):.1f}秒\n"
+                result_text += f"设备信息: {result.get('device_info', '未知')}\n"
+                result_text += "-" * 50 + "\n"
+                
+                if result.get('success', False):
+                    output_path = result.get('output_path', '')
+                    if output_path:
+                        result_text += f"输出路径: {output_path}\n"
+                        # 检查输出文件是否存在
+                        if os.path.exists(output_path):
+                            result_text += "状态: 文件存在 ✅\n"
+                        else:
+                            result_text += "状态: 文件不存在 ❌\n"
+                else:
+                    error_msg = result.get('error_message', '无')
+                    result_text += f"错误信息: {error_msg}\n"
+                
+                # 显示在日志区域
+                self._log_message("=== 处理结果详情 ===")
+                for line in result_text.strip().split('\n'):
+                    if line.strip():
+                        self._log_message(line)
+                self._log_message("=" * 50)
+                
+            except Exception as e:
+                self._log_message(f"显示结果失败: {str(e)}")
+        else:
+            self._log_message(f"未找到视频 {os.path.basename(video_path)} 的处理结果")
