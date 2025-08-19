@@ -9,10 +9,16 @@ from transformers.trainer import (
     is_sagemaker_mp_enabled,
     get_parameter_names,
     has_length,
-    ALL_LAYERNORM_LAYERS,
     logger,
 )
 from typing import List, Optional
+
+# 兼容性修复：在新版本transformers中ALL_LAYERNORM_LAYERS被移除
+try:
+    from transformers.trainer import ALL_LAYERNORM_LAYERS
+except ImportError:
+    # 如果导入失败，使用默认的LayerNorm层列表
+    ALL_LAYERNORM_LAYERS = [torch.nn.LayerNorm]
 
 
 def maybe_zero_3(param, ignore_status=False, name=None):

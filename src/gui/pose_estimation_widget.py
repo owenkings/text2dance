@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 from typing import Dict, Any, Optional
 from collections import deque
+from datetime import datetime
 import cv2
 import numpy as np
 
@@ -107,9 +108,10 @@ class PoseEstimationThread(QThread):
             # 第一步：运行 run_demo.py 生成 PKL 文件
             self.log_updated.emit(f"步骤1: 运行姿势估计生成PKL文件...")
             
-            # 构建输出目录 - 使用项目根目录的绝对路径
-            project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-            output_dir = os.path.join(project_root, "output", video_name)
+            # 构建输出目录 - 使用视频所在目录下的视频名称/pose文件夹
+            video_dir = os.path.dirname(video_path)
+            video_folder = os.path.join(video_dir, video_name)
+            output_dir = os.path.join(video_folder, "pose")
             os.makedirs(output_dir, exist_ok=True)
             
             # 运行 run_demo.py
@@ -1048,10 +1050,9 @@ class PoseEstimationWidget(QWidget):
         enable_optimization = True
         save_intermediate = False
         
-        # 确定输出目录 - 使用项目根目录的绝对路径
-        project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-        output_dir = os.path.join(project_root, "output", "pose_estimation_results")
-        # 注意：不在这里创建目录，而是在实际需要时创建
+        # 确定输出目录 - 使用视频所在目录下的视频名称/pose文件夹
+        # 这里传递None，让处理线程根据每个视频的路径动态创建输出目录
+        output_dir = None
         
         # 创建处理线程
         self.processing_thread = PoseEstimationThread(
@@ -1130,9 +1131,8 @@ class PoseEstimationWidget(QWidget):
         self.log_text.append(formatted_message)
         
         # 自动滚动到底部
-        cursor = self.log_text.textCursor()
-        cursor.movePosition(cursor.End)
-        self.log_text.setTextCursor(cursor)
+        scrollbar = self.log_text.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
     
     def closeEvent(self, event):
         """关闭事件"""

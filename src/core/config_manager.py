@@ -111,7 +111,11 @@ class ConfigManager(QObject):
         """获取配置段（兼容方法）"""
         if default is None:
             default = {}
-        return self.get(section, default)
+        result = self.get(section, default)
+        # 确保返回的是字典类型
+        if not isinstance(result, dict):
+            return default
+        return result
     
     def update_section(self, section: str, data: Dict[str, Any]) -> None:
         """更新配置段"""

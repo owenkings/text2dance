@@ -121,10 +121,10 @@ class VideoDescriptionThread(QThread):
     progress_updated = pyqtSignal(int)  # 进度百分比
     status_updated = pyqtSignal(str)  # 状态信息
     log_updated = pyqtSignal(str)  # 实时日志更新
-    video_completed = pyqtSignal(str, bool, str, str, float)  # 视频路径, 是否成功, 描述内容, 错误信息, 总耗时
+    video_completed = pyqtSignal(str, bool, str, str, float, str)  # 视频路径, 是否成功, 描述内容, 错误信息, 总耗时, 实际时间戳
     all_completed = pyqtSignal()
 
-    def __init__(self, videos, description_requirement, model_path, use_action_filter=False, generation_mode="random", description_length=300, num_frames=16, api_config=None, device="Auto", enable_multithread=False, thread_count=2, top_p=0.9):
+    def __init__(self, videos, description_requirement, model_path, use_action_filter=False, generation_mode="random", description_length=300, num_frames=16, api_config=None, device="Auto", enable_multithread=False, thread_count=2, top_p=0.9, algorithm_type="本地模型"):
         super().__init__()
         self.videos = videos
         self.description_requirement = description_requirement
@@ -138,6 +138,7 @@ class VideoDescriptionThread(QThread):
         self.enable_multithread = enable_multithread  # 是否启用多线程
         self.thread_count = thread_count  # 线程数量
         self.top_p = top_p  # Top-p参数
+        self.algorithm_type = algorithm_type  # 算法类型："本地模型" 或 "API调用"
         self.is_running = True
         self.results = []
     
@@ -151,32 +152,48 @@ class VideoDescriptionThread(QThread):
         try:
             total_videos = len(self.videos)
             
-            # 检查是否启用多线程处理
-            if self.enable_multithread and self.device in ["CUDA", "Auto"] and total_videos > 1:
-                self.status_updated.emit(f"开始多线程处理 {total_videos} 个视频，使用 {self.thread_count} 个线程...")
-                self.log_updated.emit(f"使用多线程处理模式 ({self.thread_count} 个线程并行处理)")
-            else:
-                self.status_updated.emit(f"开始批量处理 {total_videos} 个视频...")
-                self.log_updated.emit("使用优化的批量处理模式 (1次模型加载 + N次推理)")
-            
-            # 输出设备信息
-            device_info = f"此次运行使用的计算设备: {self.device}"
-            if self.device == "Auto":
-                device_info += " (将自动检测最佳设备)"
-            elif self.device == "CUDA":
-                device_info += " (强制使用GPU加速)"
-            elif self.device == "CPU":
-                device_info += " (强制使用CPU处理)"
-            self.log_updated.emit(device_info)
-            
-            # 记录整体开始时间
-            overall_start_time = time.time()
-            
-            # 根据设置选择处理方式
-            if self.enable_multithread and self.device in ["CUDA", "Auto"] and total_videos > 1:
-                success, results = self._process_videos_multithread()
-            else:
-                success, results = self._process_videos_batch()
+            # 根据算法类型选择处理方式
+            if self.algorithm_type == "API调用":
+                self.status_updated.emit(f"开始API处理 {total_videos} 个视频...")
+                self.log_updated.emit("使用API调用模式进行视频描述")
+                
+                # 输出API信息
+                api_info = f"使用API模型: {self.api_config.get('api_model', 'gpt-3.5-turbo')}"
+                self.log_updated.emit(api_info)
+                
+                # 记录整体开始时间
+                overall_start_time = time.time()
+                
+                # API模式处理
+                success, results = self._process_videos_api()
+                
+            else:  # 本地模型模式
+                # 检查是否启用多线程处理
+                if self.enable_multithread and self.device in ["CUDA", "Auto"] and total_videos > 1:
+                    self.status_updated.emit(f"开始多线程处理 {total_videos} 个视频，使用 {self.thread_count} 个线程...")
+                    self.log_updated.emit(f"使用多线程处理模式 ({self.thread_count} 个线程并行处理)")
+                else:
+                    self.status_updated.emit(f"开始批量处理 {total_videos} 个视频...")
+                    self.log_updated.emit("使用优化的批量处理模式 (1次模型加载 + N次推理)")
+                
+                # 输出设备信息
+                device_info = f"此次运行使用的计算设备: {self.device}"
+                if self.device == "Auto":
+                    device_info += " (将自动检测最佳设备)"
+                elif self.device == "CUDA":
+                    device_info += " (强制使用GPU加速)"
+                elif self.device == "CPU":
+                    device_info += " (强制使用CPU处理)"
+                self.log_updated.emit(device_info)
+                
+                # 记录整体开始时间
+                overall_start_time = time.time()
+                
+                # 根据设置选择处理方式
+                if self.enable_multithread and self.device in ["CUDA", "Auto"] and total_videos > 1:
+                    success, results = self._process_videos_multithread()
+                else:
+                    success, results = self._process_videos_batch()
             
             if success and results:
                 # 处理每个视频的结果
@@ -203,13 +220,14 @@ class VideoDescriptionThread(QThread):
                         'start_time': result.get('timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S')),
                         'end_time': result.get('timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S')),
                         'total_processing_time': round(processing_time, 2),
-                        'process_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                        'processed_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                         'duration': self._get_video_duration(video_path)
                     }
                     self.results.append(processed_result)
                     
-                    # 发送完成信号
-                    self.video_completed.emit(video_path, is_success, description, error_msg, processing_time)
+                    # 发送完成信号，包含实际生成描述的时间戳
+                    actual_timestamp = result.get('timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+                    self.video_completed.emit(video_path, is_success, description, error_msg, processing_time, actual_timestamp)
                     
                     # 更新进度
                     progress = int(((i + 1) / total_videos) * 100)
@@ -292,12 +310,14 @@ class VideoDescriptionThread(QThread):
                             
                             # 发送每个视频的完成信号
                             for result in results:
+                                actual_timestamp = result.get('timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
                                 self.video_completed.emit(
                                     result['video_path'],
                                     result['success'],
                                     result['description'] or "",
                                     result.get('error_message', ""),
-                                    result.get('processing_time', 0)
+                                    result.get('processing_time', 0),
+                                    actual_timestamp
                                 )
                         else:
                             self.log_updated.emit(f"线程 {chunk_id} 处理失败")
@@ -431,6 +451,202 @@ class VideoDescriptionThread(QThread):
         except Exception as e:
             self.log_updated.emit(f"线程 {chunk_id} 发生异常: {str(e)}")
             return False, []
+    
+    def _process_videos_api(self):
+        """使用API处理所有视频"""
+        try:
+            import requests
+            import json
+            import base64
+            import cv2
+            import numpy as np
+            from datetime import datetime
+            
+            # 验证API配置
+            api_endpoint = self.api_config.get('api_endpoint', '').strip()
+            api_key = self.api_config.get('api_key', '').strip()
+            api_model = self.api_config.get('api_model', 'gpt-3.5-turbo')
+            
+            if not api_endpoint or not api_key:
+                self.log_updated.emit("API配置不完整，请检查端点和密钥设置")
+                return False, []
+            
+            self.log_updated.emit(f"使用API端点: {api_endpoint}")
+            self.log_updated.emit(f"使用模型: {api_model}")
+            
+            results = []
+            total_videos = len(self.videos)
+            
+            for i, video_path in enumerate(self.videos):
+                if not self.is_running:
+                    self.log_updated.emit("用户取消API处理")
+                    break
+                
+                video_name = os.path.basename(video_path)
+                self.status_updated.emit(f"正在处理 {i+1}/{total_videos}: {video_name}")
+                self.log_updated.emit(f"开始处理视频: {video_name}")
+                
+                start_time = time.time()
+                
+                try:
+                    # 提取视频帧
+                    frames = self._extract_video_frames(video_path)
+                    if not frames:
+                        error_msg = "无法提取视频帧"
+                        self.log_updated.emit(f"{video_name}: {error_msg}")
+                        results.append({
+                            'video_path': video_path,
+                            'success': False,
+                            'description': '',
+                            'error_message': error_msg,
+                            'processing_time': 0,
+                            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        })
+                        continue
+                    
+                    # 将帧转换为base64编码
+                    encoded_frames = []
+                    for frame in frames:
+                        _, buffer = cv2.imencode('.jpg', frame)
+                        frame_base64 = base64.b64encode(buffer).decode('utf-8')
+                        encoded_frames.append(frame_base64)
+                    
+                    # 构建API请求
+                    headers = {
+                        'Content-Type': 'application/json',
+                        'Authorization': f'Bearer {api_key}'
+                    }
+                    
+                    # 构建消息内容
+                    content = [{
+                        "type": "text",
+                        "text": self.description_requirement
+                    }]
+                    
+                    # 添加视频帧
+                    for frame_base64 in encoded_frames:
+                        content.append({
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{frame_base64}"
+                            }
+                        })
+                    
+                    payload = {
+                        "model": api_model,
+                        "messages": [{
+                            "role": "user",
+                            "content": content
+                        }],
+                        "max_tokens": 1000
+                    }
+                    
+                    # 发送API请求
+                    self.log_updated.emit(f"{video_name}: 发送API请求...")
+                    response = requests.post(api_endpoint, headers=headers, json=payload, timeout=60)
+                    
+                    if response.status_code == 200:
+                        response_data = response.json()
+                        description = response_data.get('choices', [{}])[0].get('message', {}).get('content', '')
+                        
+                        if description:
+                            processing_time = time.time() - start_time
+                            self.log_updated.emit(f"{video_name}: API处理成功，耗时 {processing_time:.2f}秒")
+                            
+                            results.append({
+                                'video_path': video_path,
+                                'success': True,
+                                'description': description,
+                                'error_message': '',
+                                'processing_time': processing_time,
+                                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                            })
+                        else:
+                            error_msg = "API返回空描述"
+                            self.log_updated.emit(f"{video_name}: {error_msg}")
+                            results.append({
+                                'video_path': video_path,
+                                'success': False,
+                                'description': '',
+                                'error_message': error_msg,
+                                'processing_time': 0,
+                                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                            })
+                    else:
+                        error_msg = f"API请求失败: {response.status_code} - {response.text}"
+                        self.log_updated.emit(f"{video_name}: {error_msg}")
+                        results.append({
+                            'video_path': video_path,
+                            'success': False,
+                            'description': '',
+                            'error_message': error_msg,
+                            'processing_time': 0,
+                            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        })
+                
+                except Exception as e:
+                    error_msg = f"处理异常: {str(e)}"
+                    self.log_updated.emit(f"{video_name}: {error_msg}")
+                    results.append({
+                        'video_path': video_path,
+                        'success': False,
+                        'description': '',
+                        'error_message': error_msg,
+                        'processing_time': 0,
+                        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    })
+                
+                # 更新进度
+                progress = int(((i + 1) / total_videos) * 100)
+                self.progress_updated.emit(progress)
+            
+            self.log_updated.emit(f"API处理完成，共处理 {len(results)} 个视频")
+            return True, results
+            
+        except Exception as e:
+            error_msg = f"API处理时发生异常: {str(e)}"
+            self.log_updated.emit(error_msg)
+            return False, []
+    
+    def _extract_video_frames(self, video_path):
+        """提取视频帧用于API处理"""
+        try:
+            import cv2
+            
+            cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                return []
+            
+            # 获取视频信息
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            
+            # 计算采样帧数
+            num_frames = min(self.num_frames if self.num_frames > 0 else 16, total_frames)
+            
+            # 均匀采样帧
+            frame_indices = np.linspace(0, total_frames - 1, num_frames, dtype=int)
+            
+            frames = []
+            for frame_idx in frame_indices:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+                ret, frame = cap.read()
+                if ret:
+                    # 调整帧大小以减少数据传输量
+                    height, width = frame.shape[:2]
+                    if width > 512:
+                        scale = 512 / width
+                        new_width = 512
+                        new_height = int(height * scale)
+                        frame = cv2.resize(frame, (new_width, new_height))
+                    frames.append(frame)
+            
+            cap.release()
+            return frames
+            
+        except Exception as e:
+            self.log_updated.emit(f"提取视频帧时发生异常: {str(e)}")
+            return []
     
     def _process_videos_batch(self):
         """批量处理所有视频"""
@@ -771,6 +987,9 @@ class VideoDescriptionWidget(QWidget):
         self._load_cache_config()
         self._connect_signals()
         
+        # 根据配置更新UI状态
+        self._update_ui_based_on_algorithm_type()
+        
         # 初始化自适应播放控制状态
         self._toggle_adaptive_playback(Qt.Checked if self.enable_adaptive_playback else Qt.Unchecked)
     
@@ -889,6 +1108,8 @@ class VideoDescriptionWidget(QWidget):
         options_group = QGroupBox("功能选项")
         options_layout = QVBoxLayout(options_group)
         
+        # 算法类型从配置中读取，不再显示选择控件
+        
         # 功能选项 - 使用网格布局实现一行两列
         options_grid = QGridLayout()
         
@@ -954,6 +1175,62 @@ class VideoDescriptionWidget(QWidget):
         
         device_layout.addStretch()
         options_layout.addLayout(device_layout)
+        
+        # API配置区域（初始隐藏）
+        self.api_config_group = QGroupBox("API配置")
+        api_config_layout = QVBoxLayout(self.api_config_group)
+        
+        # API端点
+        api_endpoint_layout = QHBoxLayout()
+        api_endpoint_label = QLabel("API端点:")
+        api_endpoint_layout.addWidget(api_endpoint_label)
+        
+        self.api_endpoint_edit = QLineEdit()
+        self.api_endpoint_edit.setText("https://ark.cn-beijing.volces.com/api/v3/chat/completions")
+        self.api_endpoint_edit.setPlaceholderText("例如: https://api.openai.com/v1/chat/completions")
+        self.api_endpoint_edit.setToolTip("输入API服务的完整端点URL")
+        self.api_endpoint_edit.textChanged.connect(self._save_api_config)
+        api_endpoint_layout.addWidget(self.api_endpoint_edit)
+        api_config_layout.addLayout(api_endpoint_layout)
+        
+        # API密钥
+        api_key_layout = QHBoxLayout()
+        api_key_label = QLabel("API密钥:")
+        api_key_layout.addWidget(api_key_label)
+        
+        self.api_key_edit = QLineEdit()
+        self.api_key_edit.setEchoMode(QLineEdit.Password)
+        self.api_key_edit.setText("fa1f2df2-73f8-44b1-99a0-09834047ab51")
+        self.api_key_edit.setPlaceholderText("输入您的API密钥")
+        self.api_key_edit.setToolTip("输入API服务的认证密钥")
+        self.api_key_edit.textChanged.connect(self._save_api_config)
+        api_key_layout.addWidget(self.api_key_edit)
+        
+        # 显示/隐藏密钥按钮
+        self.show_key_btn = QPushButton("显示")
+        self.show_key_btn.setMaximumWidth(50)
+        self.show_key_btn.clicked.connect(self._toggle_api_key_visibility)
+        api_key_layout.addWidget(self.show_key_btn)
+        api_config_layout.addLayout(api_key_layout)
+        
+        # API模型
+        api_model_layout = QHBoxLayout()
+        api_model_label = QLabel("API模型:")
+        api_model_layout.addWidget(api_model_label)
+        
+        self.api_model_combo = QComboBox()
+        self.api_model_combo.setEditable(True)
+        self.api_model_combo.addItems(["doubao-1.5-vision-pro-250328", "gpt-3.5-turbo", "gpt-4", "gpt-4-turbo", "claude-3-sonnet", "claude-3-opus"])
+        self.api_model_combo.setCurrentText("doubao-1.5-vision-pro-250328")
+        self.api_model_combo.setToolTip("选择或输入要使用的API模型名称")
+        self.api_model_combo.currentTextChanged.connect(self._save_api_config)
+        api_model_layout.addWidget(self.api_model_combo)
+        api_model_layout.addStretch()
+        api_config_layout.addLayout(api_model_layout)
+        
+        # 初始隐藏API配置
+        self.api_config_group.setVisible(False)
+        options_layout.addWidget(self.api_config_group)
         
         # 多线程处理选项
         multithread_layout = QHBoxLayout()
@@ -1426,8 +1703,26 @@ class VideoDescriptionWidget(QWidget):
                 device_setting = self.config_manager.get('algorithms.video_description.device', 'CUDA')  # 默认使用CUDA
                 if hasattr(self, 'device_combo'):
                     self.device_combo.setCurrentText(device_setting)
+                    
+                # 加载算法类型设置
+                algorithm_type = self.config_manager.get('algorithms.video_description.algorithm_type', '本地模型')
+                if hasattr(self, 'algorithm_type_combo'):
+                    self.algorithm_type_combo.setCurrentText(algorithm_type)
+                    
+                # 加载API配置
+                api_endpoint = self.config_manager.get('algorithms.video_description.api_endpoint', 'https://ark.cn-beijing.volces.com/api/v3/chat/completions')
+                api_key = self.config_manager.get('algorithms.video_description.api_key', 'fa1f2df2-73f8-44b1-99a0-09834047ab51')
+                api_model = self.config_manager.get('algorithms.video_description.api_model', 'doubao-1.5-vision-pro-250328')
+                
+                if hasattr(self, 'api_endpoint_edit'):
+                    self.api_endpoint_edit.setText(api_endpoint)
+                if hasattr(self, 'api_key_edit'):
+                    self.api_key_edit.setText(api_key)
+                if hasattr(self, 'api_model_combo'):
+                    self.api_model_combo.setCurrentText(api_model)
+                    
         except Exception as e:
-            self._log_message(f"加载设备配置失败: {str(e)}")
+            self._log_message(f"加载配置失败: {str(e)}")
     
     def _connect_signals(self):
         """连接信号"""
@@ -1436,9 +1731,34 @@ class VideoDescriptionWidget(QWidget):
         
         # 自动保存选项同步
         self.auto_save_format_combo.currentTextChanged.connect(self._on_auto_save_format_changed)
+        
+        # 连接配置变化信号
+        try:
+            # 获取主窗口的app实例
+            main_window = self.parent()
+            while main_window and not hasattr(main_window, 'app'):
+                main_window = main_window.parent()
+            
+            if main_window and hasattr(main_window, 'app') and hasattr(main_window.app, 'config_changed'):
+                main_window.app.config_changed.connect(self._on_config_changed)
+        except Exception as e:
+            self._log_message(f"连接配置变化信号失败: {str(e)}")
     
     def _on_device_changed(self):
         """设备选择变化处理"""
+        # 检查当前是否为API模式
+        model_preset = "ShareVideoGPT4（本地模型）"  # 默认值
+        if hasattr(self, 'config_manager') and self.config_manager:
+            algorithm_config = self.config_manager.get('algorithms', {})
+            video_desc_config = algorithm_config.get('video_description', {})
+            model_preset = video_desc_config.get('model_preset', 'ShareVideoGPT4（本地模型）')
+        
+        is_api_mode = model_preset != "ShareVideoGPT4（本地模型）"
+        
+        # 如果是API模式，不处理设备变化（保持禁用状态）
+        if is_api_mode:
+            return
+            
         device = self.device_combo.currentText()
         
         # 只有在CUDA模式下才允许多线程处理
@@ -1450,6 +1770,121 @@ class VideoDescriptionWidget(QWidget):
             self.multithread_checkbox.setEnabled(False)
             self.multithread_checkbox.setChecked(False)
             self.thread_count_spinbox.setEnabled(False)
+    
+    def refresh_ui_state(self):
+        """刷新UI状态（供外部调用）"""
+        self._update_ui_based_on_algorithm_type()
+    
+    def _update_ui_based_on_algorithm_type(self):
+        """根据配置中的模型预设更新UI状态"""
+        try:
+            # 从配置中读取模型预设
+            model_preset = "ShareVideoGPT4（本地模型）"  # 默认值
+            if hasattr(self, 'config_manager') and self.config_manager:
+                algorithm_config = self.config_manager.get('algorithms', {})
+                video_desc_config = algorithm_config.get('video_description', {})
+                model_preset = video_desc_config.get('model_preset', 'ShareVideoGPT4（本地模型）')
+            
+            # 判断是否为API模式（除了ShareVideoGPT4（本地模型）之外的都是API模式）
+            is_api_mode = model_preset != "ShareVideoGPT4（本地模型）"
+            
+            if is_api_mode:
+                # 显示API配置，禁用本地模型相关配置
+                self.api_config_group.setVisible(True)
+                self.api_config_group.setEnabled(True)
+                
+                # 禁用本地模型相关功能
+                self.device_combo.setEnabled(False)
+                self.multithread_checkbox.setEnabled(False)
+                self.thread_count_spinbox.setEnabled(False)
+                self.top_p_spinbox.setEnabled(False)
+                
+                # 禁用生成模式和采样帧数（API模式下这些参数由API控制）
+                if hasattr(self, 'center_generation_mode_combo'):
+                    self.center_generation_mode_combo.setEnabled(False)
+                if hasattr(self, 'center_num_frames_spinbox'):
+                    self.center_num_frames_spinbox.setEnabled(False)
+                
+                # 设置控件为灰色状态
+                self.device_combo.setStyleSheet("QComboBox { color: #888888; background-color: #f0f0f0; }")
+                self.multithread_checkbox.setStyleSheet("QCheckBox { color: #888888; }")
+                self.thread_count_spinbox.setStyleSheet("QSpinBox { color: #888888; background-color: #f0f0f0; }")
+                self.top_p_spinbox.setStyleSheet("QDoubleSpinBox { color: #888888; background-color: #f0f0f0; }")
+                
+                # 设置生成模式和采样帧数为灰色状态
+                if hasattr(self, 'center_generation_mode_combo'):
+                    self.center_generation_mode_combo.setStyleSheet("QComboBox { color: #888888; background-color: #f0f0f0; }")
+                if hasattr(self, 'center_num_frames_spinbox'):
+                    self.center_num_frames_spinbox.setStyleSheet("QSpinBox { color: #888888; background-color: #f0f0f0; }")
+                
+                # 取消多线程选择
+                self.multithread_checkbox.setChecked(False)
+                
+                # 加载API配置
+                api_config = video_desc_config.get('api_config', {})
+                self.api_endpoint_edit.setText(api_config.get('endpoint', 'https://ark.cn-beijing.volces.com/api/v3/chat/completions'))
+                self.api_key_edit.setText(api_config.get('api_key', 'fa1f2df2-73f8-44b1-99a0-09834047ab51'))
+                self.api_model_combo.setCurrentText(api_config.get('model', 'doubao-1-5-pro-32k-250115'))
+                
+                # 记录当前模式
+                self._log_message(f"当前使用API模式: {model_preset}")
+                
+            else:  # 本地模型模式 (ShareVideoGPT4（本地模型）)
+                # 隐藏API配置，启用本地模型相关配置
+                self.api_config_group.setVisible(False)
+                
+                # 启用本地模型相关功能
+                self.device_combo.setEnabled(True)
+                self.top_p_spinbox.setEnabled(True)
+                
+                # 启用生成模式和采样帧数
+                if hasattr(self, 'center_generation_mode_combo'):
+                    self.center_generation_mode_combo.setEnabled(True)
+                if hasattr(self, 'center_num_frames_spinbox'):
+                    self.center_num_frames_spinbox.setEnabled(True)
+                
+                # 恢复控件正常样式
+                self.device_combo.setStyleSheet("")
+                self.multithread_checkbox.setStyleSheet("")
+                self.thread_count_spinbox.setStyleSheet("")
+                self.top_p_spinbox.setStyleSheet("")
+                
+                # 恢复生成模式和采样帧数正常样式
+                if hasattr(self, 'center_generation_mode_combo'):
+                    self.center_generation_mode_combo.setStyleSheet("")
+                if hasattr(self, 'center_num_frames_spinbox'):
+                    self.center_num_frames_spinbox.setStyleSheet("")
+                
+                # 根据设备设置恢复多线程选项状态
+                self._on_device_changed()
+                
+                # 记录当前模式
+                self._log_message(f"当前使用本地模型模式: {model_preset}")
+                
+        except Exception as e:
+            self._log_message(f"更新UI状态失败: {str(e)}")
+    
+    def _toggle_api_key_visibility(self):
+        """切换API密钥显示/隐藏"""
+        if self.api_key_edit.echoMode() == QLineEdit.Password:
+            self.api_key_edit.setEchoMode(QLineEdit.Normal)
+            self.show_key_btn.setText("隐藏")
+        else:
+            self.api_key_edit.setEchoMode(QLineEdit.Password)
+            self.show_key_btn.setText("显示")
+    
+
+    
+    def _save_api_config(self):
+        """保存API配置"""
+        try:
+            if hasattr(self, 'config_manager') and self.config_manager:
+                # 保存API配置
+                self.config_manager.set('algorithms.video_description.api_endpoint', self.api_endpoint_edit.text())
+                self.config_manager.set('algorithms.video_description.api_key', self.api_key_edit.text())
+                self.config_manager.set('algorithms.video_description.api_model', self.api_model_combo.currentText())
+        except Exception as e:
+            self._log_message(f"保存API配置失败: {str(e)}")
     
     def _upload_video_files(self):
         """上传视频文件"""
@@ -2127,6 +2562,13 @@ class VideoDescriptionWidget(QWidget):
         enable_multithread = self.multithread_checkbox.isChecked() and self.multithread_checkbox.isEnabled()
         thread_count = self.thread_count_spinbox.value()
         
+        # 从配置中获取算法类型
+        algorithm_type = "本地模型"  # 默认值
+        if hasattr(self, 'config_manager') and self.config_manager:
+            algorithm_config = self.config_manager.get('algorithms', {})
+            video_desc_config = algorithm_config.get('video_description', {})
+            algorithm_type = video_desc_config.get('algorithm_type', '本地模型')
+        
         # 启动处理线程（只处理选中的视频）
         self.processing_thread = VideoDescriptionThread(
             selected_videos,
@@ -2140,7 +2582,8 @@ class VideoDescriptionWidget(QWidget):
             device_setting,
             enable_multithread,
             thread_count,
-            top_p
+            top_p,
+            algorithm_type
         )
         
         if hasattr(self, 'center_progress_bar'):
@@ -2166,7 +2609,7 @@ class VideoDescriptionWidget(QWidget):
         if hasattr(self, 'center_stop_btn'):
             self.center_stop_btn.setEnabled(False)
     
-    def _on_video_completed(self, video_path, success, description, error_msg, total_processing_time):
+    def _on_video_completed(self, video_path, success, description, error_msg, total_processing_time, actual_timestamp):
         """视频处理完成"""
         video_name = os.path.basename(video_path)
         
@@ -2178,7 +2621,7 @@ class VideoDescriptionWidget(QWidget):
                 'success': True,
                 'description': description,
                 'error_message': '',
-                'process_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'processed_at': actual_timestamp,  # 使用实际生成描述的时间
                 'total_processing_time': total_processing_time,
                 'duration': self._get_video_duration(video_path)
             })
@@ -2193,7 +2636,7 @@ class VideoDescriptionWidget(QWidget):
                 'success': False,
                 'description': '',
                 'error_message': error_msg,
-                'process_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'processed_at': actual_timestamp,  # 使用实际处理的时间
                 'total_processing_time': total_processing_time,
                 'duration': self._get_video_duration(video_path)
             })
@@ -2323,9 +2766,9 @@ class VideoDescriptionWidget(QWidget):
                             config_data[key] = value
             
             return {
-                'api_endpoint': config_data.get('api_endpoint', ''),
-                'api_key': config_data.get('api_key', ''),
-                'api_model': config_data.get('api_model', 'gpt-3.5-turbo')
+                'api_endpoint': config_data.get('api_endpoint', 'https://ark.cn-beijing.volces.com/api/v3/chat/completions'),
+                'api_key': config_data.get('api_key', 'fa1f2df2-73f8-44b1-99a0-09834047ab51'),
+                'api_model': config_data.get('api_model', 'doubao-1.5-vision-pro-250328')
             }
         except Exception as e:
             self._log_message(f"获取API配置失败: {e}")
@@ -2357,7 +2800,7 @@ class VideoDescriptionWidget(QWidget):
         event.accept()
     
     def _export_results(self, format_type):
-        """导出结果 - 每个视频单独导出到视频所在目录"""
+        """导出结果 - 每个视频单独导出到视频同名文件夹的description子目录"""
         if not self.current_videos:
             QMessageBox.warning(self, "警告", "没有可导出的结果")
             return
@@ -2379,22 +2822,31 @@ class VideoDescriptionWidget(QWidget):
                     with open(result_file, 'r', encoding='utf-8') as f:
                         result = json.load(f)
                     
-                    # 获取视频所在目录
+                    # 获取视频所在目录和视频名称
                     video_dir = Path(video_path).parent
                     video_name = Path(video_path).stem
                     
-                    # 生成导出文件路径
+                    # 创建视频同名文件夹和description子文件夹
+                    video_folder = video_dir / video_name
+                    description_folder = video_folder / "description"
+                    pose_folder = video_folder / "pose"  # 为未来功能预留
+                    
+                    # 确保目录存在
+                    description_folder.mkdir(parents=True, exist_ok=True)
+                    pose_folder.mkdir(parents=True, exist_ok=True)
+                    
+                    # 生成导出文件路径（保存到description文件夹中）
                     if format_type == 'json':
-                        export_file = video_dir / f"{video_name}_description.json"
+                        export_file = description_folder / f"{video_name}_description.json"
                         self._export_single_video_json(result, video_path, export_file)
                     elif format_type == 'txt':
-                        export_file = video_dir / f"{video_name}_description.txt"
+                        export_file = description_folder / f"{video_name}_description.txt"
                         self._export_single_video_txt(result, video_path, export_file)
                     elif format_type == 'csv':
-                        export_file = video_dir / f"{video_name}_description.csv"
+                        export_file = description_folder / f"{video_name}_description.csv"
                         self._export_single_video_csv(result, video_path, export_file)
                     elif format_type == 'md':
-                        export_file = video_dir / f"{video_name}_description.md"
+                        export_file = description_folder / f"{video_name}_description.md"
                         self._export_single_video_md(result, video_path, export_file)
                     
                     exported_count += 1
@@ -2404,7 +2856,7 @@ class VideoDescriptionWidget(QWidget):
             
             # 显示导出结果
             if exported_count > 0:
-                message = f"成功导出 {exported_count} 个视频的描述文件"
+                message = f"成功导出 {exported_count} 个视频的描述文件到各自的description文件夹"
                 if failed_count > 0:
                     message += f"\n{failed_count} 个视频未找到处理结果"
                 QMessageBox.information(self, "导出完成", message)
@@ -2535,7 +2987,7 @@ class VideoDescriptionWidget(QWidget):
             QMessageBox.critical(self, "自动保存失败", f"自动保存过程中发生错误: {str(e)}")
     
     def _auto_save_results(self, format_type, selected_videos=None):
-        """执行自动保存 - 每个视频单独保存到视频所在目录"""
+        """执行自动保存 - 每个视频单独保存到视频同名文件夹的description子目录"""
         try:
             # 如果没有指定选中视频，则使用所有视频
             videos_to_save = selected_videos if selected_videos is not None else self.current_videos
@@ -2550,22 +3002,31 @@ class VideoDescriptionWidget(QWidget):
                     with open(result_file, 'r', encoding='utf-8') as f:
                         result = json.load(f)
                     
-                    # 获取视频所在目录
+                    # 获取视频所在目录和视频名称
                     video_dir = Path(video_path).parent
                     video_name = Path(video_path).stem
                     
-                    # 生成保存文件路径
+                    # 创建视频同名文件夹和description子文件夹
+                    video_folder = video_dir / video_name
+                    description_folder = video_folder / "description"
+                    pose_folder = video_folder / "pose"  # 为未来功能预留
+                    
+                    # 确保目录存在
+                    description_folder.mkdir(parents=True, exist_ok=True)
+                    pose_folder.mkdir(parents=True, exist_ok=True)
+                    
+                    # 生成保存文件路径（保存到description文件夹中）
                     if format_type == 'json':
-                        save_file = video_dir / f"{video_name}_description.json"
+                        save_file = description_folder / f"{video_name}_description.json"
                         self._export_single_video_json(result, video_path, save_file)
                     elif format_type == 'txt':
-                        save_file = video_dir / f"{video_name}_description.txt"
+                        save_file = description_folder / f"{video_name}_description.txt"
                         self._export_single_video_txt(result, video_path, save_file)
                     elif format_type == 'csv':
-                        save_file = video_dir / f"{video_name}_description.csv"
+                        save_file = description_folder / f"{video_name}_description.csv"
                         self._export_single_video_csv(result, video_path, save_file)
                     elif format_type == 'md':
-                        save_file = video_dir / f"{video_name}_description.md"
+                        save_file = description_folder / f"{video_name}_description.md"
                         self._export_single_video_md(result, video_path, save_file)
                     
                     saved_count += 1
@@ -2575,7 +3036,7 @@ class VideoDescriptionWidget(QWidget):
             
             # 显示保存结果
             if saved_count > 0:
-                message = f"成功自动保存 {saved_count} 个视频的描述文件到各自目录"
+                message = f"成功自动保存 {saved_count} 个视频的描述文件到各自的description文件夹"
                 if failed_count > 0:
                     message += f"\n{failed_count} 个视频未找到处理结果"
                 QMessageBox.information(self, "自动保存完成", message)
@@ -2600,3 +3061,14 @@ class VideoDescriptionWidget(QWidget):
         """同步备份功能到中间面板"""
         # 这里可以添加同步逻辑，目前暂时为空
         pass
+    
+    def _on_config_changed(self, config: Dict[str, Any]):
+        """处理配置变化"""
+        try:
+            # 检查是否是算法配置变化
+            if 'algorithms' in config and 'video_description' in config['algorithms']:
+                self._log_message("检测到视频描述配置变化，正在更新UI...")
+                # 刷新UI状态
+                self.refresh_ui_state()
+        except Exception as e:
+            self._log_message(f"处理配置变化失败: {str(e)}")

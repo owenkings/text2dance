@@ -186,6 +186,170 @@ class ConfigWidget(QWidget):
         
         return widget
     
+    def _on_model_preset_changed(self, preset: str):
+        """模型预设切换处理"""
+        # 根据预设自动填充API配置
+        if preset == "ShareVideoGPT4（本地模型）":
+            # 本地模型，清空API配置
+            self.video_desc_api_endpoint_input.setText("")
+            self.video_desc_api_key_input.setText("")
+            self.video_desc_api_model_input.setText("")
+            # 隐藏API配置组
+            self.api_config_group.setVisible(False)
+        elif preset == "火山大模型①":
+            self.video_desc_api_endpoint_input.setText("https://ark.cn-beijing.volces.com/api/v3/chat/completions")
+            self.video_desc_api_key_input.setText("fa1f2df2-73f8-44b1-99a0-09834047ab51")
+            self.video_desc_api_model_input.setText("doubao-1-5-pro-32k-250115")
+            # 显示API配置组
+            self.api_config_group.setVisible(True)
+        elif preset == "火山大模型②":
+            self.video_desc_api_endpoint_input.setText("https://ark.cn-beijing.volces.com/api/v3/chat/completions")
+            self.video_desc_api_key_input.setText("fa1f2df2-73f8-44b1-99a0-09834047ab51")
+            self.video_desc_api_model_input.setText("doubao-1.5-vision-pro-250328")
+            # 显示API配置组
+            self.api_config_group.setVisible(True)
+        elif preset == "OpenAI GPT-4V":
+            self.video_desc_api_endpoint_input.setText("https://api.openai.com/v1/chat/completions")
+            self.video_desc_api_key_input.setText("")
+            self.video_desc_api_model_input.setText("gpt-4-vision-preview")
+            # 显示API配置组
+            self.api_config_group.setVisible(True)
+        elif preset == "自定义API配置":
+            # 自定义配置，显示API配置组但不修改内容，让用户自行填写
+            self.api_config_group.setVisible(True)
+        
+        # 标记配置已修改
+        self._mark_modified("algorithm")
+        
+        # 通知视频描述界面更新UI状态
+        self._notify_video_description_widget()
+    
+    def _notify_video_description_widget(self):
+        """通知视频描述界面更新UI状态"""
+        try:
+            # 查找主窗口中的视频描述组件
+            main_window = self.parent()
+            while main_window and not hasattr(main_window, 'video_description_widget'):
+                main_window = main_window.parent()
+            
+            if main_window and hasattr(main_window, 'video_description_widget'):
+                video_desc_widget = main_window.video_description_widget
+                if hasattr(video_desc_widget, 'refresh_ui_state'):
+                    video_desc_widget.refresh_ui_state()
+        except Exception as e:
+            print(f"通知视频描述界面失败: {e}")
+    
+    def _on_algorithm_type_changed(self, algorithm_type: str):
+        """算法类型切换处理"""
+        if algorithm_type == "API调用":
+            self.api_config_group.setVisible(True)
+        else:
+            self.api_config_group.setVisible(False)
+        
+        # 标记配置已修改
+        self._mark_modified("algorithm")
+    
+    def _on_model_preset_changed(self, preset_name: str):
+        """模型预设切换处理"""
+        # 定义预设配置
+        presets = {
+            "ShareVideoGPT4": {
+                "endpoint": "https://api.openai.com/v1/chat/completions",
+                "api_key": "",
+                "model": "gpt-4-vision-preview"
+            },
+            "火山大模型①": {
+                "endpoint": "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
+                "api_key": "fa1f2df2-73f8-44b1-99a0-09834047ab51",
+                "model": "doubao-1.5-vision-pro-250328"
+            },
+            "火山大模型②": {
+                "endpoint": "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
+                "api_key": "fa1f2df2-73f8-44b1-99a0-09834047ab51",
+                "model": "doubao-pro-32k-250115"
+            },
+            "OpenAI GPT-4V": {
+                "endpoint": "https://api.openai.com/v1/chat/completions",
+                "api_key": "",
+                "model": "gpt-4-vision-preview"
+            },
+            "本地模型": {
+                "endpoint": "http://localhost:8000/v1/chat/completions",
+                "api_key": "local-key",
+                "model": "local-model"
+            }
+        }
+        
+        # 如果是预设配置，自动填充
+        if preset_name in presets:
+            config = presets[preset_name]
+            # 临时断开信号连接，避免触发手动修改事件
+            self.video_desc_api_endpoint_input.blockSignals(True)
+            self.video_desc_api_key_input.blockSignals(True)
+            self.video_desc_api_model_input.blockSignals(True)
+            
+            self.video_desc_api_endpoint_input.setText(config["endpoint"])
+            self.video_desc_api_key_input.setText(config["api_key"])
+            self.video_desc_api_model_input.setText(config["model"])
+            
+            # 重新连接信号
+            self.video_desc_api_endpoint_input.blockSignals(False)
+            self.video_desc_api_key_input.blockSignals(False)
+            self.video_desc_api_model_input.blockSignals(False)
+        
+        # 标记配置已修改
+        self._mark_modified("algorithm")
+    
+    def _on_api_config_manual_changed(self):
+        """API配置手动修改处理"""
+        # 当用户手动修改API配置时，将预设选择器设为"自定义配置"
+        if self.model_preset_combo.currentText() != "自定义配置":
+            self.model_preset_combo.blockSignals(True)
+            self.model_preset_combo.setCurrentText("自定义配置")
+            self.model_preset_combo.blockSignals(False)
+        
+        # 标记配置已修改
+        self._mark_modified("algorithm")
+    
+    def _detect_and_set_model_preset(self, endpoint: str, api_key: str, model: str):
+        """根据API配置自动识别并设置预设模型"""
+        # 定义预设配置用于匹配
+        presets = {
+            "ShareVideoGPT4": {
+                "endpoint": "https://api.openai.com/v1/chat/completions",
+                "model": "gpt-4-vision-preview"
+            },
+            "火山大模型①": {
+                "endpoint": "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
+                "model": "doubao-1.5-vision-pro-250328"
+            },
+            "火山大模型②": {
+                "endpoint": "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
+                "model": "doubao-pro-32k-250115"
+            },
+            "OpenAI GPT-4V": {
+                "endpoint": "https://api.openai.com/v1/chat/completions",
+                "model": "gpt-4-vision-preview"
+            },
+            "本地模型": {
+                "endpoint": "http://localhost:8000/v1/chat/completions",
+                "model": "local-model"
+            }
+        }
+        
+        # 尝试匹配预设配置
+        matched_preset = "自定义配置"
+        for preset_name, preset_config in presets.items():
+            if (endpoint == preset_config["endpoint"] and 
+                model == preset_config["model"]):
+                matched_preset = preset_name
+                break
+        
+        # 设置预设选择器
+        self.model_preset_combo.blockSignals(True)
+        self.model_preset_combo.setCurrentText(matched_preset)
+        self.model_preset_combo.blockSignals(False)
+    
     def _create_crawler_tab(self) -> QWidget:
         """创建爬虫设置选项卡"""
         widget = QWidget()
@@ -434,29 +598,45 @@ class ConfigWidget(QWidget):
         video_desc_group = QGroupBox("视频描述")
         video_desc_layout = QFormLayout(video_desc_group)
         
-        # 默认算法
-        self.default_video_desc_combo = QComboBox()
-        self.default_video_desc_combo.addItems(["ShareGPT4Video", "DescribeAnything", "Vid2Seq"])
-        video_desc_layout.addRow("默认算法:", self.default_video_desc_combo)
+        # 模型预设选择器
+        self.model_preset_combo = QComboBox()
+        self.model_preset_combo.addItems([
+            "ShareVideoGPT4（本地模型）", 
+            "火山大模型①",
+            "火山大模型②",
+            "OpenAI GPT-4V",
+            "自定义API配置"
+        ])
+        self.model_preset_combo.setCurrentText("ShareVideoGPT4（本地模型）")  # 默认选择本地模型
+        self.model_preset_combo.currentTextChanged.connect(self._on_model_preset_changed)
+        video_desc_layout.addRow("选择模型:", self.model_preset_combo)
         
-        # 模型缓存路径
-        cache_path_layout = QHBoxLayout()
-        self.video_desc_cache_input = QLineEdit()
-        self.video_desc_cache_input.setText("./models/video_description")
-        self.video_desc_cache_input.textChanged.connect(self._on_cache_path_changed)
-        cache_path_layout.addWidget(self.video_desc_cache_input)
+        # API配置子组
+        self.api_config_group = QGroupBox("API配置")
+        api_config_layout = QFormLayout(self.api_config_group)
         
-        self.browse_cache_btn = QPushButton("浏览")
-        self.browse_cache_btn.clicked.connect(lambda: self._browse_directory(self.video_desc_cache_input))
-        cache_path_layout.addWidget(self.browse_cache_btn)
+        # API端点
+        self.video_desc_api_endpoint_input = QLineEdit()
+        self.video_desc_api_endpoint_input.setText("https://ark.cn-beijing.volces.com/api/v3/chat/completions")
+        self.video_desc_api_endpoint_input.setPlaceholderText("https://ark.cn-beijing.volces.com/api/v3/chat/completions")
+        self.video_desc_api_endpoint_input.textChanged.connect(self._on_api_config_manual_changed)
+        api_config_layout.addRow("API端点:", self.video_desc_api_endpoint_input)
         
-        video_desc_layout.addRow("模型缓存路径:", cache_path_layout)
+        # API密钥
+        self.video_desc_api_key_input = QLineEdit()
+        self.video_desc_api_key_input.setEchoMode(QLineEdit.Password)
+        self.video_desc_api_key_input.setText("fa1f2df2-73f8-44b1-99a0-09834047ab51")
+        self.video_desc_api_key_input.setPlaceholderText("输入API密钥")
+        self.video_desc_api_key_input.textChanged.connect(self._on_api_config_manual_changed)
+        api_config_layout.addRow("API密钥:", self.video_desc_api_key_input)
         
-        # ShareGPT4Video模型路径
-        self.sharegpt4video_model_input = QLineEdit()
-        self.sharegpt4video_model_input.setText("Lin-Chen/sharegpt4video-8b")
-        self.sharegpt4video_model_input.textChanged.connect(self._on_cache_path_changed)
-        video_desc_layout.addRow("ShareGPT4Video模型:", self.sharegpt4video_model_input)
+        # API模型
+        self.video_desc_api_model_input = QLineEdit()
+        self.video_desc_api_model_input.setText("doubao-1.5-vision-pro-250328")
+        self.video_desc_api_model_input.textChanged.connect(self._on_api_config_manual_changed)
+        api_config_layout.addRow("API模型:", self.video_desc_api_model_input)
+        
+        video_desc_layout.addRow(self.api_config_group)
         
         # 描述语言
         self.desc_language_combo = QComboBox()
@@ -473,8 +653,6 @@ class ConfigWidget(QWidget):
         self.max_text_length_spin.setRange(50, 1000)
         self.max_text_length_spin.setValue(200)
         video_desc_layout.addRow("最大文本长度:", self.max_text_length_spin)
-        
-
         
         layout.addWidget(video_desc_group)
         
@@ -504,6 +682,9 @@ class ConfigWidget(QWidget):
         layout.addWidget(api_group)
         
         layout.addStretch()
+        
+        # 初始化时隐藏API配置组
+        self.api_config_group.setVisible(False)
         
         return widget
     
@@ -727,7 +908,6 @@ class ConfigWidget(QWidget):
         # 算法设置
         self.default_pose2d_combo.currentTextChanged.connect(lambda: self._mark_modified("algorithms"))
         self.default_pose3d_combo.currentTextChanged.connect(lambda: self._mark_modified("algorithms"))
-        self.default_video_desc_combo.currentTextChanged.connect(lambda: self._mark_modified("algorithms"))
         
         # 界面设置
         self.font_size_spin.valueChanged.connect(lambda: self._mark_modified("ui"))
@@ -743,26 +923,44 @@ class ConfigWidget(QWidget):
         try:
             # 加载通用设置
             general_config = self.config_manager.get_config("general", {})
+            if not isinstance(general_config, dict):
+                self.logger.error(f"通用配置不是字典类型: {type(general_config)}, 值: {general_config}")
+                general_config = {}
             self._load_general_config(general_config)
             
             # 加载爬虫设置
             crawler_config = self.config_manager.get_config("crawler", {})
+            if not isinstance(crawler_config, dict):
+                self.logger.error(f"爬虫配置不是字典类型: {type(crawler_config)}, 值: {crawler_config}")
+                crawler_config = {}
             self._load_crawler_config(crawler_config)
             
             # 加载视频处理设置
             video_config = self.config_manager.get_config("video_processing", {})
+            if not isinstance(video_config, dict):
+                self.logger.error(f"视频处理配置不是字典类型: {type(video_config)}, 值: {video_config}")
+                video_config = {}
             self._load_video_config(video_config)
             
             # 加载算法设置
             algorithm_config = self.config_manager.get_config("algorithms", {})
+            if not isinstance(algorithm_config, dict):
+                self.logger.error(f"算法配置不是字典类型: {type(algorithm_config)}, 值: {algorithm_config}")
+                algorithm_config = {}
             self._load_algorithm_config(algorithm_config)
             
             # 加载界面设置
             ui_config = self.config_manager.get_config("ui", {})
+            if not isinstance(ui_config, dict):
+                self.logger.error(f"界面配置不是字典类型: {type(ui_config)}, 值: {ui_config}")
+                ui_config = {}
             self._load_ui_config(ui_config)
             
             # 加载高级设置
             advanced_config = self.config_manager.get_config("advanced", {})
+            if not isinstance(advanced_config, dict):
+                self.logger.error(f"高级配置不是字典类型: {type(advanced_config)}, 值: {advanced_config}")
+                advanced_config = {}
             self._load_advanced_config(advanced_config)
             
             # 清除修改标记
@@ -796,6 +994,9 @@ class ConfigWidget(QWidget):
         self.concurrent_spin.setValue(config.get("max_concurrent", 3))
         
         proxy_config = config.get("proxy", {})
+        # 确保proxy_config是字典类型
+        if not isinstance(proxy_config, dict):
+            proxy_config = {}
         self.enable_proxy_check.setChecked(proxy_config.get("enabled", False))
         self.proxy_type_combo.setCurrentText(proxy_config.get("type", "HTTP"))
         self.proxy_host_input.setText(proxy_config.get("host", ""))
@@ -827,6 +1028,11 @@ class ConfigWidget(QWidget):
     
     def _load_algorithm_config(self, config: dict):
         """加载算法配置"""
+        # 确保config是字典类型
+        if not isinstance(config, dict):
+            self.logger.error(f"算法配置不是字典类型: {type(config)}, 值: {config}")
+            config = {}
+        
         pose2d_config = config.get("pose_2d", {})
         self.default_pose2d_combo.setCurrentText(pose2d_config.get("default_algorithm", "OpenPose"))
         self.pose2d_confidence_spin.setValue(pose2d_config.get("confidence_threshold", 0.5))
@@ -838,21 +1044,47 @@ class ConfigWidget(QWidget):
         self.pose3d_depth_spin.setValue(pose3d_config.get("depth_threshold", 1.0))
         
         video_desc_config = config.get("video_description", {})
-        self.default_video_desc_combo.setCurrentText(video_desc_config.get("default_algorithm", "ShareGPT4Video"))
-        
-        # 从cache_config.txt文件读取配置
-        cache_config = self._load_cache_config()
-        self.video_desc_cache_input.setText(cache_config.get("cache_path", video_desc_config.get("cache_path", "./models/video_description")))
-        self.sharegpt4video_model_input.setText(cache_config.get("sharegpt4video_model_path", video_desc_config.get("sharegpt4video_model_path", "Lin-Chen/sharegpt4video-8b")))
         
         self.desc_language_combo.setCurrentText(video_desc_config.get("language", "中文"))
+        
+        # API配置
+        api_config = video_desc_config.get("api_config", {})
+        endpoint = api_config.get("endpoint", "https://ark.cn-beijing.volces.com/api/v3/chat/completions")
+        api_key = api_config.get("api_key", "fa1f2df2-73f8-44b1-99a0-09834047ab51")
+        model = api_config.get("model", "doubao-1.5-vision-pro-250328")
+        
+        self.video_desc_api_endpoint_input.setText(endpoint)
+        self.video_desc_api_key_input.setText(api_key)
+        self.video_desc_api_model_input.setText(model)
+        
+        # 加载模型预设选择（如果有保存的话）
+        saved_preset = video_desc_config.get("model_preset", None)
+        if saved_preset and saved_preset in [self.model_preset_combo.itemText(i) for i in range(self.model_preset_combo.count())]:
+            self.model_preset_combo.setCurrentText(saved_preset)
+        else:
+            # 根据当前配置自动识别预设模型
+            self._detect_and_set_model_preset(endpoint, api_key, model)
+        
         self.desc_length_combo.setCurrentText(video_desc_config.get("length", "中等"))
         self.max_text_length_spin.setValue(video_desc_config.get("max_text_length", 200))
         
-        api_config = config.get("api", {})
-        self.api_endpoint_input.setText(cache_config.get("api_endpoint", api_config.get("endpoint", "")))
-        self.api_key_input.setText(cache_config.get("api_key", api_config.get("key", "")))
-        self.api_model_input.setText(cache_config.get("api_model", api_config.get("model", "gpt-3.5-turbo")))
+        # 从cache_config.txt文件读取配置
+        try:
+            cache_config = self._load_cache_config()
+            api_config = config.get("api", {})
+            # 确保api_config是字典类型
+            if not isinstance(api_config, dict):
+                api_config = {}
+            self.api_endpoint_input.setText(cache_config.get("api_endpoint", api_config.get("endpoint", "")))
+            self.api_key_input.setText(cache_config.get("api_key", api_config.get("key", "")))
+            self.api_model_input.setText(cache_config.get("api_model", api_config.get("model", "doubao-1-5-pro-32k-250115")))
+        except Exception as e:
+            self.logger.error(f"加载缓存配置失败: {e}")
+            # 使用默认值
+            api_config = config.get("api", {})
+            self.api_endpoint_input.setText(api_config.get("endpoint", ""))
+            self.api_key_input.setText(api_config.get("key", ""))
+            self.api_model_input.setText(api_config.get("model", "doubao-1-5-pro-32k-250115"))
     
     def _load_ui_config(self, config: dict):
         """加载界面配置"""
@@ -903,8 +1135,6 @@ class ConfigWidget(QWidget):
                             config_data[key] = value
             
             # 更新配置
-            config_data['cache_path'] = self.video_desc_cache_input.text()
-            config_data['sharegpt4video_model_path'] = self.sharegpt4video_model_input.text()
             config_data['api_endpoint'] = self.api_endpoint_input.text()
             config_data['api_key'] = self.api_key_input.text()
             config_data['api_model'] = self.api_model_input.text()
@@ -1037,21 +1267,42 @@ class ConfigWidget(QWidget):
             # 收集所有配置
             configs = self._collect_all_configs()
             
-            # 保存配置
+            # 保存配置到内存
             for config_type, config_data in configs.items():
                 if config_type in self.modified_configs:
-                    self.config_manager.set_config(config_type, config_data)
+                    # 递归设置嵌套配置
+                    self._set_nested_config(config_type, config_data)
                     self.config_changed.emit(config_type, config_data)
+            
+            # 保存配置到文件
+            if self.config_manager.save_config():
+                self.logger.info("配置已成功保存到文件")
+            else:
+                self.logger.warning("配置保存到文件失败，但内存配置已更新")
             
             # 清除修改标记
             self.modified_configs.clear()
             self.apply_btn.setEnabled(False)
+            
+            # 通知视频描述界面更新UI状态
+            self._notify_video_description_widget()
             
             QMessageBox.information(self, "信息", "配置已应用")
             
         except Exception as e:
             self.logger.error(f"应用配置失败: {e}")
             QMessageBox.critical(self, "错误", f"应用配置失败: {e}")
+    
+    def _set_nested_config(self, prefix: str, config_data: Dict[str, Any]):
+        """递归设置嵌套配置"""
+        for key, value in config_data.items():
+            full_key = f"{prefix}.{key}"
+            if isinstance(value, dict):
+                # 递归处理嵌套字典
+                self._set_nested_config(full_key, value)
+            else:
+                # 设置叶子节点值
+                self.config_manager.set(full_key, value)
     
     def _ok_config(self):
         """确定配置"""
@@ -1147,11 +1398,14 @@ class ConfigWidget(QWidget):
                 "depth_threshold": self.pose3d_depth_spin.value()
             },
             "video_description": {
-                "default_algorithm": self.default_video_desc_combo.currentText(),
-                "cache_path": self.video_desc_cache_input.text(),
-                "sharegpt4video_model_path": self.sharegpt4video_model_input.text(),
+                "model_preset": self.model_preset_combo.currentText(),
                 "language": self.desc_language_combo.currentText(),
                 "length": self.desc_length_combo.currentText(),
+                "api_config": {
+                    "endpoint": self.video_desc_api_endpoint_input.text(),
+                    "api_key": self.video_desc_api_key_input.text(),
+                    "model": self.video_desc_api_model_input.text()
+                },
                 "max_text_length": self.max_text_length_spin.value()
             },
             "api": {

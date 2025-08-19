@@ -254,7 +254,7 @@ class Application(QApplication):
                     "confidence_threshold": 0.5
                 },
                 "video_description": {
-                    "default_algorithm": "vid2seq",
+                    "default_algorithm": "ShareGPT4Video",
                     "max_length": 100
                 }
             },
