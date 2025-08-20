@@ -9,7 +9,29 @@ if sys.platform.startswith('win'):
     sys.stdout = codecs.getwriter('utf-8')(sys.stdout.detach())
     sys.stderr = codecs.getwriter('utf-8')(sys.stderr.detach())
 
-#第三种方法
+# ==================== 智能镜像管理器初始化 ====================
+# 在所有其他导入之前初始化镜像管理器
+try:
+    # 导入镜像管理器
+    from .mirror_manager import initialize_mirrors
+    
+    # 初始化智能镜像配置
+    print("🚀 正在初始化智能镜像管理器...")
+    mirror_success = initialize_mirrors()
+    
+    if mirror_success:
+        print("✅ 镜像管理器初始化成功")
+    else:
+        print("⚠️ 镜像管理器初始化失败，将使用默认配置")
+        
+except Exception as e:
+    print(f"⚠️ 镜像管理器加载失败: {e}")
+    print("ℹ️ 将使用传统缓存配置方式")
+    mirror_success = False
+
+# ==================== 传统缓存配置（备用方案） ====================
+# 当镜像管理器初始化失败时使用的备用配置
+# 用户也可以取消注释下面的代码来强制使用固定路径
 #os.environ["HF_HOME"] = r"E:\Tiany\huggingface"
 #os.environ["HUGGINGFACE_HUB_CACHE"] = r"E:\Tiany\huggingface"
 #os.environ["TRANSFORMERS_CACHE"] = r"E:\Tiany\huggingface"
@@ -22,50 +44,54 @@ if sys.platform.startswith('win'):
 # 设置为 None 时会自动从 cache_config.txt 文件读取
 USER_CACHE_PATH = None  # 例如: r"D:\MyCache\huggingface"
 
-# ==================== 模块级环境变量设置 ====================
-# 在模块导入时立即设置环境变量，确保所有HuggingFace组件使用统一缓存路径
-try:
-    cache_base_path = None
-    
-    # 获取缓存路径（复用get_cache_path逻辑但简化版本）
-    if USER_CACHE_PATH:
-        cache_base_path = USER_CACHE_PATH
-    else:
-        # 读取配置文件
-        # builder.py -> model -> llava -> ShareGPT4Video -> video_description -> algorithms -> src -> text2dance (6层)
-        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))))
-        config_file = os.path.join(project_root, "cache_config.txt")
+# ==================== 备用环境变量设置 ====================
+# 当镜像管理器初始化失败时，使用传统方式设置环境变量
+if not mirror_success:
+    print("🔧 使用传统缓存配置方式...")
+    try:
+        cache_base_path = None
         
-        if os.path.exists(config_file):
-            try:
-                with open(config_file, 'r', encoding='utf-8') as f:
-                    for line in f:
-                        line = line.strip()
-                        if line and not line.startswith('#') and '=' in line:
-                            key, value = line.split('=', 1)
-                            if key.strip() == 'cache_path':
-                                cache_base_path = value.strip()
-                                break
-            except Exception:
-                pass
-    
-    # 如果成功获取到缓存路径，设置环境变量
-    if cache_base_path and os.path.exists(cache_base_path):
-        bnb_cache_path = os.path.join(cache_base_path, "bnb_cache")
+        # 获取缓存路径（复用get_cache_path逻辑但简化版本）
+        if USER_CACHE_PATH:
+            cache_base_path = USER_CACHE_PATH
+        else:
+            # 读取配置文件
+            # builder.py -> model -> llava -> ShareGPT4Video -> video_description -> algorithms -> src -> text2dance (7层)
+            project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))))
+            config_file = os.path.join(project_root, "cache_config.txt")
+            
+            if os.path.exists(config_file):
+                try:
+                    with open(config_file, 'r', encoding='utf-8') as f:
+                        for line in f:
+                            line = line.strip()
+                            if line and not line.startswith('#') and '=' in line:
+                                key, value = line.split('=', 1)
+                                if key.strip() == 'cache_path':
+                                    cache_base_path = value.strip()
+                                    break
+                except Exception:
+                    pass
         
-        # 设置HuggingFace相关环境变量
-        os.environ["HF_HOME"] = cache_base_path
-        os.environ["HUGGINGFACE_HUB_CACHE"] = cache_base_path
-        os.environ["TRANSFORMERS_CACHE"] = cache_base_path
-        os.environ["BNB_CACHE_DIR"] = bnb_cache_path
-        
-        # 确保目录存在
-        os.makedirs(cache_base_path, exist_ok=True)
-        os.makedirs(bnb_cache_path, exist_ok=True)
-        
-except Exception:
-    # 如果设置失败，静默忽略，使用默认路径
-    pass
+        # 如果成功获取到缓存路径，设置环境变量
+        if cache_base_path and os.path.exists(cache_base_path):
+            bnb_cache_path = os.path.join(cache_base_path, "bnb_cache")
+            
+            # 设置HuggingFace相关环境变量
+            os.environ["HF_HOME"] = cache_base_path
+            os.environ["HUGGINGFACE_HUB_CACHE"] = cache_base_path
+            os.environ["TRANSFORMERS_CACHE"] = cache_base_path
+            os.environ["BNB_CACHE_DIR"] = bnb_cache_path
+            
+            # 确保目录存在
+            os.makedirs(cache_base_path, exist_ok=True)
+            os.makedirs(bnb_cache_path, exist_ok=True)
+            
+            print(f"✅ 传统缓存配置完成: {cache_base_path}")
+            
+    except Exception as e:
+        print(f"⚠️ 传统缓存配置失败: {e}")
+        print("ℹ️ 将使用系统默认缓存路径")
 
 # ==================== 自动配置逻辑 ====================
 
@@ -228,7 +254,138 @@ from llava.constants import (DEFAULT_IM_END_TOKEN, DEFAULT_IM_START_TOKEN,
 from llava.model import *
 from llava.train.train import smart_tokenizer_and_embedding_resize
 
+def load_model_with_smart_retry(model_path, model_base, model_name, load_8bit=False, load_4bit=False, device_map="auto", device="cuda", use_flash_attn=False, lora_alpha=None, **kwargs):
+    """智能模型加载函数，支持镜像切换、错误处理和重试机制"""
+    import time
+    from requests.exceptions import ConnectionError, Timeout, RequestException
+    from urllib3.exceptions import NewConnectionError
+    
+    print("\n🚀 启动智能模型加载系统...")
+    
+    try:
+        # 导入镜像管理器
+        from .mirror_manager import get_mirror_manager
+        mirror_manager = get_mirror_manager()
+        
+        # 初始化智能镜像系统
+        print("\n🌐 初始化智能镜像管理系统...")
+        if not mirror_manager.initialize_smart_mirror():
+            print("⚠️ 智能镜像系统初始化失败，使用传统加载方式")
+            return _load_pretrained_model_internal(model_path, model_base, model_name, load_8bit, load_4bit, device_map, device, use_flash_attn, lora_alpha, **kwargs)
+        
+        # 检查模型缓存完整性
+        print(f"\n🔍 检查模型缓存: {model_path}")
+        if mirror_manager.check_model_cache_integrity(model_path):
+            print("✅ 模型缓存完整，直接加载")
+            return _load_pretrained_model_internal(model_path, model_base, model_name, load_8bit, load_4bit, device_map, device, use_flash_attn, lora_alpha, **kwargs)
+        else:
+            print("⚠️ 模型缓存不完整，需要重新下载")
+            # 清理损坏的缓存
+            mirror_manager.clean_corrupted_cache(model_path)
+        
+        # 智能重试机制
+        max_retries = 3
+        retry_delay = 5
+        
+        for attempt in range(max_retries):
+            try:
+                print(f"\n🚀 尝试加载模型 (第 {attempt + 1}/{max_retries} 次): {model_path}")
+                
+                # 调用原始加载函数
+                result = _load_pretrained_model_internal(
+                    model_path, model_base, model_name, load_8bit, load_4bit, 
+                    device_map, device, use_flash_attn, lora_alpha, **kwargs
+                )
+                
+                print(f"✅ 模型加载成功")
+                return result
+                
+            except (ConnectionError, Timeout, RequestException, NewConnectionError) as e:
+                print(f"❌ 网络连接失败 (尝试 {attempt + 1}/{max_retries}): 连接失败，请检查网络或启用代理")
+                
+                if attempt < max_retries - 1:
+                    print("🔄 正在切换到备用镜像站点...")
+                    # 重新初始化镜像系统，选择下一个最佳镜像
+                    connectivity_results = mirror_manager.check_network_connectivity()
+                    best_mirror = mirror_manager.select_best_mirror(connectivity_results)
+                    if best_mirror:
+                        mirror_manager.setup_mirror_environment(best_mirror)
+                    
+                    delay = retry_delay * (2 ** attempt)
+                    print(f"⏳ {delay} 秒后重试...")
+                    time.sleep(delay)
+                else:
+                    print("\n❌ 所有镜像站点均无法访问！")
+                    print("💡 请检查网络连接或启用代理功能")
+                    print("💡 您也可以手动下载模型文件到本地缓存目录")
+                    raise
+                    
+            except Exception as e:
+                error_msg = str(e)
+                
+                # 检查是否为网络相关错误
+                network_keywords = ['connection', 'timeout', 'network', 'resolve', 'unreachable', 'refused']
+                if any(keyword in error_msg.lower() for keyword in network_keywords):
+                    print(f"❌ 网络连接问题 (尝试 {attempt + 1}/{max_retries}): {error_msg[:100]}...")
+                    
+                    if attempt < max_retries - 1:
+                        print("🔄 正在切换到备用镜像站点...")
+                        # 重新初始化镜像系统，选择下一个最佳镜像
+                        connectivity_results = mirror_manager.check_network_connectivity()
+                        best_mirror = mirror_manager.select_best_mirror(connectivity_results)
+                        if best_mirror:
+                            mirror_manager.setup_mirror_environment(best_mirror)
+                        
+                        delay = retry_delay * (2 ** attempt)
+                        print(f"⏳ {delay} 秒后重试...")
+                        time.sleep(delay)
+                    else:
+                        print("❌ 网络连接持续失败！")
+                        print("💡 请检查网络连接或启用代理功能")
+                        raise
+                else:
+                    # 非网络错误，直接抛出
+                    print(f"❌ 模型加载失败: {error_msg}")
+                    raise
+                    
+    except ImportError:
+        print("⚠️ 镜像管理器不可用，使用传统加载方式")
+        return _load_pretrained_model_internal(model_path, model_base, model_name, load_8bit, load_4bit, device_map, device, use_flash_attn, lora_alpha, **kwargs)
+    
+    except Exception as e:
+        print(f"❌ 智能加载系统出现错误: {str(e)}")
+        print("🔧 回退到传统加载方式")
+        return _load_pretrained_model_internal(model_path, model_base, model_name, load_8bit, load_4bit, device_map, device, use_flash_attn, lora_alpha, **kwargs)
+    
+    # 不应该到达这里
+    raise RuntimeError("模型加载失败")
+
+def _load_pretrained_model_internal(model_path, model_base, model_name, load_8bit=False, load_4bit=False, device_map="auto", device="cuda", use_flash_attn=False, lora_alpha=None, **kwargs):
+    """内部模型加载函数（原始逻辑）"""
+    
+    # 导入镜像管理器功能
+    try:
+        from .mirror_manager import check_model_cache, get_mirror_manager
+        mirror_available = True
+    except ImportError:
+        mirror_available = False
+    
+    # 统一缓存路径设置 - 使用配置文件中的路径
+    cache_dir = get_cache_path()
+    
+    # 模型完整性检查
+    if mirror_available:
+        print(f"🔍 检查模型缓存: {model_path}")
+        if not check_model_cache(model_path):
+            print(f"⚠️ 模型缓存不完整或不存在，将重新下载")
+        else:
+            print(f"✅ 模型缓存完整")
+    
+    return load_pretrained_model(model_path, model_base, model_name, load_8bit, load_4bit, device_map, device, use_flash_attn, lora_alpha, **kwargs)
+
 def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, load_4bit=False, device_map="auto", device="cuda", use_flash_attn=False, lora_alpha=None, **kwargs):
+    """加载预训练模型（原始实现）"""
+    
     # 统一缓存路径设置 - 使用配置文件中的路径
     cache_dir = get_cache_path()
     
@@ -239,7 +396,8 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
     }
 
     if device != "cuda":
-        kwargs['device_map'] = {"": device}
+        kwargs['device_map'] = {"":
+        device}
 
     if load_8bit:
         kwargs['load_in_8bit'] = True

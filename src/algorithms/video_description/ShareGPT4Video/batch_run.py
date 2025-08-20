@@ -22,9 +22,18 @@ sys.path.insert(0, current_dir)
 # 导入原有模块
 from run import (
     setup_comprehensive_logging, LoggingCapture, ResultFormatter,
-    disable_torch_init, get_model_name_from_path, load_pretrained_model,
-    single_test, video_answer
+    disable_torch_init, get_model_name_from_path, single_test, video_answer
 )
+
+# 导入智能模型加载功能
+try:
+    from llava.model.builder import load_model_with_smart_retry
+    smart_loading_available = True
+    print("✅ 智能模型加载功能已启用")
+except ImportError:
+    from run import load_pretrained_model
+    smart_loading_available = False
+    print("⚠️ 智能模型加载功能不可用，使用传统加载方式")
 
 import torch
 from llava.conversation import conv_templates, SeparatorStyle
@@ -144,10 +153,18 @@ class BatchVideoProcessor:
                 self.target_device = "cpu"
                 self.logger.info("使用CPU模式")
             
-            # 加载预训练模型
-            self.tokenizer, self.model, self.processor, self.context_len = load_pretrained_model(
-                model_path, None, model_name, device_map=device_map
-            )
+            # 加载预训练模型（使用智能加载功能）
+            if smart_loading_available:
+                self.logger.info("使用智能模型加载功能（支持镜像切换和错误重试）")
+                self.tokenizer, self.model, self.processor, self.context_len = load_model_with_smart_retry(
+                    model_path, None, model_name, device_map=device_map
+                )
+            else:
+                self.logger.info("使用传统模型加载方式")
+                from run import load_pretrained_model
+                self.tokenizer, self.model, self.processor, self.context_len = load_pretrained_model(
+                    model_path, None, model_name, device_map=device_map
+                )
             
             # 确保模型组件在正确设备上
             if self.target_device != "cpu":

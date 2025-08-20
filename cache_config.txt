@@ -1,6 +1,56 @@
-# 格式：每行一个配置项，使用 key=value 的形式
+# ==================== 缓存配置 ====================
+# 模型文件缓存路径，用于存储下载的模型文件
 cache_path=E:\Tiany\huggingface
+# 最小可用空间要求（GB），下载前检查磁盘空间
+min_free_space_gb=20
+
+# ==================== 模型配置 ====================
+# ShareGPT4Video模型路径标识符
 sharegpt4video_model_path=Lin-Chen/sharegpt4video-8b
-api_endpoint=https://ark.cn-beijing.volces.com/api/v3/chat/completions
-api_key=fa1f2df2-73f8-44b1-99a0-09834047ab51
-api_model=doubao-1.5-vision-pro-250328
+
+# ==================== 网络配置 ====================
+# 网络连接超时时间（秒）
+connection_timeout=10
+# 下载超时时间（秒）
+download_timeout=300
+# 启用自动镜像切换
+auto_mirror_switch=true
+
+# ==================== 镜像站点配置 ====================
+# HuggingFace官方站点
+official_site=https://huggingface.co
+# 镜像站点列表（按优先级排序，用逗号分隔）
+mirror_sites=https://hf-mirror.com
+# 用户自定义镜像站点（可选，用逗号分隔）
+custom_mirrors=
+
+# ==================== 用户自定义API配置 ====================
+# 自定义视频描述API模型配置（程序内置火山大模型①，用户可添加自定义模型供选择）
+# 自定义API模型名称（将在界面中显示，如：我的GPT模型）
+custom_api_model_name=
+# 自定义API端点
+custom_api_endpoint=
+# 自定义API密钥
+custom_api_key=
+# 自定义API模型标识
+custom_api_model=
+
+# 动作过滤API配置（程序内置默认配置，用户填写后覆盖内置配置）
+# 动作过滤API端点
+action_filter_api_endpoint=
+# 动作过滤API密钥
+action_filter_api_key=
+# 动作过滤API模型名称
+action_filter_api_model=
+
+# ==================== 扩展API配置 ====================
+# 扩展API配置示例（用户可根据需要添加更多自定义视频描述API模型）
+# 格式：custom_api_model_name_N=模型显示名称
+#       custom_api_endpoint_N=端点URL
+#       custom_api_key_N=API密钥
+#       custom_api_model_N=模型标识
+# 示例：
+# custom_api_model_name_2=我的GPT模型
+# custom_api_endpoint_2=https://api.openai.com/v1/chat/completions
+# custom_api_key_2=your_openai_api_key
+# custom_api_model_2=gpt-4-vision-preview

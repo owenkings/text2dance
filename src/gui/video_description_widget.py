@@ -1288,6 +1288,9 @@ class VideoDescriptionWidget(QWidget):
         self.model_selection_combo.currentTextChanged.connect(self._on_model_selection_changed)
         options_grid.addWidget(self.model_selection_combo, 1, 1)
         
+        # 加载已保存的自定义API模型
+        self._load_custom_models()
+        
         options_layout.addLayout(options_grid)
         
         # 计算设备选择和采样参数（同一行）
@@ -2964,7 +2967,7 @@ class VideoDescriptionWidget(QWidget):
             return "未知"
     
     def _get_api_config(self):
-        """获取API配置"""
+        """获取动作过滤API配置"""
         try:
             import os
             cache_config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'cache_config.txt')
@@ -2973,18 +2976,37 @@ class VideoDescriptionWidget(QWidget):
             if os.path.exists(cache_config_path):
                 with open(cache_config_path, 'r', encoding='utf-8') as f:
                     for line in f:
-                        if '=' in line:
+                        if '=' in line and not line.strip().startswith('#'):
                             key, value = line.strip().split('=', 1)
-                            config_data[key] = value
+                            config_data[key] = value.strip()
             
-            return {
-                'api_endpoint': config_data.get('api_endpoint', 'https://ark.cn-beijing.volces.com/api/v3/chat/completions'),
-                'api_key': config_data.get('api_key', 'fa1f2df2-73f8-44b1-99a0-09834047ab51'),
-                'api_model': config_data.get('api_model', 'doubao-1.5-vision-pro-250328')
-            }
+            # 读取动作过滤API配置，如果用户配置为空则使用内置配置
+            user_endpoint = config_data.get('action_filter_api_endpoint', '').strip()
+            user_key = config_data.get('action_filter_api_key', '').strip()
+            user_model = config_data.get('action_filter_api_model', '').strip()
+            
+            # 如果用户配置了完整的API信息，则使用用户配置
+            if user_endpoint and user_key and user_model:
+                return {
+                    'api_endpoint': user_endpoint,
+                    'api_key': user_key,
+                    'api_model': user_model
+                }
+            else:
+                # 否则使用内置配置
+                return {
+                    'api_endpoint': 'https://ark.cn-beijing.volces.com/api/v3/chat/completions',
+                    'api_key': 'fa1f2df2-73f8-44b1-99a0-09834047ab51',
+                    'api_model': 'doubao-1.5-pro-32k-250115'
+                }
         except Exception as e:
-            self._log_message(f"获取API配置失败: {e}")
-            return {}
+            self._log_message(f"获取动作过滤API配置失败: {e}")
+            # 发生异常时返回内置配置
+            return {
+                'api_endpoint': 'https://ark.cn-beijing.volces.com/api/v3/chat/completions',
+                'api_key': 'fa1f2df2-73f8-44b1-99a0-09834047ab51',
+                'api_model': 'doubao-1.5-pro-32k-250115'
+            }
     
     def _log_message(self, message):
         """记录日志消息"""
@@ -3511,9 +3533,10 @@ class VideoDescriptionWidget(QWidget):
                         'api_key': 'fa1f2df2-73f8-44b1-99a0-09834047ab51',
                         'model': 'doubao-1-5-pro-32k-250115'
                     }
-                elif model_name.startswith('自定义API模型'):
-                    # 从自定义模型列表中获取配置
+                else:
+                    # 检查是否为自定义API模型
                     custom_models = self.config_manager.get('algorithms.video_description.custom_api_models', [])
+                    api_config = None
                     for custom_model in custom_models:
                         if custom_model.get('display_name') == model_name:
                             api_config = {
@@ -3522,16 +3545,18 @@ class VideoDescriptionWidget(QWidget):
                                 'model': custom_model.get('model', '')
                             }
                             break
-                    else:
-                        return  # 未找到对应的自定义模型配置
-                else:
-                    return  # 未知的API模型
+                    
+                    if api_config is None:
+                        return  # 未找到对应的模型配置
                 
                 # 保存API配置到配置管理器
                 self.config_manager.set('algorithms.video_description.api_endpoint', api_config['endpoint'])
                 self.config_manager.set('algorithms.video_description.api_key', api_config['api_key'])
                 self.config_manager.set('algorithms.video_description.api_model', api_config['model'])
                 self.config_manager.save_config()
+                
+                # 同时保存到cache_config.txt文件
+                self._save_api_config_to_cache_file(api_config)
                 
                 self._log_message(f"已将{model_name}的API配置保存到配置文件")
                 
@@ -3564,6 +3589,88 @@ class VideoDescriptionWidget(QWidget):
                 self._log_message(f"已保存自定义API模型: {custom_config['display_name']}")
         except Exception as e:
             self._log_message(f"保存自定义API模型失败: {str(e)}")
+    
+    def _load_custom_models(self):
+        """加载已保存的自定义API模型到组合框"""
+        try:
+            if hasattr(self, 'config_manager') and self.config_manager:
+                # 获取已保存的自定义模型列表
+                custom_models = self.config_manager.get('algorithms.video_description.custom_api_models', [])
+                
+                # 在"添加API模型"选项之前插入自定义模型
+                insert_index = self.model_selection_combo.count() - 1  # "添加API模型"的索引
+                
+                for custom_model in custom_models:
+                    display_name = custom_model.get('display_name', '未命名模型')
+                    # 检查是否已经存在，避免重复添加
+                    if self.model_selection_combo.findText(display_name) == -1:
+                        self.model_selection_combo.insertItem(insert_index, display_name)
+                        insert_index += 1
+                        self._log_message(f"已加载自定义API模型: {display_name}")
+                
+                # 尝试恢复上次选择的模型
+                current_model = self.config_manager.get('algorithms.video_description.current_model', 'ShareVideoGPT4（本地模型）')
+                if self.model_selection_combo.findText(current_model) != -1:
+                    self.model_selection_combo.setCurrentText(current_model)
+                    self._log_message(f"已恢复模型选择: {current_model}")
+                    
+        except Exception as e:
+            self._log_message(f"加载自定义API模型失败: {str(e)}")
+    
+    def _save_api_config_to_cache_file(self, api_config):
+        """将API配置保存到cache_config.txt文件"""
+        try:
+            import os
+            cache_config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'cache_config.txt')
+            
+            # 读取现有配置
+            config_data = {}
+            if os.path.exists(cache_config_path):
+                with open(cache_config_path, 'r', encoding='utf-8') as f:
+                    lines = f.readlines()
+            else:
+                lines = []
+            
+            # 更新配置数据
+            updated_lines = []
+            config_keys = {
+                'custom_api_endpoint': api_config['endpoint'],
+                'custom_api_key': api_config['api_key'],
+                'custom_api_model': api_config['model']
+            }
+            
+            # 标记哪些配置已经更新
+            updated_keys = set()
+            
+            # 处理现有行
+            for line in lines:
+                stripped_line = line.strip()
+                if '=' in stripped_line and not stripped_line.startswith('#'):
+                    key, _ = stripped_line.split('=', 1)
+                    if key in config_keys:
+                        # 更新现有配置
+                        updated_lines.append(f"{key}={config_keys[key]}\n")
+                        updated_keys.add(key)
+                    else:
+                        # 保留其他配置
+                        updated_lines.append(line)
+                else:
+                    # 保留注释和空行
+                    updated_lines.append(line)
+            
+            # 添加未更新的配置项
+            for key, value in config_keys.items():
+                if key not in updated_keys:
+                    updated_lines.append(f"{key}={value}\n")
+            
+            # 写回文件
+            with open(cache_config_path, 'w', encoding='utf-8') as f:
+                f.writelines(updated_lines)
+            
+            self._log_message("已将API配置保存到cache_config.txt文件")
+            
+        except Exception as e:
+            self._log_message(f"保存API配置到cache_config.txt失败: {str(e)}")
     
     def _on_config_changed(self, config: Dict[str, Any]):
         """处理配置变化"""

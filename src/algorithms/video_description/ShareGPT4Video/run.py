@@ -147,8 +147,27 @@ from llava.constants import DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX
 from llava.conversation import conv_templates
 from llava.mm_utils import (get_model_name_from_path, process_images,
                             tokenizer_image_token)
-from llava.model.builder import load_pretrained_model
 from llava.utils import disable_torch_init
+
+# 导入智能模型加载功能
+try:
+    from llava.model.builder import load_model_with_smart_retry, load_pretrained_model
+    smart_loading_available = True
+    print("✅ 智能模型加载功能已启用")
+except ImportError:
+    from llava.model.builder import load_pretrained_model
+    smart_loading_available = False
+    print("⚠️ 智能模型加载功能不可用，使用传统加载方式")
+
+# 创建智能加载函数的包装器
+def load_model_smart(model_path, model_base=None, model_name=None, **kwargs):
+    """智能模型加载包装器"""
+    if smart_loading_available:
+        print("🚀 使用智能模型加载功能（支持镜像切换和错误重试）")
+        return load_model_with_smart_retry(model_path, model_base, model_name, **kwargs)
+    else:
+        print("🔧 使用传统模型加载方式")
+        return load_pretrained_model(model_path, model_base, model_name, **kwargs)
 
 
 def create_frame_grid(img_array, interval_width=50):
@@ -638,7 +657,7 @@ def main():
                 
                 logger.info("开始加载预训练模型...")
                 try:
-                    tokenizer, model, processor, context_len = load_pretrained_model(
+                    tokenizer, model, processor, context_len = load_model_smart(
                         model_path, None, model_name, device_map=device_map)
                     logger.info("模型加载完成")
                     logger.info(f"上下文长度: {context_len}")

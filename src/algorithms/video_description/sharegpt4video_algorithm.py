@@ -41,6 +41,9 @@ class ShareGPT4VideoAlgorithm(VideoDescriptionAlgorithm):
         try:
             self.logger.info(f"开始处理视频: {input_path}")
             
+            # 检查模型是否存在，如果不存在则初始化镜像管理器
+            mirror_log = self._check_and_initialize_model()
+            
             if progress_callback:
                 progress_callback(10.0)
             
@@ -115,12 +118,19 @@ class ShareGPT4VideoAlgorithm(VideoDescriptionAlgorithm):
                     description = json_output.get('description', '')
                     metadata = json_output.get('metadata', {})
                     
+                    # 合并镜像管理器日志和处理日志
+                    combined_log = ""
+                    if mirror_log:
+                        combined_log += "=== 镜像管理器初始化日志 ===\n" + mirror_log + "\n\n"
+                    combined_log += "=== 模型处理日志 ===\n"
+                    combined_log += result.stdout + "\n" + result.stderr if result.stderr else result.stdout
+                    
                     final_result = {
                         'algorithm': self.algorithm_name,
                         'input_path': input_path,
                         'output_path': output_path,
                         'description': description,
-                        'processing_log': result.stdout + "\n" + result.stderr if result.stderr else result.stdout,
+                        'processing_log': combined_log,
                         'parameters': {
                             'query': query,
                             'device': device,
@@ -136,12 +146,19 @@ class ShareGPT4VideoAlgorithm(VideoDescriptionAlgorithm):
                 else:
                     # 回退到旧的解析方法
                     description = self._extract_description_fallback(result.stdout)
+                    # 合并镜像管理器日志和处理日志
+                    combined_log = ""
+                    if mirror_log:
+                        combined_log += "=== 镜像管理器初始化日志 ===\n" + mirror_log + "\n\n"
+                    combined_log += "=== 模型处理日志 ===\n"
+                    combined_log += result.stdout + "\n" + result.stderr if result.stderr else result.stdout
+                    
                     final_result = {
                         'algorithm': self.algorithm_name,
                         'input_path': input_path,
                         'output_path': output_path,
                         'description': description,
-                        'processing_log': result.stdout + "\n" + result.stderr if result.stderr else result.stdout,
+                        'processing_log': combined_log,
                         'parameters': {
                             'query': query,
                             'device': device,
@@ -155,12 +172,19 @@ class ShareGPT4VideoAlgorithm(VideoDescriptionAlgorithm):
                 self.logger.warning(f"JSON解析失败，使用备用方法: {parse_error}")
                 # 回退到旧的解析方法
                 description = self._extract_description_fallback(result.stdout)
+                # 合并镜像管理器日志和处理日志
+                combined_log = ""
+                if mirror_log:
+                    combined_log += "=== 镜像管理器初始化日志 ===\n" + mirror_log + "\n\n"
+                combined_log += "=== 模型处理日志 ===\n"
+                combined_log += result.stdout + "\n" + result.stderr if result.stderr else result.stdout
+                
                 final_result = {
                     'algorithm': self.algorithm_name,
                     'input_path': input_path,
                     'output_path': output_path,
                     'description': description,
-                    'processing_log': result.stdout + "\n" + result.stderr if result.stderr else result.stdout,
+                    'processing_log': combined_log,
                     'parameters': {
                         'query': query,
                         'device': device,
@@ -217,6 +241,50 @@ class ShareGPT4VideoAlgorithm(VideoDescriptionAlgorithm):
                 return line
         
         return "视频描述生成完成，但未能提取到具体描述内容。"
+    
+    def _check_and_initialize_model(self) -> str:
+        """检查模型是否存在，如果不存在则初始化镜像管理器"""
+        import io
+        import contextlib
+        
+        # 检查模型路径是否存在
+        model_exists = os.path.exists(self.model_path) and os.path.isdir(self.model_path)
+        
+        if model_exists:
+            # 检查模型文件是否完整
+            required_files = ['config.json', 'pytorch_model.bin', 'tokenizer.json']
+            model_complete = all(os.path.exists(os.path.join(self.model_path, f)) for f in required_files)
+            
+            if model_complete:
+                return ""  # 模型存在且完整，无需初始化镜像管理器
+        
+        # 模型不存在或不完整，需要初始化镜像管理器
+        self.logger.info("检测到模型文件缺失，正在初始化镜像管理器...")
+        
+        try:
+            # 导入镜像管理器
+            from .ShareGPT4Video.llava.model.mirror_manager import get_mirror_manager
+            
+            # 捕获镜像管理器的输出
+            output_buffer = io.StringIO()
+            
+            with contextlib.redirect_stdout(output_buffer), contextlib.redirect_stderr(output_buffer):
+                mirror_manager = get_mirror_manager()
+                success = mirror_manager.initialize_smart_mirror()
+            
+            mirror_output = output_buffer.getvalue()
+            
+            if success:
+                self.logger.info("镜像管理器初始化成功")
+                return mirror_output
+            else:
+                self.logger.warning("镜像管理器初始化失败，但将继续尝试处理")
+                return mirror_output + "\n⚠️ 镜像管理器初始化失败，可能影响模型下载"
+                
+        except Exception as e:
+            error_msg = f"镜像管理器初始化异常: {str(e)}"
+            self.logger.error(error_msg)
+            return error_msg
     
     def get_supported_formats(self) -> list:
         """获取支持的视频格式"""
