@@ -30,8 +30,9 @@ class Logger:
     
     def _setup_logging(self):
         """设置日志配置"""
-        # 创建logs目录
-        log_dir = "logs"
+        # 创建logs目录（使用绝对路径）
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        log_dir = os.path.join(project_root, "logs")
         if not os.path.exists(log_dir):
             os.makedirs(log_dir)
         

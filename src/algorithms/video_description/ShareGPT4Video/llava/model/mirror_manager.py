@@ -42,6 +42,7 @@ class MirrorManager:
         self.config = self._load_config()
         self.cache_path = self._get_cache_path()
         self.min_free_space = 20 * 1024 * 1024 * 1024  # 20GB
+        self._initialized = False  # 添加初始化状态标记
         
     def _load_config(self) -> Dict:
         """从 cache_config.txt 文件加载镜像配置"""
@@ -337,8 +338,12 @@ class MirrorManager:
         print(f"\n🔍 检查模型缓存完整性: {model_path}")
         
         try:
+            # 如果model_path是HuggingFace标识符，转换为实际缓存路径
+            actual_model_path = self._resolve_model_cache_path(model_path)
+            print(f"🔍 实际缓存路径: {actual_model_path}")
+            
             # 检查模型目录是否存在
-            if not os.path.exists(model_path):
+            if not os.path.exists(actual_model_path):
                 print("❌ 模型缓存目录不存在")
                 return False
             
@@ -351,7 +356,7 @@ class MirrorManager:
             
             # 检查是否有模型权重文件
             model_files = []
-            for file in os.listdir(model_path):
+            for file in os.listdir(actual_model_path):
                 if file.endswith(('.bin', '.safetensors')):
                     model_files.append(file)
             
@@ -362,7 +367,7 @@ class MirrorManager:
             # 检查必要配置文件
             missing_files = []
             for file in required_files:
-                file_path = os.path.join(model_path, file)
+                file_path = os.path.join(actual_model_path, file)
                 if not os.path.exists(file_path):
                     missing_files.append(file)
             
@@ -376,6 +381,43 @@ class MirrorManager:
         except Exception as e:
             logger.error(f"检查模型缓存完整性失败: {e}")
             return False
+    
+    def _resolve_model_cache_path(self, model_path: str) -> str:
+        """将HuggingFace模型标识符转换为实际的缓存路径"""
+        # 如果已经是绝对路径，直接返回
+        if os.path.isabs(model_path) and os.path.exists(model_path):
+            return model_path
+        
+        # 获取缓存根目录
+        cache_root = self._get_cache_path()
+        
+        # 如果是HuggingFace模型标识符（包含/），转换为缓存路径格式
+        if '/' in model_path:
+            # 将 "Lin-Chen/sharegpt4video-8b" 转换为 "models--Lin-Chen--sharegpt4video-8b"
+            cache_dir_name = f"models--{model_path.replace('/', '--')}"
+            cache_dir_path = os.path.join(cache_root, cache_dir_name)
+            
+            # 检查是否存在snapshots目录（HuggingFace缓存结构）
+            snapshots_dir = os.path.join(cache_dir_path, 'snapshots')
+            if os.path.exists(snapshots_dir):
+                # 查找最新的snapshot
+                try:
+                    snapshots = os.listdir(snapshots_dir)
+                    if snapshots:
+                        # 使用第一个（通常是最新的）snapshot
+                        latest_snapshot = snapshots[0]
+                        actual_path = os.path.join(snapshots_dir, latest_snapshot)
+                        if os.path.exists(actual_path):
+                            return actual_path
+                except Exception as e:
+                    logger.warning(f"无法读取snapshots目录: {e}")
+            
+            # 如果snapshots结构不存在，返回缓存目录本身
+            if os.path.exists(cache_dir_path):
+                return cache_dir_path
+        
+        # 如果都不匹配，返回原路径
+        return model_path
     
     def setup_mirror_environment(self, mirror_name: str) -> bool:
         """设置镜像环境变量"""
@@ -411,19 +453,23 @@ class MirrorManager:
         print(f"\n🧹 清理损坏的缓存: {model_path}")
         
         try:
-            if os.path.exists(model_path):
+            # 解析实际的缓存路径
+            actual_model_path = self._resolve_model_cache_path(model_path)
+            print(f"🧹 实际清理路径: {actual_model_path}")
+            
+            if os.path.exists(actual_model_path):
                 # 备份重要配置文件
                 config_files = ['config.json', 'tokenizer_config.json']
-                backup_dir = f"{model_path}_backup_{int(time.time())}"
+                backup_dir = f"{actual_model_path}_backup_{int(time.time())}"
                 
                 for config_file in config_files:
-                    config_path = os.path.join(model_path, config_file)
+                    config_path = os.path.join(actual_model_path, config_file)
                     if os.path.exists(config_path):
                         os.makedirs(backup_dir, exist_ok=True)
                         shutil.copy2(config_path, backup_dir)
                 
                 # 删除损坏的缓存
-                shutil.rmtree(model_path)
+                shutil.rmtree(actual_model_path)
                 print(f"✅ 已清理损坏缓存，配置文件备份至: {backup_dir}")
             
             return True
@@ -434,6 +480,11 @@ class MirrorManager:
     
     def initialize_smart_mirror(self) -> bool:
         """初始化智能镜像系统"""
+        # 检查是否已经初始化过
+        if self._initialized:
+            print("✅ 智能镜像系统已初始化，跳过重复初始化")
+            return True
+            
         print("\n🚀 初始化智能镜像管理系统...")
         
         try:
@@ -453,6 +504,8 @@ class MirrorManager:
             if not self.setup_mirror_environment(best_mirror):
                 return False
             
+            # 标记为已初始化
+            self._initialized = True
             print("\n✅ 智能镜像系统初始化完成")
             return True
             

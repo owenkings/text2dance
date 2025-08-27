@@ -29,11 +29,11 @@ custom_mirrors=
 # 自定义API模型名称（将在界面中显示，如：我的GPT模型）
 custom_api_model_name=
 # 自定义API端点
-custom_api_endpoint=
+custom_api_endpoint=https://ark.cn-beijing.volces.com/api/v3/chat/completions
 # 自定义API密钥
-custom_api_key=
+custom_api_key=fa1f2df2-73f8-44b1-99a0-09834047ab51
 # 自定义API模型标识
-custom_api_model=
+custom_api_model=doubao-1-5-pro-32k-250115
 
 # 动作过滤API配置（程序内置默认配置，用户填写后覆盖内置配置）
 # 动作过滤API端点

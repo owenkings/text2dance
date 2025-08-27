@@ -249,7 +249,7 @@ class VideoDescriptionThread(QThread):
     video_completed = pyqtSignal(str, bool, str, str, float, str)  # 视频路径, 是否成功, 描述内容, 错误信息, 总耗时, 实际时间戳
     all_completed = pyqtSignal()
 
-    def __init__(self, videos, description_requirement, model_path, use_action_filter=False, generation_mode="random", description_length=300, num_frames=16, api_config=None, device="Auto", enable_multithread=False, thread_count=2, top_p=0.9, algorithm_type="本地模型"):
+    def __init__(self, videos, description_requirement, model_path, use_action_filter=False, generation_mode="random", description_length=300, num_frames=16, api_config=None, device="Auto", enable_multithread=False, thread_count=2, top_p=0.9, algorithm_type="本地模型", enable_gpu_optimization=False, gpu_batch_size=2, gpu_max_workers=4):
         super().__init__()
         self.videos = videos
         self.description_requirement = description_requirement
@@ -264,6 +264,9 @@ class VideoDescriptionThread(QThread):
         self.thread_count = thread_count  # 线程数量
         self.top_p = top_p  # Top-p参数
         self.algorithm_type = algorithm_type  # 算法类型："本地模型" 或 "API调用"
+        self.enable_gpu_optimization = enable_gpu_optimization  # 是否启用GPU优化
+        self.gpu_batch_size = gpu_batch_size  # GPU批处理大小
+        self.gpu_max_workers = gpu_max_workers  # GPU预处理线程数
         self.is_running = True
         self.results = []
     
@@ -849,6 +852,15 @@ class VideoDescriptionThread(QThread):
                 cmd.extend(['--do-sample', 'True', '--top-p', str(self.top_p), '--temperature', '0.8', '--num-beams', '2'])
                 self.log_updated.emit(f"使用混合策略模式 (do_sample=True, top_p={self.top_p}, temperature=0.8, num_beams=2)")
             
+            # 添加GPU优化参数
+            if self.enable_gpu_optimization:
+                cmd.extend(['--gpu-optimized'])
+                cmd.extend(['--batch-size', str(self.gpu_batch_size)])
+                cmd.extend(['--max-workers', str(self.gpu_max_workers)])
+                self.log_updated.emit(f"启用GPU优化批处理 (批处理大小: {self.gpu_batch_size}, 预处理线程: {self.gpu_max_workers})")
+            else:
+                self.log_updated.emit("使用标准批处理模式")
+            
             # 记录执行的命令
             cmd_str = ' '.join(f'"{arg}"' if ' ' in arg else arg for arg in cmd)
             self.log_updated.emit(f"执行批量处理命令: {cmd_str}")
@@ -1419,7 +1431,53 @@ class VideoDescriptionWidget(QWidget):
         multithread_layout.addStretch()
         options_layout.addLayout(multithread_layout)
         
-        # 初始化多线程选项状态
+        # GPU优化处理选项
+        gpu_optimization_layout = QHBoxLayout()
+        
+        self.gpu_optimization_checkbox = QCheckBox("启用GPU优化批处理")
+        self.gpu_optimization_checkbox.setToolTip(
+            "启用GPU优化批处理可以显著提升大量视频的处理性能\n"
+            "通过批量推理和并行预处理减少GPU内存碎片和模型加载开销\n"
+            "注意：仅在使用CUDA设备且处理多个视频时推荐启用"
+        )
+        gpu_optimization_layout.addWidget(self.gpu_optimization_checkbox)
+        
+        # GPU批处理大小
+        batch_size_label = QLabel("批处理大小:")
+        gpu_optimization_layout.addWidget(batch_size_label)
+        
+        self.gpu_batch_size_spinbox = QSpinBox()
+        self.gpu_batch_size_spinbox.setMinimum(1)
+        self.gpu_batch_size_spinbox.setMaximum(8)
+        self.gpu_batch_size_spinbox.setValue(2)  # 默认2个视频一批
+        self.gpu_batch_size_spinbox.setToolTip(
+            "设置同时进行GPU推理的视频数量\n"
+            "建议根据GPU显存大小选择：\n"
+            "• 8GB以下显存：1-2个视频\n"
+            "• 8-16GB显存：2-4个视频\n"
+            "• 16GB以上显存：4-8个视频"
+        )
+        gpu_optimization_layout.addWidget(self.gpu_batch_size_spinbox)
+        
+        # 预处理线程数
+        workers_label = QLabel("预处理线程:")
+        gpu_optimization_layout.addWidget(workers_label)
+        
+        self.gpu_max_workers_spinbox = QSpinBox()
+        self.gpu_max_workers_spinbox.setMinimum(1)
+        self.gpu_max_workers_spinbox.setMaximum(16)
+        self.gpu_max_workers_spinbox.setValue(4)  # 默认4个预处理线程
+        self.gpu_max_workers_spinbox.setToolTip(
+            "设置视频预处理的并行线程数\n"
+            "用于并行加载和预处理视频帧\n"
+            "建议设置为CPU核心数的1-2倍"
+        )
+        gpu_optimization_layout.addWidget(self.gpu_max_workers_spinbox)
+        
+        gpu_optimization_layout.addStretch()
+        options_layout.addLayout(gpu_optimization_layout)
+        
+        # 初始化多线程和GPU优化选项状态
         self._on_device_changed()
         
         layout.addWidget(options_group)
@@ -1890,6 +1948,10 @@ class VideoDescriptionWidget(QWidget):
         # 自动保存选项同步
         self.auto_save_format_combo.currentTextChanged.connect(self._on_auto_save_format_changed)
         
+        # 连接GPU优化选项信号
+        if hasattr(self, 'gpu_optimization_checkbox'):
+            self.gpu_optimization_checkbox.toggled.connect(self._on_gpu_optimization_toggled)
+        
         # 连接配置变化信号
         try:
             # 获取主窗口的app实例
@@ -1919,15 +1981,32 @@ class VideoDescriptionWidget(QWidget):
             
         device = self.device_combo.currentText()
         
-        # 只有在CUDA模式下才允许多线程处理
+        # 只有在CUDA模式下才允许多线程处理和GPU优化
         if device == "CUDA":
             self.multithread_checkbox.setEnabled(True)
             self.thread_count_spinbox.setEnabled(True)
+            # 启用GPU优化选项
+            if hasattr(self, 'gpu_optimization_checkbox'):
+                self.gpu_optimization_checkbox.setEnabled(True)
+                self.gpu_batch_size_spinbox.setEnabled(self.gpu_optimization_checkbox.isChecked())
+                self.gpu_max_workers_spinbox.setEnabled(self.gpu_optimization_checkbox.isChecked())
             # 默认不勾选多线程，用户可根据需要手动启用
         else:  # Auto或CPU模式
             self.multithread_checkbox.setEnabled(False)
             self.multithread_checkbox.setChecked(False)
             self.thread_count_spinbox.setEnabled(False)
+            # 禁用GPU优化选项
+            if hasattr(self, 'gpu_optimization_checkbox'):
+                self.gpu_optimization_checkbox.setEnabled(False)
+                self.gpu_optimization_checkbox.setChecked(False)
+                self.gpu_batch_size_spinbox.setEnabled(False)
+                self.gpu_max_workers_spinbox.setEnabled(False)
+    
+    def _on_gpu_optimization_toggled(self, checked: bool):
+        """GPU优化选项切换处理"""
+        if hasattr(self, 'gpu_batch_size_spinbox') and hasattr(self, 'gpu_max_workers_spinbox'):
+            self.gpu_batch_size_spinbox.setEnabled(checked)
+            self.gpu_max_workers_spinbox.setEnabled(checked)
     
     def refresh_ui_state(self):
         """刷新UI状态（供外部调用）"""
@@ -1956,6 +2035,13 @@ class VideoDescriptionWidget(QWidget):
                 self.thread_count_spinbox.setEnabled(False)
                 self.top_p_spinbox.setEnabled(False)
                 
+                # 禁用GPU优化选项
+                if hasattr(self, 'gpu_optimization_checkbox'):
+                    self.gpu_optimization_checkbox.setEnabled(False)
+                    self.gpu_optimization_checkbox.setChecked(False)
+                    self.gpu_batch_size_spinbox.setEnabled(False)
+                    self.gpu_max_workers_spinbox.setEnabled(False)
+                
                 # 禁用生成模式和采样帧数（API模式下这些参数由API控制）
                 if hasattr(self, 'center_generation_mode_combo'):
                     self.center_generation_mode_combo.setEnabled(False)
@@ -1967,6 +2053,12 @@ class VideoDescriptionWidget(QWidget):
                 self.multithread_checkbox.setStyleSheet("QCheckBox { color: #888888; }")
                 self.thread_count_spinbox.setStyleSheet("QSpinBox { color: #888888; background-color: #f0f0f0; }")
                 self.top_p_spinbox.setStyleSheet("QDoubleSpinBox { color: #888888; background-color: #f0f0f0; }")
+                
+                # 设置GPU优化选项为灰色状态
+                if hasattr(self, 'gpu_optimization_checkbox'):
+                    self.gpu_optimization_checkbox.setStyleSheet("QCheckBox { color: #888888; }")
+                    self.gpu_batch_size_spinbox.setStyleSheet("QSpinBox { color: #888888; background-color: #f0f0f0; }")
+                    self.gpu_max_workers_spinbox.setStyleSheet("QSpinBox { color: #888888; background-color: #f0f0f0; }")
                 
                 # 设置生成模式和采样帧数为灰色状态
                 if hasattr(self, 'center_generation_mode_combo'):
@@ -1999,6 +2091,12 @@ class VideoDescriptionWidget(QWidget):
                 self.multithread_checkbox.setStyleSheet("")
                 self.thread_count_spinbox.setStyleSheet("")
                 self.top_p_spinbox.setStyleSheet("")
+                
+                # 恢复GPU优化选项正常样式
+                if hasattr(self, 'gpu_optimization_checkbox'):
+                    self.gpu_optimization_checkbox.setStyleSheet("")
+                    self.gpu_batch_size_spinbox.setStyleSheet("")
+                    self.gpu_max_workers_spinbox.setStyleSheet("")
                 
                 # 恢复生成模式和采样帧数正常样式
                 if hasattr(self, 'center_generation_mode_combo'):
@@ -2687,7 +2785,8 @@ class VideoDescriptionWidget(QWidget):
             self.center_stop_btn.setEnabled(True)
         
         # 清空日志
-        self.log_text.clear()
+        if hasattr(self, 'log_text'):
+            self.log_text.clear()
         if hasattr(self, 'center_progress_bar'):
             self.center_progress_bar.setValue(0)
         
@@ -2735,6 +2834,15 @@ class VideoDescriptionWidget(QWidget):
         enable_multithread = self.multithread_checkbox.isChecked() and self.multithread_checkbox.isEnabled()
         thread_count = self.thread_count_spinbox.value()
         
+        # 获取GPU优化设置
+        enable_gpu_optimization = False
+        gpu_batch_size = 4
+        gpu_max_workers = 2
+        if hasattr(self, 'gpu_optimization_checkbox'):
+            enable_gpu_optimization = self.gpu_optimization_checkbox.isChecked() and self.gpu_optimization_checkbox.isEnabled()
+            gpu_batch_size = self.gpu_batch_size_spinbox.value()
+            gpu_max_workers = self.gpu_max_workers_spinbox.value()
+        
         # 根据当前选择的模型确定算法类型
         current_model = self.model_selection_combo.currentText()
         if current_model == "ShareVideoGPT4（本地模型）":
@@ -2756,7 +2864,10 @@ class VideoDescriptionWidget(QWidget):
             enable_multithread,
             thread_count,
             top_p,
-            algorithm_type
+            algorithm_type,
+            enable_gpu_optimization,
+            gpu_batch_size,
+            gpu_max_workers
         )
         
         if hasattr(self, 'center_progress_bar'):
@@ -3010,6 +3121,10 @@ class VideoDescriptionWidget(QWidget):
     
     def _log_message(self, message):
         """记录日志消息"""
+        # 检查log_text是否已初始化
+        if not hasattr(self, 'log_text'):
+            return
+            
         timestamp = datetime.now().strftime('%H:%M:%S')
         formatted_message = f"[{timestamp}] {message}"
         self.log_text.append(formatted_message)
@@ -3023,6 +3138,10 @@ class VideoDescriptionWidget(QWidget):
     
     def _log_message_html(self, html_message):
         """记录HTML格式的日志消息（支持颜色和样式）"""
+        # 检查log_text是否已初始化
+        if not hasattr(self, 'log_text'):
+            return
+            
         timestamp = datetime.now().strftime('%H:%M:%S')
         formatted_message = f"<span style='color: #666;'>[{timestamp}]</span> {html_message}"
         
@@ -3473,15 +3592,22 @@ class VideoDescriptionWidget(QWidget):
     
     def _update_model_ui_state(self, model_name):
         """根据模型选择更新UI状态"""
+        # 检查UI组件是否已初始化
+        if not hasattr(self, 'api_config_group') or not hasattr(self, 'device_combo'):
+            return
+        
         is_local_model = model_name == "ShareVideoGPT4（本地模型）"
         
         if is_local_model:
             # 本地模型：启用本地相关功能，隐藏API配置
             self.api_config_group.setVisible(False)
             self.device_combo.setEnabled(True)
-            self.multithread_checkbox.setEnabled(True)
-            self.thread_count_spinbox.setEnabled(True)
-            self.top_p_spinbox.setEnabled(True)
+            if hasattr(self, 'multithread_checkbox'):
+                self.multithread_checkbox.setEnabled(True)
+            if hasattr(self, 'thread_count_spinbox'):
+                self.thread_count_spinbox.setEnabled(True)
+            if hasattr(self, 'top_p_spinbox'):
+                self.top_p_spinbox.setEnabled(True)
             if hasattr(self, 'center_generation_mode_combo'):
                 self.center_generation_mode_combo.setEnabled(True)
             if hasattr(self, 'center_num_frames_spinbox'):
@@ -3489,9 +3615,12 @@ class VideoDescriptionWidget(QWidget):
             
             # 恢复控件正常样式
             self.device_combo.setStyleSheet("")
-            self.multithread_checkbox.setStyleSheet("")
-            self.thread_count_spinbox.setStyleSheet("")
-            self.top_p_spinbox.setStyleSheet("")
+            if hasattr(self, 'multithread_checkbox'):
+                self.multithread_checkbox.setStyleSheet("")
+            if hasattr(self, 'thread_count_spinbox'):
+                self.thread_count_spinbox.setStyleSheet("")
+            if hasattr(self, 'top_p_spinbox'):
+                self.top_p_spinbox.setStyleSheet("")
             if hasattr(self, 'center_generation_mode_combo'):
                 self.center_generation_mode_combo.setStyleSheet("")
             if hasattr(self, 'center_num_frames_spinbox'):
@@ -3500,9 +3629,12 @@ class VideoDescriptionWidget(QWidget):
             # API模型：禁用本地功能，隐藏API配置（配置保存在文件中）
             self.api_config_group.setVisible(False)
             self.device_combo.setEnabled(False)
-            self.multithread_checkbox.setEnabled(False)
-            self.thread_count_spinbox.setEnabled(False)
-            self.top_p_spinbox.setEnabled(False)
+            if hasattr(self, 'multithread_checkbox'):
+                self.multithread_checkbox.setEnabled(False)
+            if hasattr(self, 'thread_count_spinbox'):
+                self.thread_count_spinbox.setEnabled(False)
+            if hasattr(self, 'top_p_spinbox'):
+                self.top_p_spinbox.setEnabled(False)
             if hasattr(self, 'center_generation_mode_combo'):
                 self.center_generation_mode_combo.setEnabled(False)
             if hasattr(self, 'center_num_frames_spinbox'):

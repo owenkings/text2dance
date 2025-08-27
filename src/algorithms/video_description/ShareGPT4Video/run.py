@@ -94,21 +94,46 @@ class LoggingCapture:
         self.level = level
         self.buffer = StringIO()
         self.silent = silent
+        self._closed = False
         
     def write(self, text):
-        if text.strip():  # 只记录非空内容
-            if not self.silent:
-                # 过滤重复和无用信息
-                if not any(skip_word in text.lower() for skip_word in 
-                          ['### lm output text:', '=== 视频描述结果 ===', '===================']):
-                    self.logger.log(self.level, f"OUTPUT: {text.strip()}")
-        self.buffer.write(text)
+        if self._closed:
+            return
+        try:
+            if text.strip():  # 只记录非空内容
+                if not self.silent:
+                    # 过滤重复和无用信息
+                    if not any(skip_word in text.lower() for skip_word in 
+                              ['### lm output text:', '=== 视频描述结果 ===', '===================']):
+                        self.logger.log(self.level, f"OUTPUT: {text.strip()}")
+            self.buffer.write(text)
+        except (ValueError, OSError):
+            # 忽略buffer已分离的错误
+            pass
         
     def flush(self):
-        pass
+        if not self._closed:
+            try:
+                self.buffer.flush()
+            except (ValueError, OSError):
+                # 忽略buffer已分离的错误
+                pass
         
     def getvalue(self):
-        return self.buffer.getvalue()
+        if self._closed:
+            return ""
+        try:
+            return self.buffer.getvalue()
+        except (ValueError, OSError):
+            return ""
+    
+    def close(self):
+        """关闭捕获器"""
+        self._closed = True
+        try:
+            self.buffer.close()
+        except (ValueError, OSError):
+            pass
 
 # 结果格式化类
 class ResultFormatter:
@@ -860,6 +885,13 @@ def main():
                     logger.debug(f"标准错误内容长度: {len(stderr_content)} 字符")
             except Exception as capture_error:
                 logger.warning(f"获取捕获内容时出错: {capture_error}")
+            
+            # 关闭捕获器以避免buffer分离错误
+            try:
+                stdout_capture.close()
+                stderr_capture.close()
+            except Exception as close_error:
+                logger.warning(f"关闭捕获器时出错: {close_error}")
                 
     except Exception as e:
         # 处理参数解析等早期错误

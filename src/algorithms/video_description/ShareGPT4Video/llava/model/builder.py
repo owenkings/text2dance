@@ -267,21 +267,21 @@ def load_model_with_smart_retry(model_path, model_base, model_name, load_8bit=Fa
         from .mirror_manager import get_mirror_manager
         mirror_manager = get_mirror_manager()
         
-        # 初始化智能镜像系统
+        # 优先检查模型缓存完整性，避免不必要的网络测试和镜像初始化
+        print(f"\n🔍 检查模型缓存: {model_path}")
+        if mirror_manager.check_model_cache_integrity(model_path):
+            print("✅ 模型缓存完整，跳过镜像初始化，直接加载")
+            return _load_pretrained_model_internal(model_path, model_base, model_name, load_8bit, load_4bit, device_map, device, use_flash_attn, lora_alpha, **kwargs)
+        
+        # 模型缓存不完整，需要初始化镜像系统
+        print("⚠️ 模型缓存不完整，需要重新下载")
         print("\n🌐 初始化智能镜像管理系统...")
         if not mirror_manager.initialize_smart_mirror():
             print("⚠️ 智能镜像系统初始化失败，使用传统加载方式")
             return _load_pretrained_model_internal(model_path, model_base, model_name, load_8bit, load_4bit, device_map, device, use_flash_attn, lora_alpha, **kwargs)
         
-        # 检查模型缓存完整性
-        print(f"\n🔍 检查模型缓存: {model_path}")
-        if mirror_manager.check_model_cache_integrity(model_path):
-            print("✅ 模型缓存完整，直接加载")
-            return _load_pretrained_model_internal(model_path, model_base, model_name, load_8bit, load_4bit, device_map, device, use_flash_attn, lora_alpha, **kwargs)
-        else:
-            print("⚠️ 模型缓存不完整，需要重新下载")
-            # 清理损坏的缓存
-            mirror_manager.clean_corrupted_cache(model_path)
+        # 清理损坏的缓存
+        mirror_manager.clean_corrupted_cache(model_path)
         
         # 智能重试机制
         max_retries = 3

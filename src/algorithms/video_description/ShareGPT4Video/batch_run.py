@@ -36,9 +36,14 @@ except ImportError:
     print("⚠️ 智能模型加载功能不可用，使用传统加载方式")
 
 import torch
+import numpy as np
 from llava.conversation import conv_templates, SeparatorStyle
 from llava.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 from llava.mm_utils import process_images, tokenizer_image_token, get_model_name_from_path, KeywordsStoppingCriteria
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
+from queue import Queue
+import gc
 
 
 class BatchVideoProcessor:
@@ -378,6 +383,371 @@ class BatchVideoProcessor:
         self.logger.info(f"批量处理完成，成功: {sum(1 for r in results if r['success'])}/{total_videos}")
         return results
     
+    def process_videos_batch_gpu_optimized(self, video_configs: List[Dict[str, Any]], 
+                                          batch_size: int = 2, 
+                                          max_workers: int = 4) -> List[Dict[str, Any]]:
+        """
+        GPU优化的批量视频处理方法
+        实现真正的批量推理，而不是逐个处理
+        
+        Args:
+            video_configs: 视频配置列表
+            batch_size: GPU批处理大小（同时处理的视频数量）
+            max_workers: 预处理线程数
+            
+        Returns:
+            List[Dict[str, Any]]: 处理结果列表
+        """
+        if not self.is_loaded:
+            self.logger.error("模型未加载，请先调用load_model()")
+            return []
+        
+        total_videos = len(video_configs)
+        self.logger.info(f"开始GPU优化批量处理 {total_videos} 个视频")
+        self.logger.info(f"批处理大小: {batch_size}, 预处理线程数: {max_workers}")
+        
+        # 动态调整批处理大小
+        if self.device == 'cuda' and torch.cuda.is_available():
+            gpu_memory_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+            if gpu_memory_gb <= 8:
+                batch_size = min(batch_size, 1)  # 低显存GPU限制批处理大小
+                self.logger.info(f"检测到低显存GPU ({gpu_memory_gb:.1f}GB)，调整批处理大小为: {batch_size}")
+            elif gpu_memory_gb <= 16:
+                batch_size = min(batch_size, 2)
+                self.logger.info(f"检测到中等显存GPU ({gpu_memory_gb:.1f}GB)，调整批处理大小为: {batch_size}")
+            else:
+                self.logger.info(f"检测到高显存GPU ({gpu_memory_gb:.1f}GB)，使用原始批处理大小: {batch_size}")
+        
+        results = []
+        
+        # 分批处理视频
+        for batch_start in range(0, total_videos, batch_size):
+            batch_end = min(batch_start + batch_size, total_videos)
+            batch_configs = video_configs[batch_start:batch_end]
+            
+            self.logger.info(f"处理批次 {batch_start//batch_size + 1}/{(total_videos + batch_size - 1)//batch_size}")
+            self.logger.info(f"批次范围: {batch_start+1}-{batch_end}/{total_videos}")
+            
+            # 并行预处理视频帧
+            batch_data = self._preprocess_video_batch(batch_configs, max_workers)
+            
+            # GPU批量推理
+            batch_results = self._gpu_batch_inference(batch_data)
+            
+            results.extend(batch_results)
+            
+            # 清理GPU内存
+            if self.device == 'cuda' and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                gc.collect()
+        
+        success_count = sum(1 for r in results if r['success'])
+        self.logger.info(f"GPU优化批量处理完成，成功: {success_count}/{total_videos}")
+        return results
+    
+    def _preprocess_video_batch(self, batch_configs: List[Dict[str, Any]], 
+                               max_workers: int) -> List[Dict[str, Any]]:
+        """
+        并行预处理视频批次
+        
+        Args:
+            batch_configs: 批次视频配置
+            max_workers: 最大工作线程数
+            
+        Returns:
+            List[Dict[str, Any]]: 预处理后的批次数据
+        """
+        self.logger.info(f"开始并行预处理 {len(batch_configs)} 个视频")
+        
+        batch_data = []
+        
+        def preprocess_single_video(config):
+            """预处理单个视频"""
+            try:
+                video_path = config.get('video_path')
+                query = config.get('query', 'Describe this video in detail.')
+                num_frames = config.get('num_frames', 16)
+                
+                # 加载视频帧
+                from run import single_test
+                
+                # 使用与single_test相同的视频加载逻辑
+                def get_index(num_frames_total, num_segments):
+                    seg_size = float(num_frames_total - 1) / num_segments
+                    start = int(seg_size / 2)
+                    offsets = np.array([
+                        start + int(np.round(seg_size * idx)) for idx in range(num_segments)
+                    ])
+                    return offsets
+                
+                def load_video_frames(video_path, num_segments=8):
+                    """加载视频帧"""
+                    import os
+                    from decord import VideoReader, cpu
+                    from run import create_frame_grid, resize_image_grid
+                    from PIL import Image
+                    
+                    normalized_path = os.path.normpath(video_path)
+                    if not os.path.exists(normalized_path):
+                        raise FileNotFoundError(f"视频文件不存在: {normalized_path}")
+                    
+                    vr = VideoReader(normalized_path, ctx=cpu(0), num_threads=1)
+                    num_frames_total = len(vr)
+                    
+                    frame_indices = get_index(num_frames_total, num_segments)
+                    img_array = vr.get_batch(frame_indices).asnumpy()
+                    
+                    img_grid = create_frame_grid(img_array, 50)
+                    img_grid = Image.fromarray(img_grid).convert("RGB")
+                    img_grid = resize_image_grid(img_grid)
+                    
+                    return img_grid
+                
+                # 自动帧数选择逻辑
+                if num_frames == 0:
+                    try:
+                        import os
+                        from decord import VideoReader, cpu
+                        
+                        normalized_path = os.path.normpath(video_path)
+                        vr = VideoReader(normalized_path, ctx=cpu(0), num_threads=1)
+                        total_frames = len(vr)
+                        fps = vr.get_avg_fps()
+                        duration = total_frames / fps
+                        
+                        if duration <= 10:
+                            num_frames = 8
+                        elif duration <= 30:
+                            num_frames = 12
+                        elif duration <= 60:
+                            num_frames = 16
+                        elif duration <= 180:
+                            num_frames = 20
+                        elif duration <= 300:
+                            num_frames = 24
+                        else:
+                            num_frames = 32
+                    except Exception:
+                        num_frames = 16
+                
+                # 加载视频帧
+                img_grid = load_video_frames(video_path, num_frames)
+                
+                # 构建对话
+                conv = conv_templates[self.conv_mode].copy()
+                pre_query_prompt = "The provided image arranges keyframes from a video in a grid view, keyframes are separated with white bands. Answer concisely with overall content and context of the video, highlighting any significant events, characters, or objects that appear throughout the frames."
+                qs = DEFAULT_IMAGE_TOKEN + '\n' + pre_query_prompt + query
+                
+                conv.append_message(conv.roles[0], qs)
+                conv.append_message(conv.roles[1], None)
+                prompt = conv.get_prompt()
+                
+                return {
+                    'config': config,
+                    'img_grid': img_grid,
+                    'prompt': prompt,
+                    'success': True,
+                    'error': None
+                }
+                
+            except Exception as e:
+                self.logger.error(f"预处理视频失败 {config.get('video_path')}: {str(e)}")
+                return {
+                    'config': config,
+                    'img_grid': None,
+                    'prompt': None,
+                    'success': False,
+                    'error': str(e)
+                }
+        
+        # 并行预处理
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_config = {executor.submit(preprocess_single_video, config): config 
+                              for config in batch_configs}
+            
+            for future in as_completed(future_to_config):
+                result = future.result()
+                batch_data.append(result)
+        
+        success_count = sum(1 for data in batch_data if data['success'])
+        self.logger.info(f"预处理完成，成功: {success_count}/{len(batch_configs)}")
+        
+        return batch_data
+    
+    def _gpu_batch_inference(self, batch_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        GPU批量推理
+        
+        Args:
+            batch_data: 预处理后的批次数据
+            
+        Returns:
+            List[Dict[str, Any]]: 推理结果
+        """
+        self.logger.info(f"开始GPU批量推理 {len(batch_data)} 个视频")
+        
+        results = []
+        
+        # 分离成功和失败的数据
+        successful_data = [data for data in batch_data if data['success']]
+        failed_data = [data for data in batch_data if not data['success']]
+        
+        # 处理失败的数据
+        for data in failed_data:
+            config = data['config']
+            result = {
+                'video_path': config.get('video_path'),
+                'query': config.get('query', ''),
+                'description': None,
+                'success': False,
+                'error_message': data['error'],
+                'processing_time': 0,
+                'timestamp': datetime.now().isoformat(),
+                'parameters': {}
+            }
+            results.append(result)
+        
+        if not successful_data:
+            self.logger.warning("没有成功预处理的视频数据")
+            return results
+        
+        # 批量处理成功的数据
+        try:
+            # 准备批量输入
+            img_grids = [data['img_grid'] for data in successful_data]
+            prompts = [data['prompt'] for data in successful_data]
+            configs = [data['config'] for data in successful_data]
+            
+            # 处理图像
+            self.logger.info("处理批量图像...")
+            image_tensors = []
+            image_sizes = []
+            
+            for img_grid in img_grids:
+                if not isinstance(img_grid, (list, tuple)):
+                    img_grid = [img_grid]
+                
+                image_size = img_grid[0].size
+                image_sizes.append(image_size)
+                
+                image_tensor = process_images(img_grid, self.processor, self.model.config)[0]
+                image_tensors.append(image_tensor)
+            
+            # 处理文本输入
+            self.logger.info("处理批量文本输入...")
+            input_ids_list = []
+            for prompt in prompts:
+                input_ids = tokenizer_image_token(
+                    prompt, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt')
+                input_ids = input_ids.unsqueeze(0)
+                input_ids_list.append(input_ids)
+            
+            # 批量推理
+            self.logger.info("开始批量推理...")
+            pad_token_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token is not None else self.tokenizer.eos_token_id
+            
+            with torch.inference_mode():
+                batch_outputs = []
+                
+                # 逐个推理（因为不同视频的输入长度可能不同）
+                for i, (input_ids, image_tensor, image_size, config) in enumerate(
+                    zip(input_ids_list, image_tensors, image_sizes, configs)):
+                    
+                    start_time = datetime.now()
+                    
+                    # 移动到设备
+                    input_ids = input_ids.to(device=self.model.device, non_blocking=True)
+                    
+                    if self.model.device.type == 'cuda':
+                        image_tensor = image_tensor.to(dtype=torch.float16, device=self.model.device, non_blocking=True)
+                    else:
+                        image_tensor = image_tensor.to(dtype=torch.float32, device=self.model.device)
+                    
+                    # 提取生成参数
+                    params = {
+                        'do_sample': config.get('do_sample', True),
+                        'top_p': config.get('top_p', 0.9),
+                        'temperature': config.get('temperature', 1.0),
+                        'num_beams': config.get('num_beams', 1)
+                    }
+                    
+                    max_new_tokens = config.get('max_new_tokens')
+                    if max_new_tokens is not None and max_new_tokens > 0:
+                        params['max_new_tokens'] = max_new_tokens
+                    else:
+                        params['max_new_tokens'] = 200  # 默认值
+                    
+                    # 生成
+                    try:
+                        output_ids = self.model.generate(
+                            input_ids,
+                            images=image_tensor,
+                            image_sizes=[image_size],
+                            pad_token_id=pad_token_id,
+                            use_cache=True,
+                            **params
+                        )
+                        
+                        # 解码
+                        output_text = self.tokenizer.batch_decode(
+                            output_ids, skip_special_tokens=True)[0].strip()
+                        
+                        end_time = datetime.now()
+                        processing_time = (end_time - start_time).total_seconds()
+                        
+                        result = {
+                            'video_path': config.get('video_path'),
+                            'query': config.get('query', ''),
+                            'description': output_text,
+                            'success': True,
+                            'error_message': '',
+                            'processing_time': processing_time,
+                            'timestamp': end_time.isoformat(),
+                            'parameters': params
+                        }
+                        
+                        self.logger.info(f"成功处理视频 {i+1}/{len(successful_data)}: {config.get('video_path')}")
+                        
+                    except Exception as e:
+                        end_time = datetime.now()
+                        error_msg = f"推理失败: {str(e)}"
+                        self.logger.error(f"视频 {config.get('video_path')} 推理失败: {error_msg}")
+                        
+                        result = {
+                            'video_path': config.get('video_path'),
+                            'query': config.get('query', ''),
+                            'description': None,
+                            'success': False,
+                            'error_message': error_msg,
+                            'processing_time': 0,
+                            'timestamp': end_time.isoformat(),
+                            'parameters': params
+                        }
+                    
+                    results.append(result)
+        
+        except Exception as e:
+            self.logger.error(f"批量推理过程中发生异常: {str(e)}")
+            # 为所有成功预处理的数据创建失败结果
+            for data in successful_data:
+                config = data['config']
+                result = {
+                    'video_path': config.get('video_path'),
+                    'query': config.get('query', ''),
+                    'description': None,
+                    'success': False,
+                    'error_message': f"批量推理异常: {str(e)}",
+                    'processing_time': 0,
+                    'timestamp': datetime.now().isoformat(),
+                    'parameters': {}
+                }
+                results.append(result)
+        
+        success_count = sum(1 for r in results if r['success'])
+        self.logger.info(f"GPU批量推理完成，成功: {success_count}/{len(batch_data)}")
+        
+        return results
+    
     def cleanup(self):
         """
         清理资源
@@ -389,6 +759,9 @@ class BatchVideoProcessor:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
                 self.logger.info("CUDA缓存已清理")
+            
+            # 强制垃圾回收
+            gc.collect()
             
             # 重置状态
             self.model = None
@@ -424,6 +797,14 @@ def parse_batch_arguments():
     parser.add_argument('--output-file', help='输出结果JSON文件路径')
     parser.add_argument('--output-format', choices=['json', 'plain'], default='json',
                        help='输出格式 (默认: json)')
+    
+    # GPU优化参数
+    parser.add_argument('--gpu-optimized', action='store_true',
+                       help='启用GPU优化批处理模式，提升大量视频处理性能')
+    parser.add_argument('--batch-size', type=int, default=2,
+                       help='GPU批处理大小，同时处理的视频数量 (默认: 2)')
+    parser.add_argument('--max-workers', type=int, default=4,
+                       help='预处理线程数 (默认: 4)')
     
     # 生成参数
     parser.add_argument('--num-frames', type=int, default=16,
@@ -605,7 +986,23 @@ def main():
         try:
             # 批量处理视频
             start_time = datetime.now()
-            results = processor.process_videos_batch(video_configs)
+            
+            # 根据用户选择使用不同的处理方法
+            if args.gpu_optimized:
+                logger.info(f"使用GPU优化批处理模式 (批处理大小: {args.batch_size}, 预处理线程: {args.max_workers})")
+                if not args.silent:
+                    print(f"使用GPU优化批处理模式 (批处理大小: {args.batch_size}, 预处理线程: {args.max_workers})")
+                results = processor.process_videos_batch_gpu_optimized(
+                    video_configs, 
+                    batch_size=args.batch_size, 
+                    max_workers=args.max_workers
+                )
+            else:
+                logger.info("使用标准批处理模式")
+                if not args.silent:
+                    print("使用标准批处理模式")
+                results = processor.process_videos_batch(video_configs)
+            
             end_time = datetime.now()
             
             total_time = (end_time - start_time).total_seconds()

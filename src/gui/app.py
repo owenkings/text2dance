@@ -43,7 +43,7 @@ class Application(QApplication):
         
         # 基本属性
         self.app_name = "视频处理爬虫工具"
-        self.app_version = "4.0.0"
+        self.app_version = "4.1.1"
         self.app_author = "开发团队"
         self.app_organization = "VideoTools"
         
@@ -382,6 +382,18 @@ class Application(QApplication):
         """应用默认主题"""
         self.setPalette(self.style().standardPalette())
     
+    def _init_logging(self):
+        """初始化日志系统"""
+        try:
+            from ..utils.logger import Logger
+            # 创建Logger实例，这会自动初始化日志系统
+            logger_instance = Logger()
+            logger = logger_instance.get_logger("Application")
+            logger.info("日志系统初始化完成")
+            print("✅ 日志系统初始化完成")
+        except Exception as e:
+            print(f"⚠️ 日志系统初始化失败: {e}")
+    
     def _set_font(self):
         """设置字体"""
         try:
@@ -399,6 +411,9 @@ class Application(QApplication):
         """初始化核心组件"""
         try:
             self._update_splash_message("正在初始化核心组件...")
+            
+            # 初始化日志系统
+            self._init_logging()
             
             # 初始化插件管理器
             self.plugin_manager = PluginManager(self.config_manager)
