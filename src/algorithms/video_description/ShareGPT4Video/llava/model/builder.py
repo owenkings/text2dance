@@ -254,8 +254,17 @@ from llava.constants import (DEFAULT_IM_END_TOKEN, DEFAULT_IM_START_TOKEN,
 from llava.model import *
 from llava.train.train import smart_tokenizer_and_embedding_resize
 
-def load_model_with_smart_retry(model_path, model_base, model_name, load_8bit=False, load_4bit=False, device_map="auto", device="cuda", use_flash_attn=False, lora_alpha=None, **kwargs):
-    """智能模型加载函数，支持镜像切换、错误处理和重试机制"""
+def load_model_with_smart_retry(model_path, model_base, model_name, load_8bit=False, load_4bit=False, device_map="auto", device="cuda", use_flash_attn=False, lora_alpha=None, enable_smart_loading=True, **kwargs):
+    """智能模型加载函数，支持镜像切换、错误处理和重试机制
+    
+    Args:
+        enable_smart_loading: 是否启用智能加载功能，False时直接使用传统加载方式
+    """
+    # 如果禁用智能加载，直接使用传统方式
+    if not enable_smart_loading:
+        print("\n⚡ 智能加载已禁用，使用传统加载方式（更快的预加载速度）")
+        return _load_pretrained_model_internal(model_path, model_base, model_name, load_8bit, load_4bit, device_map, device, use_flash_attn, lora_alpha, **kwargs)
+    
     import time
     from requests.exceptions import ConnectionError, Timeout, RequestException
     from urllib3.exceptions import NewConnectionError
@@ -269,14 +278,19 @@ def load_model_with_smart_retry(model_path, model_base, model_name, load_8bit=Fa
         
         # 优先检查模型缓存完整性，避免不必要的网络测试和镜像初始化
         print(f"\n🔍 检查模型缓存: {model_path}")
-        if mirror_manager.check_model_cache_integrity(model_path):
-            print("✅ 模型缓存完整，跳过镜像初始化，直接加载")
+        cache_complete = mirror_manager.check_model_cache_integrity(model_path)
+        
+        if cache_complete:
+            print("✅ 模型缓存完整，启用快速加载模式")
+            print("⚡ 跳过网络检测，预计加载速度提升 3-5 倍")
+            # 使用快速模式初始化镜像（跳过网络检测）
+            mirror_manager.initialize_smart_mirror(fast_mode=True)
             return _load_pretrained_model_internal(model_path, model_base, model_name, load_8bit, load_4bit, device_map, device, use_flash_attn, lora_alpha, **kwargs)
         
-        # 模型缓存不完整，需要初始化镜像系统
+        # 模型缓存不完整，需要完整的镜像系统初始化
         print("⚠️ 模型缓存不完整，需要重新下载")
-        print("\n🌐 初始化智能镜像管理系统...")
-        if not mirror_manager.initialize_smart_mirror():
+        print("\n🌐 初始化智能镜像管理系统（包含网络检测，可能需要几秒钟）...")
+        if not mirror_manager.initialize_smart_mirror(fast_mode=False):
             print("⚠️ 智能镜像系统初始化失败，使用传统加载方式")
             return _load_pretrained_model_internal(model_path, model_base, model_name, load_8bit, load_4bit, device_map, device, use_flash_attn, lora_alpha, **kwargs)
         
@@ -613,5 +627,5 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
             if model.get_model().image_newline is not None:
                 model.get_model().image_newline.data = model.get_model().image_newline.data.float()
 
-    context_len = getattr(model.config, "max_sequence_length", 2048)
+    context_len = getattr(model.config, "max_sequence_length", 16384)
     return tokenizer, model, image_processor, context_len

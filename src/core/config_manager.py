@@ -128,7 +128,7 @@ class ConfigManager(QObject):
         self.config_data = {
             'app': {
                 'name': 'VideoProcessor',
-                'version': '4.1.1',
+                'version': '4.1.2',
                 'debug': True,
                 'log_level': 'INFO'
             },

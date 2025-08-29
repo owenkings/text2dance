@@ -11,9 +11,25 @@ import json
 import argparse
 import logging
 import traceback
+import warnings
 from datetime import datetime
 from contextlib import redirect_stdout, redirect_stderr
 from typing import List, Dict, Any, Optional
+
+# 过滤各种警告信息，防止在日志中出现干扰信息
+warnings.filterwarnings("ignore", message=".*copying from a non-meta parameter.*")
+warnings.filterwarnings("ignore", message=".*Did you mean to pass `assign=True`.*")
+warnings.filterwarnings("ignore", message=".*resume_download.*deprecated.*")
+warnings.filterwarnings("ignore", message=".*Special tokens have been added.*")
+warnings.filterwarnings("ignore", message=".*word embeddings are fine-tuned.*")
+warnings.filterwarnings("ignore", message=".*cache-system uses symlinks.*")
+warnings.filterwarnings("ignore", message=".*To support symlinks on Windows.*")
+warnings.filterwarnings("ignore", message=".*Xet Storage is enabled.*")
+warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
+warnings.filterwarnings("ignore", category=FutureWarning, module="transformers")
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+os.environ['HF_HUB_DISABLE_SYMLINKS_WARNING'] = '1'
+os.environ['TRANSFORMERS_VERBOSITY'] = 'error'  # 减少transformers库的详细输出
 
 # 添加当前目录到Python路径
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -52,18 +68,20 @@ class BatchVideoProcessor:
     实现一次模型加载，多个视频批量推理
     """
     
-    def __init__(self, model_path: str, device: str = 'Auto', conv_mode: str = 'llava_llama_3'):
+    def __init__(self, model_path: str, device: str = 'Auto', conv_mode: str = 'llava_llama_3', enable_smart_loading: bool = True):
         """
-        初始化批量处理器
+        初始化批量视频处理器
         
         Args:
             model_path: 模型路径
-            device: 计算设备 ('Auto', 'CUDA' 或 'CPU')
+            device: 设备类型 ('Auto', 'CUDA', 'CPU')
             conv_mode: 对话模式
+            enable_smart_loading: 是否启用智能加载功能（False时可获得更快的预加载速度）
         """
         self.model_path = model_path
         self.device = self._resolve_device(device)
         self.conv_mode = conv_mode
+        self.enable_smart_loading = enable_smart_loading
         self.logger = logging.getLogger('BatchVideoProcessor')
         
         # 模型组件
@@ -158,14 +176,19 @@ class BatchVideoProcessor:
                 self.target_device = "cpu"
                 self.logger.info("使用CPU模式")
             
-            # 加载预训练模型（使用智能加载功能）
-            if smart_loading_available:
+            # 加载预训练模型
+            if smart_loading_available and self.enable_smart_loading:
                 self.logger.info("使用智能模型加载功能（支持镜像切换和错误重试）")
                 self.tokenizer, self.model, self.processor, self.context_len = load_model_with_smart_retry(
-                    model_path, None, model_name, device_map=device_map
+                    model_path, None, model_name, device_map=device_map, enable_smart_loading=True
+                )
+            elif smart_loading_available and not self.enable_smart_loading:
+                self.logger.info("智能加载已禁用，使用传统加载方式（更快的预加载速度）")
+                self.tokenizer, self.model, self.processor, self.context_len = load_model_with_smart_retry(
+                    model_path, None, model_name, device_map=device_map, enable_smart_loading=False
                 )
             else:
-                self.logger.info("使用传统模型加载方式")
+                self.logger.info("智能加载功能不可用，使用传统模型加载方式")
                 from run import load_pretrained_model
                 self.tokenizer, self.model, self.processor, self.context_len = load_pretrained_model(
                     model_path, None, model_name, device_map=device_map
@@ -404,19 +427,33 @@ class BatchVideoProcessor:
         
         total_videos = len(video_configs)
         self.logger.info(f"开始GPU优化批量处理 {total_videos} 个视频")
-        self.logger.info(f"批处理大小: {batch_size}, 预处理线程数: {max_workers}")
+        self.logger.info(f"用户设置 - 批处理大小: {batch_size}, 预处理线程数: {max_workers}")
+        self.logger.info(f"将按照 {batch_size} 个视频为一组进行批量处理")
         
-        # 动态调整批处理大小
+        # 动态调整批处理大小（保留用户设置的优先级）
+        original_batch_size = batch_size
         if self.device == 'cuda' and torch.cuda.is_available():
             gpu_memory_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
             if gpu_memory_gb <= 8:
-                batch_size = min(batch_size, 1)  # 低显存GPU限制批处理大小
-                self.logger.info(f"检测到低显存GPU ({gpu_memory_gb:.1f}GB)，调整批处理大小为: {batch_size}")
+                # 低显存GPU建议限制，但不强制覆盖用户设置
+                recommended_batch_size = 1
+                if batch_size > recommended_batch_size:
+                    self.logger.warning(f"检测到低显存GPU ({gpu_memory_gb:.1f}GB)，建议批处理大小不超过{recommended_batch_size}，当前设置: {batch_size}")
+                    self.logger.warning(f"如果遇到显存不足错误，请降低批处理大小到{recommended_batch_size}")
+                else:
+                    self.logger.info(f"检测到低显存GPU ({gpu_memory_gb:.1f}GB)，当前批处理大小: {batch_size} (适合)")
             elif gpu_memory_gb <= 16:
-                batch_size = min(batch_size, 2)
-                self.logger.info(f"检测到中等显存GPU ({gpu_memory_gb:.1f}GB)，调整批处理大小为: {batch_size}")
+                # 中等显存GPU建议限制
+                recommended_batch_size = 2
+                if batch_size > recommended_batch_size:
+                    self.logger.warning(f"检测到中等显存GPU ({gpu_memory_gb:.1f}GB)，建议批处理大小不超过{recommended_batch_size}，当前设置: {batch_size}")
+                    self.logger.warning(f"如果遇到显存不足错误，请降低批处理大小到{recommended_batch_size}")
+                else:
+                    self.logger.info(f"检测到中等显存GPU ({gpu_memory_gb:.1f}GB)，当前批处理大小: {batch_size} (适合)")
             else:
-                self.logger.info(f"检测到高显存GPU ({gpu_memory_gb:.1f}GB)，使用原始批处理大小: {batch_size}")
+                self.logger.info(f"检测到高显存GPU ({gpu_memory_gb:.1f}GB)，使用用户设置的批处理大小: {batch_size}")
+        else:
+            self.logger.info(f"使用用户设置的批处理大小: {batch_size}")
         
         results = []
         
@@ -674,8 +711,7 @@ class BatchVideoProcessor:
                     max_new_tokens = config.get('max_new_tokens')
                     if max_new_tokens is not None and max_new_tokens > 0:
                         params['max_new_tokens'] = max_new_tokens
-                    else:
-                        params['max_new_tokens'] = 200  # 默认值
+                    # 如果max_new_tokens为None或0，则不设置该参数，让模型自由生成
                     
                     # 生成
                     try:
@@ -785,6 +821,8 @@ def parse_batch_arguments():
                        help='计算设备 (默认: Auto)')
     parser.add_argument('--conv-mode', default='llava_llama_3',
                        help='对话模式 (默认: llava_llama_3)')
+    parser.add_argument('--disable-smart-loading', action='store_true',
+                       help='禁用智能加载功能，获得更快的预加载速度（适用于模型已缓存的情况）')
     
     # 输入参数
     parser.add_argument('--videos', nargs='+', help='视频文件路径列表')
@@ -944,10 +982,15 @@ def main():
             print(f"找到 {len(video_configs)} 个视频待处理")
         
         # 创建批量处理器
+        enable_smart_loading = not args.disable_smart_loading
+        if args.disable_smart_loading:
+            logger.info("智能加载已禁用，将使用传统加载方式获得更快的预加载速度")
+        
         processor = BatchVideoProcessor(
             model_path=args.model_path,
             device=args.device,
-            conv_mode=args.conv_mode
+            conv_mode=args.conv_mode,
+            enable_smart_loading=enable_smart_loading
         )
         
         # 加载模型（只加载一次）

@@ -123,7 +123,7 @@ except ImportError as e:
 
 # 应用程序信息
 APP_NAME = "视频处理爬虫工具"
-APP_VERSION = "4.1.1"
+APP_VERSION = "4.1.3"
 APP_AUTHOR = "开发团队"
 APP_DESCRIPTION = "集成网络爬虫和视频处理功能的工具"
 

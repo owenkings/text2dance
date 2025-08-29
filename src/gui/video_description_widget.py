@@ -249,7 +249,7 @@ class VideoDescriptionThread(QThread):
     video_completed = pyqtSignal(str, bool, str, str, float, str)  # 视频路径, 是否成功, 描述内容, 错误信息, 总耗时, 实际时间戳
     all_completed = pyqtSignal()
 
-    def __init__(self, videos, description_requirement, model_path, use_action_filter=False, generation_mode="random", description_length=300, num_frames=16, api_config=None, device="Auto", enable_multithread=False, thread_count=2, top_p=0.9, algorithm_type="本地模型", enable_gpu_optimization=False, gpu_batch_size=2, gpu_max_workers=4):
+    def __init__(self, videos, description_requirement, model_path, use_action_filter=False, generation_mode="random", description_length=300, num_frames=16, api_config=None, device="Auto", enable_multithread=False, thread_count=2, top_p=0.9, algorithm_type="本地模型", enable_gpu_optimization=False, gpu_batch_size=2, gpu_max_workers=4, enable_smart_loading=True, enable_fast_preload=True, gpu_device="自动检测"):
         super().__init__()
         self.videos = videos
         self.description_requirement = description_requirement
@@ -267,6 +267,9 @@ class VideoDescriptionThread(QThread):
         self.enable_gpu_optimization = enable_gpu_optimization  # 是否启用GPU优化
         self.gpu_batch_size = gpu_batch_size  # GPU批处理大小
         self.gpu_max_workers = gpu_max_workers  # GPU预处理线程数
+        self.enable_smart_loading = enable_smart_loading  # 是否启用智能加载
+        self.enable_fast_preload = enable_fast_preload  # 是否启用快速预加载
+        self.gpu_device = gpu_device  # GPU设备选择
         self.is_running = True
         self.results = []
     
@@ -483,21 +486,15 @@ class VideoDescriptionThread(QThread):
             # 添加这组视频的路径
             cmd.extend(['--videos'] + video_chunk)
             
-            # 根据描述长度要求动态设置max_new_tokens和更新提示词
-            # 字符数转换为大致的token数（中文约1.5字符/token，英文约4字符/token）
+            # 根据描述长度要求更新提示词（但不限制max_new_tokens）
             if self.description_length > 0:
-                estimated_tokens = max(100, int(self.description_length * 0.8))  # 保守估计
-                cmd.extend(['--max-new-tokens', str(estimated_tokens)])
-            else:
-                # 无限制生成，不设置max_new_tokens参数
-                pass
-            
-            # 根据描述长度设置token限制和提示词
-            if self.description_length > 0:
-                # 在提示词中添加长度要求
+                # 在提示词中添加长度建议，但不强制限制输出长度
                 enhanced_query = f"{self.description_requirement} The total length of the description should be approximately {self.description_length} characters."
                 cmd[cmd.index('--query') + 1] = enhanced_query
             # 如果是无限制模式，保持原始提示词不变
+            
+            # 注意：不再设置max_new_tokens限制，让模型自由生成完整描述
+            # 描述长度要求仅作为提示词中的建议，不应强制截断输出
             
             if self.num_frames > 0:
                 cmd.extend(['--num-frames', str(self.num_frames)])
@@ -666,7 +663,7 @@ class VideoDescriptionThread(QThread):
                             "role": "user",
                             "content": content
                         }],
-                        "max_tokens": 1000
+                        "max_tokens": 8192
                     }
                     
                     # 发送API请求
@@ -818,20 +815,18 @@ class VideoDescriptionThread(QThread):
             # 添加所有视频路径
             cmd.extend(['--videos'] + self.videos)
             
-            # 根据描述长度要求动态设置max_new_tokens和更新提示词
-            # 字符数转换为大致的token数（中文约1.5字符/token，英文约4字符/token）
+            # 根据描述长度要求更新提示词（但不限制max_new_tokens）
             if self.description_length > 0:
-                estimated_tokens = max(100, int(self.description_length * 0.8))  # 保守估计
-                cmd.extend(['--max-new-tokens', str(estimated_tokens)])
-                self.log_updated.emit(f"根据描述长度要求({self.description_length}字符)设置最大生成长度: {estimated_tokens} tokens")
-                
-                # 在提示词中添加长度要求
+                # 在提示词中添加长度建议，但不强制限制输出长度
                 enhanced_query = f"{self.description_requirement} The total length of the description should be approximately {self.description_length} characters."
                 cmd[cmd.index('--query') + 1] = enhanced_query
-                self.log_updated.emit(f"已在提示词中添加长度要求: {self.description_length}字符")
+                self.log_updated.emit(f"已在提示词中添加长度建议: {self.description_length}字符（不限制实际输出长度）")
             else:
-                # 无限制生成，不设置max_new_tokens参数，也不在提示词中添加长度限制
+                # 无限制生成模式
                 self.log_updated.emit("设置为无限制生成模式，不限制输出长度")
+            
+            # 注意：不再设置max_new_tokens限制，让模型自由生成完整描述
+            # 描述长度要求仅作为提示词中的建议，模型可以根据视频内容生成更完整的描述
             
             # 处理帧数设置
             if self.num_frames > 0:
@@ -1023,7 +1018,7 @@ class VideoDescriptionThread(QThread):
                         'content': prompt
                     }
                 ],
-                'max_tokens': 1000,
+                'max_tokens': 8192,
                 'temperature': 0.1
             }
             
@@ -1270,24 +1265,32 @@ class VideoDescriptionWidget(QWidget):
         
         # 算法类型从配置中读取，不再显示选择控件
         
-        # 功能选项 - 使用网格布局实现一行两列
+        # 功能选项 - 使用网格布局实现6行2列的精确对齐
         options_grid = QGridLayout()
+        options_grid.setColumnStretch(0, 1)  # 第一列占50%
+        options_grid.setColumnStretch(1, 1)  # 第二列占50%
+        options_grid.setHorizontalSpacing(20)  # 列间距
+        options_grid.setVerticalSpacing(10)   # 行间距
         
-        # 第一行：只保留动作描述 和 自适应播放控制
+        # 第一行：动作描述 和 自适应播放控制
         self.action_filter_checkbox = QCheckBox("只保留动作描述")
         self.action_filter_checkbox.setToolTip("过滤掉场景、物体等描述，专注于人物动作和行为分析")
         self.action_filter_checkbox.stateChanged.connect(self._sync_action_filter_to_center)
-        options_grid.addWidget(self.action_filter_checkbox, 0, 0)
+        options_grid.addWidget(self.action_filter_checkbox, 0, 0, Qt.AlignLeft)
         
         self.adaptive_playback_checkbox = QCheckBox("启用自适应播放控制")
         self.adaptive_playback_checkbox.setToolTip("使用PID控制器动态调整播放帧率，提供更平滑的播放体验")
         self.adaptive_playback_checkbox.setChecked(True)  # 默认启用
         self.adaptive_playback_checkbox.stateChanged.connect(self._toggle_adaptive_playback)
-        options_grid.addWidget(self.adaptive_playback_checkbox, 0, 1)
+        options_grid.addWidget(self.adaptive_playback_checkbox, 0, 1, Qt.AlignLeft)
         
-        # 第二行：模型选择功能（与计算设备对齐）
+        # 第二行：选择模型及其选项框
+        model_widget = QWidget()
+        model_layout = QHBoxLayout(model_widget)
+        model_layout.setContentsMargins(0, 0, 0, 0)
+        
         model_label = QLabel("选择模型:")
-        options_grid.addWidget(model_label, 1, 0)
+        model_layout.addWidget(model_label)
         
         self.model_selection_combo = QComboBox()
         self.model_selection_combo.addItems([
@@ -1298,15 +1301,20 @@ class VideoDescriptionWidget(QWidget):
         self.model_selection_combo.setCurrentText("ShareVideoGPT4（本地模型）")  # 默认选择本地模型
         self.model_selection_combo.setToolTip("选择用于视频描述的AI模型")
         self.model_selection_combo.currentTextChanged.connect(self._on_model_selection_changed)
-        options_grid.addWidget(self.model_selection_combo, 1, 1)
+        model_layout.addWidget(self.model_selection_combo)
+        model_layout.addStretch()
+        
+        options_grid.addWidget(model_widget, 1, 0, 1, 2)  # 跨两列
         
         # 加载已保存的自定义API模型
         self._load_custom_models()
         
-        options_layout.addLayout(options_grid)
+        # 第三行：计算设备（及其选项框）和采样参数（及其选项框）
+        # 计算设备选择（第三行第一列）
+        device_widget = QWidget()
+        device_layout = QHBoxLayout(device_widget)
+        device_layout.setContentsMargins(0, 0, 0, 0)
         
-        # 计算设备选择和采样参数（同一行）
-        device_layout = QHBoxLayout()
         device_label = QLabel("计算设备:")
         device_layout.addWidget(device_label)
         
@@ -1321,13 +1329,16 @@ class VideoDescriptionWidget(QWidget):
         )
         self.device_combo.currentTextChanged.connect(self._on_device_changed)
         device_layout.addWidget(self.device_combo)
+        device_layout.addStretch()
+        options_grid.addWidget(device_widget, 2, 0)
         
-        # 添加间距
-        device_layout.addSpacing(50)
+        # 采样参数（第三行第二列）
+        sampling_widget = QWidget()
+        sampling_layout = QHBoxLayout(sampling_widget)
+        sampling_layout.setContentsMargins(0, 0, 0, 0)
         
-        # Top-p参数控制（与计算设备同一行，但在第二列位置）
         top_p_label = QLabel("采样参数:")
-        device_layout.addWidget(top_p_label)
+        sampling_layout.addWidget(top_p_label)
         
         self.top_p_spinbox = QDoubleSpinBox()
         self.top_p_spinbox.setRange(0.8, 1.0)
@@ -1340,10 +1351,9 @@ class VideoDescriptionWidget(QWidget):
             "• 0.9: 平衡的描述详细程度（推荐）\n"
             "• 0.95-1.0: 生成更详细、更丰富的描述"
         )
-        device_layout.addWidget(self.top_p_spinbox)
-        
-        device_layout.addStretch()
-        options_layout.addLayout(device_layout)
+        sampling_layout.addWidget(self.top_p_spinbox)
+        sampling_layout.addStretch()
+        options_grid.addWidget(sampling_widget, 2, 1)
         
         # API配置区域（初始隐藏）
         self.api_config_group = QGroupBox("API配置")
@@ -1401,19 +1411,18 @@ class VideoDescriptionWidget(QWidget):
         self.api_config_group.setVisible(False)
         options_layout.addWidget(self.api_config_group)
         
-        # 多线程处理选项
-        multithread_layout = QHBoxLayout()
+        # 第四行：启用多线程（及其选项框）和GPU设备（及其选项框）
+        # 多线程选项（第四行第一列）
+        multithread_widget = QWidget()
+        multithread_layout = QHBoxLayout(multithread_widget)
+        multithread_layout.setContentsMargins(0, 0, 0, 0)
         
-        self.multithread_checkbox = QCheckBox("启用多线程处理")
+        self.multithread_checkbox = QCheckBox("启用多线程：")
         self.multithread_checkbox.setToolTip(
             "启用多线程处理可以同时处理多个视频，提高处理效率\n"
             "注意：仅在使用CUDA或Auto设备时可用，CPU模式不支持多线程"
         )
         multithread_layout.addWidget(self.multithread_checkbox)
-        
-        # 线程数量选择
-        thread_label = QLabel("线程数量:")
-        multithread_layout.addWidget(thread_label)
         
         self.thread_count_spinbox = QSpinBox()
         self.thread_count_spinbox.setMinimum(1)
@@ -1427,12 +1436,52 @@ class VideoDescriptionWidget(QWidget):
             "• 16GB以上显存：4-8个线程"
         )
         multithread_layout.addWidget(self.thread_count_spinbox)
-        
         multithread_layout.addStretch()
-        options_layout.addLayout(multithread_layout)
+        options_grid.addWidget(multithread_widget, 3, 0)
         
-        # GPU优化处理选项
-        gpu_optimization_layout = QHBoxLayout()
+        # GPU设备选择（第四行第二列）
+        gpu_device_widget = QWidget()
+        gpu_device_layout = QHBoxLayout(gpu_device_widget)
+        gpu_device_layout.setContentsMargins(0, 0, 0, 0)
+        
+        gpu_device_label = QLabel("GPU设备:")
+        gpu_device_layout.addWidget(gpu_device_label)
+        
+        self.gpu_device_combo = QComboBox()
+        # 初始化GPU设备列表
+        self._initialize_gpu_devices()
+        self.gpu_device_combo.setCurrentText("自动检测")
+        self.gpu_device_combo.setToolTip(
+            "选择要使用的GPU设备\n"
+            "• 自动检测：系统自动选择最佳设备\n"
+            "• cuda:0/cuda:1：指定特定GPU\n"
+            "• cpu：强制使用CPU处理"
+        )
+        gpu_device_layout.addWidget(self.gpu_device_combo)
+        gpu_device_layout.addStretch()
+        options_grid.addWidget(gpu_device_widget, 3, 1)
+        
+        # 第五行：启用智能加速和启用快速预加载
+        self.smart_loading_checkbox = QCheckBox("启用智能加速")
+        self.smart_loading_checkbox.setChecked(True)  # 默认启用
+        self.smart_loading_checkbox.setToolTip(
+            "智能加载可以根据系统资源动态调整加载策略\n"
+            "自动优化内存使用和加载速度，提升整体性能"
+        )
+        options_grid.addWidget(self.smart_loading_checkbox, 4, 0)
+        
+        self.fast_preload_checkbox = QCheckBox("启用快速预加载")
+        self.fast_preload_checkbox.setChecked(True)  # 默认启用
+        self.fast_preload_checkbox.setToolTip(
+            "快速预加载可以提前加载下一批数据\n"
+            "减少等待时间，提升处理流畅度"
+        )
+        options_grid.addWidget(self.fast_preload_checkbox, 4, 1)
+        
+        # 第六行：启用GPU优化及其选项框（单独一行）
+        gpu_optimization_widget = QWidget()
+        gpu_optimization_layout = QHBoxLayout(gpu_optimization_widget)
+        gpu_optimization_layout.setContentsMargins(0, 0, 0, 0)
         
         self.gpu_optimization_checkbox = QCheckBox("启用GPU优化批处理")
         self.gpu_optimization_checkbox.setToolTip(
@@ -1473,9 +1522,12 @@ class VideoDescriptionWidget(QWidget):
             "建议设置为CPU核心数的1-2倍"
         )
         gpu_optimization_layout.addWidget(self.gpu_max_workers_spinbox)
-        
         gpu_optimization_layout.addStretch()
-        options_layout.addLayout(gpu_optimization_layout)
+        
+        options_grid.addWidget(gpu_optimization_widget, 5, 0, 1, 2)  # 跨两列
+        
+        # 将网格布局添加到选项布局中
+        options_layout.addLayout(options_grid)
         
         # 初始化多线程和GPU优化选项状态
         self._on_device_changed()
@@ -1514,11 +1566,12 @@ class VideoDescriptionWidget(QWidget):
             "  - >60秒视频：32帧（全面覆盖，适合长视频）<br>"
             "• <b>手动设置</b>：推荐范围8-32帧，帧数越多描述越详细但处理时间越长<br><br>"
             
-            "<b>📝 最大生成长度：</b><br>"
-            "控制AI生成描述的详细程度和文本长度：<br>"
-            "• <b>无限制（0）</b>：允许生成任意长度的描述，适合需要详尽分析的场景<br>"
-            "• <b>限制模式</b>：推荐100-500个token，确保描述简洁精准<br>"
-            "• 较短设置（100-200）适合快速概览，较长设置（300-500）适合详细分析<br><br>"
+            "<b>📝 描述长度建议：</b><br>"
+            "向AI建议生成描述的大致长度，但不强制限制：<br>"
+            "• <b>无限制生成</b>：不给出长度建议，让AI根据视频内容自由发挥<br>"
+            "• <b>建议模式</b>：给出长度建议（如150-800字符），AI会尽量遵循但不会被强制截断<br>"
+            "• AI可能根据视频复杂度生成比建议更长或更短的描述<br>"
+            "• 这确保了描述的完整性，不会因为长度限制而中途截断<br><br>"
             
             "<b>⚡ 功能选项说明：</b><br>"
             "• <b>启用自动保存</b>：自动保存视频列表的输出内容到文件，支持多种格式<br>"
@@ -1678,19 +1731,21 @@ class VideoDescriptionWidget(QWidget):
             "混合策略: 结合确定性和随机性"
         )
         
-        tokens_label = QLabel("描述长度要求:")
+        tokens_label = QLabel("描述长度建议:")
         tokens_label.setStyleSheet("font-weight: bold; color: #2c3e50;")
         self.center_description_length_combo = QComboBox()
         self.center_description_length_combo.addItems(["简要描述(150字符)", "标准描述(300字符)", "详细描述(500字符)", "非常详细(800字符)", "无限制生成", "自定义长度"])
         self.center_description_length_combo.setCurrentText("标准描述(300字符)")
         self.center_description_length_combo.setToolTip(
-            "选择描述的详细程度:\n"
-            "• 简要描述: 约150字符，快速概览\n"
-            "• 标准描述: 约300字符，平衡详细度\n"
-            "• 详细描述: 约500字符，全面分析\n"
-            "• 非常详细: 约800字符，深度描述\n"
-            "• 无限制生成: 不限制输出长度，生成完整详细描述\n"
-            "• 自定义长度: 手动设置字符数量"
+            "选择描述的建议长度（仅作为提示，不强制限制输出）:\n"
+            "• 简要描述: 建议约150字符，AI会尽量简洁\n"
+            "• 标准描述: 建议约300字符，平衡详细度\n"
+            "• 详细描述: 建议约500字符，全面分析\n"
+            "• 非常详细: 建议约800字符，深度描述\n"
+            "• 无限制生成: 不给出长度建议，让AI自由发挥\n"
+            "• 自定义长度: 手动设置建议字符数量\n\n"
+            "注意：这些设置只是给AI的建议，AI仍可根据视频内容\n"
+            "生成更完整的描述，不会被强制截断。"
         )
         self.center_description_length_combo.currentTextChanged.connect(self._on_description_length_changed)
         
@@ -1701,7 +1756,7 @@ class VideoDescriptionWidget(QWidget):
         self.center_custom_length_spinbox.setSuffix(" 字符")
         self.center_custom_length_spinbox.setSpecialValueText("无限制")
         self.center_custom_length_spinbox.setVisible(False)
-        self.center_custom_length_spinbox.setToolTip("自定义描述长度（字符数）\n0: 无限制生成\n100-2000: 指定字符数限制")
+        self.center_custom_length_spinbox.setToolTip("自定义描述建议长度（字符数）\n0: 无限制生成，不给出长度建议\n100-2000: 建议字符数（AI可能生成更多内容）\n\n注意：这只是给AI的建议，不会强制截断输出")
         
         # 第二行：采样帧数和自动保存选项
         frames_label = QLabel("采样帧数:")
@@ -1937,6 +1992,36 @@ class VideoDescriptionWidget(QWidget):
                 if hasattr(self, 'api_model_combo'):
                     self.api_model_combo.setCurrentText(api_model)
                     
+                # 加载智能加载配置
+                enable_smart_loading = self.config_manager.get('algorithms.video_description.enable_smart_loading', True)
+                enable_fast_preload = self.config_manager.get('algorithms.video_description.enable_fast_preload', True)
+                gpu_device = self.config_manager.get('algorithms.video_description.gpu_device', '自动检测')
+                
+                if hasattr(self, 'smart_loading_checkbox'):
+                    self.smart_loading_checkbox.setChecked(enable_smart_loading)
+                if hasattr(self, 'fast_preload_checkbox'):
+                    self.fast_preload_checkbox.setChecked(enable_fast_preload)
+                if hasattr(self, 'gpu_device_combo'):
+                    self.gpu_device_combo.setCurrentText(gpu_device)
+                    
+                # 加载多线程和GPU优化配置
+                enable_multithread = self.config_manager.get('algorithms.video_description.enable_multithread', False)
+                thread_count = self.config_manager.get('algorithms.video_description.thread_count', 2)
+                enable_gpu_optimization = self.config_manager.get('algorithms.video_description.enable_gpu_optimization', False)
+                gpu_batch_size = self.config_manager.get('algorithms.video_description.gpu_batch_size', 2)
+                gpu_max_workers = self.config_manager.get('algorithms.video_description.gpu_max_workers', 4)
+                
+                if hasattr(self, 'multithread_checkbox'):
+                    self.multithread_checkbox.setChecked(enable_multithread)
+                if hasattr(self, 'thread_count_spinbox'):
+                    self.thread_count_spinbox.setValue(thread_count)
+                if hasattr(self, 'gpu_optimization_checkbox'):
+                    self.gpu_optimization_checkbox.setChecked(enable_gpu_optimization)
+                if hasattr(self, 'gpu_batch_size_spinbox'):
+                    self.gpu_batch_size_spinbox.setValue(gpu_batch_size)
+                if hasattr(self, 'gpu_max_workers_spinbox'):
+                    self.gpu_max_workers_spinbox.setValue(gpu_max_workers)
+                    
         except Exception as e:
             self._log_message(f"加载配置失败: {str(e)}")
     
@@ -1951,6 +2036,25 @@ class VideoDescriptionWidget(QWidget):
         # 连接GPU优化选项信号
         if hasattr(self, 'gpu_optimization_checkbox'):
             self.gpu_optimization_checkbox.toggled.connect(self._on_gpu_optimization_toggled)
+            
+        # 连接智能加载设置信号
+        if hasattr(self, 'smart_loading_checkbox'):
+            self.smart_loading_checkbox.toggled.connect(self._save_api_config)
+        if hasattr(self, 'fast_preload_checkbox'):
+            self.fast_preload_checkbox.toggled.connect(self._save_api_config)
+        if hasattr(self, 'gpu_device_combo'):
+            self.gpu_device_combo.currentTextChanged.connect(self._on_gpu_device_changed)
+            self.gpu_device_combo.currentTextChanged.connect(self._save_api_config)
+            
+        # 连接多线程和GPU优化设置信号
+        if hasattr(self, 'multithread_checkbox'):
+            self.multithread_checkbox.toggled.connect(self._save_api_config)
+        if hasattr(self, 'thread_count_spinbox'):
+            self.thread_count_spinbox.valueChanged.connect(self._save_api_config)
+        if hasattr(self, 'gpu_batch_size_spinbox'):
+            self.gpu_batch_size_spinbox.valueChanged.connect(self._save_api_config)
+        if hasattr(self, 'gpu_max_workers_spinbox'):
+            self.gpu_max_workers_spinbox.valueChanged.connect(self._save_api_config)
         
         # 连接配置变化信号
         try:
@@ -1985,6 +2089,11 @@ class VideoDescriptionWidget(QWidget):
         if device == "CUDA":
             self.multithread_checkbox.setEnabled(True)
             self.thread_count_spinbox.setEnabled(True)
+            # 启用智能加载选项
+            if hasattr(self, 'smart_loading_checkbox'):
+                self.smart_loading_checkbox.setEnabled(True)
+                self.fast_preload_checkbox.setEnabled(True)
+                self.gpu_device_combo.setEnabled(True)
             # 启用GPU优化选项
             if hasattr(self, 'gpu_optimization_checkbox'):
                 self.gpu_optimization_checkbox.setEnabled(True)
@@ -1995,6 +2104,16 @@ class VideoDescriptionWidget(QWidget):
             self.multithread_checkbox.setEnabled(False)
             self.multithread_checkbox.setChecked(False)
             self.thread_count_spinbox.setEnabled(False)
+            # 智能加载选项在Auto模式下仍可用，CPU模式下禁用
+            if hasattr(self, 'smart_loading_checkbox'):
+                if device == "Auto":
+                    self.smart_loading_checkbox.setEnabled(True)
+                    self.fast_preload_checkbox.setEnabled(True)
+                    self.gpu_device_combo.setEnabled(True)
+                else:  # CPU模式
+                    self.smart_loading_checkbox.setEnabled(False)
+                    self.fast_preload_checkbox.setEnabled(False)
+                    self.gpu_device_combo.setEnabled(False)
             # 禁用GPU优化选项
             if hasattr(self, 'gpu_optimization_checkbox'):
                 self.gpu_optimization_checkbox.setEnabled(False)
@@ -2007,6 +2126,103 @@ class VideoDescriptionWidget(QWidget):
         if hasattr(self, 'gpu_batch_size_spinbox') and hasattr(self, 'gpu_max_workers_spinbox'):
             self.gpu_batch_size_spinbox.setEnabled(checked)
             self.gpu_max_workers_spinbox.setEnabled(checked)
+    
+    def _on_gpu_device_changed(self, device_name: str):
+        """GPU设备选择变化处理"""
+        try:
+            if device_name == "自动检测":
+                self._log_message("🔄 GPU设备: 已选择自动检测模式")
+                self._perform_auto_gpu_detection()
+            elif device_name.startswith("cuda:"):
+                gpu_id = device_name.split(":")[1]
+                self._log_message(f"🎯 GPU设备: 已手动选择 {device_name}")
+                self._show_gpu_device_info(int(gpu_id))
+            elif device_name == "cpu":
+                self._log_message("💻 GPU设备: 已选择CPU模式，将不使用GPU加速")
+            else:
+                self._log_message(f"⚙️ GPU设备: 已选择 {device_name}")
+        except Exception as e:
+            self._log_message(f"❌ GPU设备选择处理失败: {str(e)}")
+    
+    def _perform_auto_gpu_detection(self):
+        """执行自动GPU检测并显示详细信息"""
+        try:
+            import torch
+            
+            if torch.cuda.is_available():
+                device_count = torch.cuda.device_count()
+                self._log_message(f"  🔍 自动检测: 发现 {device_count} 个可用GPU设备")
+                
+                # 选择最佳GPU设备
+                best_gpu = 0
+                max_memory = 0
+                best_device_name = ""
+                
+                for i in range(device_count):
+                    device_name = torch.cuda.get_device_name(i)
+                    device_memory = torch.cuda.get_device_properties(i).total_memory / (1024**3)
+                    
+                    self._log_message(f"    📱 GPU {i}: {device_name} ({device_memory:.1f}GB)")
+                    
+                    if device_memory > max_memory:
+                        max_memory = device_memory
+                        best_gpu = i
+                        best_device_name = device_name
+                
+                # 显示自动选择结果
+                self._log_message(f"  ✅ 自动选择: cuda:{best_gpu} - {best_device_name} ({max_memory:.1f}GB)")
+                
+                # 显示GPU状态信息
+                try:
+                    torch.cuda.set_device(best_gpu)
+                    memory_allocated = torch.cuda.memory_allocated(best_gpu) / (1024**3)
+                    memory_reserved = torch.cuda.memory_reserved(best_gpu) / (1024**3)
+                    self._log_message(f"    📊 显存状态: 已分配 {memory_allocated:.2f}GB / 已保留 {memory_reserved:.2f}GB")
+                except Exception as e:
+                    self._log_message(f"    ⚠️ 无法获取显存状态: {str(e)}")
+                    
+            else:
+                self._log_message("  ❌ 自动检测: 未发现可用的CUDA设备，将回退到CPU模式")
+                
+        except ImportError:
+            self._log_message("  ❌ 自动检测失败: 无法导入PyTorch")
+        except Exception as e:
+            self._log_message(f"  ❌ 自动检测失败: {str(e)}")
+    
+    def _show_gpu_device_info(self, gpu_id: int):
+        """显示指定GPU设备的详细信息"""
+        try:
+            import torch
+            
+            if torch.cuda.is_available() and gpu_id < torch.cuda.device_count():
+                device_name = torch.cuda.get_device_name(gpu_id)
+                device_memory = torch.cuda.get_device_properties(gpu_id).total_memory / (1024**3)
+                
+                self._log_message(f"  📱 设备信息: {device_name} ({device_memory:.1f}GB 显存)")
+                
+                # 显示计算能力
+                try:
+                    compute_capability = torch.cuda.get_device_capability(gpu_id)
+                    self._log_message(f"  💻 计算能力: {compute_capability[0]}.{compute_capability[1]}")
+                except Exception:
+                    pass
+                
+                # 显示当前显存使用情况
+                try:
+                    torch.cuda.set_device(gpu_id)
+                    memory_allocated = torch.cuda.memory_allocated(gpu_id) / (1024**3)
+                    memory_reserved = torch.cuda.memory_reserved(gpu_id) / (1024**3)
+                    self._log_message(f"  📊 显存状态: 已分配 {memory_allocated:.2f}GB / 已保留 {memory_reserved:.2f}GB")
+                except Exception as e:
+                    self._log_message(f"  ⚠️ 无法获取显存状态: {str(e)}")
+                    
+            else:
+                self._log_message(f"  ❌ GPU {gpu_id} 不可用或不存在")
+                
+        except ImportError:
+            self._log_message(f"  ❌ 无法获取GPU {gpu_id} 信息: PyTorch未安装")
+        except Exception as e:
+            self._log_message(f"  ❌ 获取GPU {gpu_id} 信息失败: {str(e)}")
     
     def refresh_ui_state(self):
         """刷新UI状态（供外部调用）"""
@@ -2132,8 +2348,29 @@ class VideoDescriptionWidget(QWidget):
                 self.config_manager.set('algorithms.video_description.api_endpoint', self.api_endpoint_edit.text())
                 self.config_manager.set('algorithms.video_description.api_key', self.api_key_edit.text())
                 self.config_manager.set('algorithms.video_description.api_model', self.api_model_combo.currentText())
+                
+                # 保存智能加载配置
+                if hasattr(self, 'smart_loading_checkbox'):
+                    self.config_manager.set('algorithms.video_description.enable_smart_loading', self.smart_loading_checkbox.isChecked())
+                if hasattr(self, 'fast_preload_checkbox'):
+                    self.config_manager.set('algorithms.video_description.enable_fast_preload', self.fast_preload_checkbox.isChecked())
+                if hasattr(self, 'gpu_device_combo'):
+                    self.config_manager.set('algorithms.video_description.gpu_device', self.gpu_device_combo.currentText())
+                    
+                # 保存多线程和GPU优化配置
+                if hasattr(self, 'multithread_checkbox'):
+                    self.config_manager.set('algorithms.video_description.enable_multithread', self.multithread_checkbox.isChecked())
+                if hasattr(self, 'thread_count_spinbox'):
+                    self.config_manager.set('algorithms.video_description.thread_count', self.thread_count_spinbox.value())
+                if hasattr(self, 'gpu_optimization_checkbox'):
+                    self.config_manager.set('algorithms.video_description.enable_gpu_optimization', self.gpu_optimization_checkbox.isChecked())
+                if hasattr(self, 'gpu_batch_size_spinbox'):
+                    self.config_manager.set('algorithms.video_description.gpu_batch_size', self.gpu_batch_size_spinbox.value())
+                if hasattr(self, 'gpu_max_workers_spinbox'):
+                    self.config_manager.set('algorithms.video_description.gpu_max_workers', self.gpu_max_workers_spinbox.value())
+                    
         except Exception as e:
-            self._log_message(f"保存API配置失败: {str(e)}")
+            self._log_message(f"保存配置失败: {str(e)}")
     
     def _upload_video_files(self):
         """上传视频文件"""
@@ -2834,6 +3071,11 @@ class VideoDescriptionWidget(QWidget):
         enable_multithread = self.multithread_checkbox.isChecked() and self.multithread_checkbox.isEnabled()
         thread_count = self.thread_count_spinbox.value()
         
+        # 获取智能加载设置
+        enable_smart_loading = self.smart_loading_checkbox.isChecked()
+        enable_fast_preload = self.fast_preload_checkbox.isChecked()
+        gpu_device = self.gpu_device_combo.currentText()
+        
         # 获取GPU优化设置
         enable_gpu_optimization = False
         gpu_batch_size = 4
@@ -2867,7 +3109,10 @@ class VideoDescriptionWidget(QWidget):
             algorithm_type,
             enable_gpu_optimization,
             gpu_batch_size,
-            gpu_max_workers
+            gpu_max_workers,
+            enable_smart_loading,
+            enable_fast_preload,
+            gpu_device
         )
         
         if hasattr(self, 'center_progress_bar'):
@@ -3158,6 +3403,71 @@ class VideoDescriptionWidget(QWidget):
         import re
         plain_text = re.sub(r'<[^>]+>', '', html_message)
         self.status_changed.emit(plain_text)
+    
+    def _initialize_gpu_devices(self):
+        """初始化GPU设备列表并进行自动检测"""
+        try:
+            # 导入torch来检测GPU
+            import torch
+            
+            # 基础设备列表
+            devices = ["自动检测", "cpu"]
+            
+            # 检测CUDA设备
+            if torch.cuda.is_available():
+                device_count = torch.cuda.device_count()
+                self._log_message(f"🔍 GPU设备检测: 发现 {device_count} 个CUDA设备")
+                
+                for i in range(device_count):
+                    device_name = torch.cuda.get_device_name(i)
+                    device_memory = torch.cuda.get_device_properties(i).total_memory / (1024**3)
+                    devices.append(f"cuda:{i}")
+                    
+                    # 记录详细的GPU信息到日志
+                    self._log_message(f"  📱 GPU {i}: {device_name} ({device_memory:.1f}GB 显存)")
+                    
+                    # 检测GPU计算能力
+                    try:
+                        compute_capability = torch.cuda.get_device_capability(i)
+                        self._log_message(f"    💻 计算能力: {compute_capability[0]}.{compute_capability[1]}")
+                    except Exception as e:
+                        self._log_message(f"    ⚠️ 无法获取计算能力信息: {str(e)}")
+                
+                # 显示当前CUDA版本信息
+                cuda_version = torch.version.cuda
+                if cuda_version:
+                    self._log_message(f"  🔧 CUDA版本: {cuda_version}")
+                
+                # 显示推荐的GPU设备
+                if device_count > 0:
+                    # 选择显存最大的GPU作为推荐
+                    best_gpu = 0
+                    max_memory = 0
+                    for i in range(device_count):
+                        memory = torch.cuda.get_device_properties(i).total_memory / (1024**3)
+                        if memory > max_memory:
+                            max_memory = memory
+                            best_gpu = i
+                    
+                    self._log_message(f"  ✅ 推荐使用: cuda:{best_gpu} (显存最大: {max_memory:.1f}GB)")
+            else:
+                self._log_message("🔍 GPU设备检测: 未发现可用的CUDA设备，将使用CPU模式")
+                
+                # 检查是否安装了CUDA版本的PyTorch
+                if hasattr(torch.version, 'cuda') and torch.version.cuda is None:
+                    self._log_message("  ⚠️ 检测到CPU版本的PyTorch，如需GPU加速请安装CUDA版本")
+            
+            # 添加设备到下拉框
+            self.gpu_device_combo.addItems(devices)
+            
+        except ImportError:
+            # 如果无法导入torch，使用默认设备列表
+            self._log_message("⚠️ 无法导入PyTorch，使用默认GPU设备列表")
+            self.gpu_device_combo.addItems(["自动检测", "cuda:0", "cuda:1", "cpu"])
+        except Exception as e:
+            # 其他异常情况
+            self._log_message(f"❌ GPU设备检测失败: {str(e)}")
+            self.gpu_device_combo.addItems(["自动检测", "cuda:0", "cuda:1", "cpu"])
     
     def closeEvent(self, event):
         """窗口关闭事件"""

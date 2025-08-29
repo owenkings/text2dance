@@ -231,8 +231,8 @@ class ShareGPT4VideoAlgorithm(VideoDescriptionAlgorithm):
                 description_lines.append(line)
         
         if description_lines:
-            # 取最后的描述内容
-            return '\n'.join(description_lines[-3:])  # 取最后3行作为描述
+            # 返回完整的描述内容，不进行截断
+            return '\n'.join(description_lines)  # 返回所有描述行
         
         # 如果没有找到明确的描述，尝试从完整输出中提取
         for line in reversed(lines):

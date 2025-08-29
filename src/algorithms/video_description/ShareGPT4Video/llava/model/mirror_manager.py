@@ -478,16 +478,31 @@ class MirrorManager:
             logger.error(f"清理缓存失败: {e}")
             return False
     
-    def initialize_smart_mirror(self) -> bool:
-        """初始化智能镜像系统"""
+    def initialize_smart_mirror(self, fast_mode: bool = False) -> bool:
+        """初始化智能镜像系统
+        
+        Args:
+            fast_mode: 快速模式，跳过网络检测，适用于模型缓存完整的情况
+        """
         # 检查是否已经初始化过
         if self._initialized:
             print("✅ 智能镜像系统已初始化，跳过重复初始化")
             return True
             
-        print("\n🚀 初始化智能镜像管理系统...")
-        
         try:
+            if fast_mode:
+                print("\n⚡ 快速模式：跳过网络检测，使用默认镜像配置")
+                # 直接使用默认的HuggingFace镜像
+                if self.setup_mirror_environment('huggingface'):
+                    self._initialized = True
+                    print("✅ 快速镜像配置完成")
+                    return True
+                else:
+                    print("⚠️ 快速配置失败，回退到完整初始化")
+                    # 回退到完整初始化
+            
+            print("\n🚀 初始化智能镜像管理系统...")
+            
             # 1. 检查缓存空间
             if not self.check_cache_space():
                 return False

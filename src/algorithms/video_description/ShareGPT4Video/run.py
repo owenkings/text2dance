@@ -15,6 +15,7 @@ from decord import VideoReader, cpu
 from PIL import Image
 
 # 抑制常见警告
+# 过滤各种警告信息
 warnings.filterwarnings("ignore", message=".*copying from a non-meta parameter.*")
 warnings.filterwarnings("ignore", message=".*Did you mean to pass `assign=True`.*")
 warnings.filterwarnings("ignore", message=".*resume_download.*deprecated.*")
@@ -22,7 +23,44 @@ warnings.filterwarnings("ignore", message=".*Special tokens have been added.*")
 warnings.filterwarnings("ignore", message=".*cache-system uses symlinks.*")
 warnings.filterwarnings("ignore", message=".*To support symlinks on Windows.*")
 warnings.filterwarnings("ignore", message=".*Xet Storage is enabled.*")
+warnings.filterwarnings("ignore", message=".*word embeddings are fine-tuned.*")
+warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
+warnings.filterwarnings("ignore", category=FutureWarning, module="transformers")
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 os.environ['HF_HUB_DISABLE_SYMLINKS_WARNING'] = '1'
+os.environ['TRANSFORMERS_VERBOSITY'] = 'error'  # 减少transformers库的详细输出
+
+# 自定义安全的日志处理器
+class SafeStreamHandler(logging.StreamHandler):
+    """安全的流处理器，处理缓冲区分离错误"""
+    
+    def emit(self, record):
+        try:
+            super().emit(record)
+        except (ValueError, OSError, AttributeError) as e:
+            if "underlying buffer has been detached" in str(e):
+                # 忽略缓冲区分离错误，这通常发生在程序退出时
+                pass
+            else:
+                # 其他错误尝试用基本print输出
+                try:
+                    print(f"[LOG ERROR] {self.format(record)}")
+                except:
+                    pass
+
+class SafeFileHandler(logging.FileHandler):
+    """安全的文件处理器，处理各种IO错误"""
+    
+    def emit(self, record):
+        try:
+            super().emit(record)
+        except (ValueError, OSError, AttributeError) as e:
+            if "underlying buffer has been detached" not in str(e):
+                # 非缓冲区分离错误，尝试用基本print输出
+                try:
+                    print(f"[FILE LOG ERROR] {self.format(record)}")
+                except:
+                    pass
 
 # 设置详细日志记录
 def setup_comprehensive_logging(log_level='INFO', silent_mode=False, enable_file_log=True):
@@ -71,17 +109,46 @@ def setup_comprehensive_logging(log_level='INFO', silent_mode=False, enable_file
     
     # 添加文件处理器（记录所有级别）
     if enable_file_log:
-        file_handler = logging.FileHandler(log_file, encoding='utf-8')
-        file_handler.setLevel(logging.DEBUG)
-        file_handler.setFormatter(detailed_formatter)
-        root_logger.addHandler(file_handler)
+        try:
+            file_handler = SafeFileHandler(log_file, encoding='utf-8')
+            file_handler.setLevel(logging.DEBUG)
+            file_handler.setFormatter(detailed_formatter)
+            root_logger.addHandler(file_handler)
+        except Exception as e:
+            print(f"Warning: Failed to create file handler: {e}")
     
     # 添加控制台处理器（根据模式决定是否显示）
     if not silent_mode:
-        console_handler = logging.StreamHandler()
-        console_handler.setLevel(level_map.get(log_level.upper(), logging.INFO))
-        console_handler.setFormatter(simple_formatter)
-        root_logger.addHandler(console_handler)
+        try:
+            console_handler = SafeStreamHandler()
+            console_handler.setLevel(level_map.get(log_level.upper(), logging.INFO))
+            console_handler.setFormatter(simple_formatter)
+            root_logger.addHandler(console_handler)
+        except Exception as e:
+            print(f"Warning: Failed to create console handler: {e}")
+    
+    # 设置日志记录器的异常处理
+    def handle_logging_error(record):
+        """处理日志记录错误"""
+        try:
+            # 尝试使用基本的print输出
+            print(f"[LOGGING ERROR] Failed to log: {record.getMessage()}")
+        except:
+            pass  # 如果连print都失败，则完全忽略
+    
+    # 为根日志记录器设置错误处理
+    class SafeLogger(logging.Logger):
+        def handle(self, record):
+            try:
+                super().handle(record)
+            except (ValueError, OSError, AttributeError) as e:
+                if "underlying buffer has been detached" in str(e):
+                    # 忽略缓冲区分离错误
+                    pass
+                else:
+                    handle_logging_error(record)
+    
+    # 不直接替换Logger类，而是在处理器级别处理错误
     
     return logging.getLogger('ShareGPT4Video')
 
@@ -104,19 +171,30 @@ class LoggingCapture:
                 if not self.silent:
                     # 过滤重复和无用信息
                     if not any(skip_word in text.lower() for skip_word in 
-                              ['### lm output text:', '=== 视频描述结果 ===', '===================']):
+                              ['### lm output text:', '=== 视频描述结果 ===', '===================']):  
                         self.logger.log(self.level, f"OUTPUT: {text.strip()}")
             self.buffer.write(text)
-        except (ValueError, OSError):
-            # 忽略buffer已分离的错误
+        except (ValueError, OSError, AttributeError) as e:
+            # 忽略buffer已分离的错误和其他IO错误
+            if "underlying buffer has been detached" not in str(e):
+                # 只记录非缓冲区分离的错误
+                try:
+                    self.logger.debug(f"LoggingCapture write error (ignored): {e}")
+                except:
+                    pass  # 如果连日志都无法写入，则完全忽略
             pass
         
     def flush(self):
         if not self._closed:
             try:
                 self.buffer.flush()
-            except (ValueError, OSError):
-                # 忽略buffer已分离的错误
+            except (ValueError, OSError, AttributeError) as e:
+                # 忽略buffer已分离的错误和其他IO错误
+                if "underlying buffer has been detached" not in str(e):
+                    try:
+                        self.logger.debug(f"LoggingCapture flush error (ignored): {e}")
+                    except:
+                        pass
                 pass
         
     def getvalue(self):
@@ -243,7 +321,7 @@ def resize_image_grid(image, max_length=1920):
 
 
 def video_answer(prompt, model, processor, tokenizer, img_grid, do_sample=True,
-                 max_new_tokens=200, num_beams=1, top_p=0.9,
+                 max_new_tokens=None, num_beams=1, top_p=0.9,
                  temperature=1.0, print_res=False, silent_mode=False, **kwargs):
     # 获取日志记录器
     logger = logging.getLogger('ShareGPT4Video.video_answer')
@@ -287,18 +365,29 @@ def video_answer(prompt, model, processor, tokenizer, img_grid, do_sample=True,
         logger.info(f"最终图像张量形状: {image_tensor.shape}, 数据类型: {image_tensor.dtype}")
         
         logger.info("开始模型生成...")
-        output_ids = model.generate(
-            input_ids,
-            images=image_tensor,
-            image_sizes=[image_size],
-            do_sample=do_sample,
-            temperature=temperature,
-            top_p=top_p,
-            num_beams=num_beams,
-            max_new_tokens=max_new_tokens,
-            pad_token_id=pad_token_id,
-            use_cache=True,
-            **kwargs)
+        
+        # 构建生成参数
+        generate_params = {
+            'input_ids': input_ids,
+            'images': image_tensor,
+            'image_sizes': [image_size],
+            'do_sample': do_sample,
+            'temperature': temperature,
+            'top_p': top_p,
+            'num_beams': num_beams,
+            'pad_token_id': pad_token_id,
+            'use_cache': True,
+            **kwargs
+        }
+        
+        # 只有当max_new_tokens不为None时才添加该参数
+        if max_new_tokens is not None:
+            generate_params['max_new_tokens'] = max_new_tokens
+            logger.info(f"设置max_new_tokens限制: {max_new_tokens}")
+        else:
+            logger.info("未设置max_new_tokens限制，模型将自由生成")
+        
+        output_ids = model.generate(**generate_params)
         
         logger.info(f"生成的输出ID形状: {output_ids.shape}")
         
@@ -568,8 +657,8 @@ def parse_arguments():
                        help='nucleus采样的累积概率阈值 (默认: 0.9)')
     parser.add_argument('--temperature', type=float, default=1.0,
                        help='生成温度 (默认: 1.0)')
-    parser.add_argument('--max_new_tokens', type=int, default=None,
-                       help='最大生成token数 (默认: 无限制)')
+    parser.add_argument('--max_new_tokens', type=int, default=8192,
+                       help='最大生成token数 (默认: 8192，支持超长描述生成)')
     parser.add_argument('--num_beams', type=int, default=1,
                        help='束搜索的束数 (默认: 1)')
     parser.add_argument('--num_frames', type=int, default=16,

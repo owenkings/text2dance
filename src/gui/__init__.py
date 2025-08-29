@@ -18,7 +18,7 @@ from .plugin_manager import PluginManagerWidget
 # from .task_manager import TaskManagerWidget  # task_manager已移除
 
 # 版本信息
-__version__ = "4.1.1"
+__version__ = "4.1.3"
 __author__ = "开发团队"
 
 # 导出的组件
