@@ -663,7 +663,7 @@ class VideoDescriptionThread(QThread):
                             "role": "user",
                             "content": content
                         }],
-                        "max_tokens": 8192
+                        "max_tokens": 32768
                     }
                     
                     # 发送API请求
@@ -1018,7 +1018,7 @@ class VideoDescriptionThread(QThread):
                         'content': prompt
                     }
                 ],
-                'max_tokens': 8192,
+                'max_tokens': 32768,
                 'temperature': 0.1
             }
             
@@ -1105,6 +1105,11 @@ class VideoDescriptionWidget(QWidget):
         self.video_results = {}  # 存储视频处理结果
         self.processing_thread = None
         self.is_all_selected = False  # 全选状态标记
+        
+        # 日志文件管理
+        self.log_file_path = None
+        self.log_file_handle = None
+        self.log_monitoring_enabled = False
         
         # OpenCV视频播放相关
         self.video_capture = None
@@ -1906,6 +1911,10 @@ class VideoDescriptionWidget(QWidget):
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
         self.log_text.setAcceptRichText(True)  # 启用HTML格式支持
+        
+        # 连接文本变化信号到日志文件写入
+        self.log_text.textChanged.connect(self._on_log_text_changed)
+        
         log_layout.addWidget(self.log_text)
         
         tab_widget.addTab(log_tab, "处理日志")
@@ -3027,6 +3036,9 @@ class VideoDescriptionWidget(QWidget):
         if hasattr(self, 'center_progress_bar'):
             self.center_progress_bar.setValue(0)
         
+        # 创建新的日志文件
+        self._create_log_file()
+        
         # 从中间面板获取参数
         # 获取生成模式
         generation_text = self.center_generation_mode_combo.currentText()
@@ -3132,6 +3144,9 @@ class VideoDescriptionWidget(QWidget):
             self.processing_thread.stop()
             self._log_message("用户取消处理")
         
+        # 关闭日志文件
+        self._close_log_file()
+        
         # 同步中间面板按钮状态
         if hasattr(self, 'center_start_btn'):
             self.center_start_btn.setEnabled(True)
@@ -3191,6 +3206,9 @@ class VideoDescriptionWidget(QWidget):
     def _on_all_completed(self):
         """所有视频处理完成"""
         self._log_message("所有视频处理完成！")
+        
+        # 关闭日志文件
+        self._close_log_file()
         
         # 统计总token消耗和获取账户余额（仅API调用模式）
         if hasattr(self.processing_thread, 'algorithm_type') and self.processing_thread.algorithm_type == "API调用":
@@ -3403,6 +3421,80 @@ class VideoDescriptionWidget(QWidget):
         import re
         plain_text = re.sub(r'<[^>]+>', '', html_message)
         self.status_changed.emit(plain_text)
+    
+    def _create_log_file(self):
+        """创建新的日志文件"""
+        try:
+            # 确保logs文件夹存在
+            logs_dir = Path("logs")
+            logs_dir.mkdir(exist_ok=True)
+            
+            # 生成日志文件名（基于当前时间）
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            log_filename = f"video_description_{timestamp}.log"
+            self.log_file_path = logs_dir / log_filename
+            
+            # 创建并打开日志文件
+            self.log_file_handle = open(self.log_file_path, 'w', encoding='utf-8')
+            
+            # 写入文件头信息
+            header = f"视频描述处理日志\n开始时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n{'='*50}\n"
+            self.log_file_handle.write(header)
+            self.log_file_handle.flush()
+            
+            self.log_monitoring_enabled = True
+            
+            # 记录日志文件创建信息
+            self._log_message(f"日志文件已创建: {self.log_file_path}")
+            
+        except Exception as e:
+            self._log_message(f"创建日志文件失败: {str(e)}")
+    
+    def _close_log_file(self):
+        """关闭日志文件"""
+        try:
+            if self.log_file_handle:
+                # 写入文件尾信息
+                footer = f"\n{'='*50}\n结束时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                self.log_file_handle.write(footer)
+                self.log_file_handle.close()
+                self.log_file_handle = None
+                
+            self.log_monitoring_enabled = False
+            
+            if self.log_file_path:
+                self._log_message(f"日志文件已保存: {self.log_file_path}")
+                
+        except Exception as e:
+            print(f"关闭日志文件失败: {str(e)}")
+    
+    def _on_log_text_changed(self):
+        """监听日志文本变化，实时写入文件"""
+        if not self.log_monitoring_enabled or not self.log_file_handle:
+            return
+            
+        try:
+            # 获取当前日志文本的纯文本内容
+            current_text = self.log_text.toPlainText()
+            
+            # 如果有新内容，写入文件
+            if current_text:
+                # 获取最后一行（新增的内容）
+                lines = current_text.split('\n')
+                if lines:
+                    last_line = lines[-1].strip()
+                    if last_line and not hasattr(self, '_last_logged_line'):
+                        self._last_logged_line = ""
+                    
+                    # 只写入新的行
+                    if last_line != getattr(self, '_last_logged_line', ''):
+                        self.log_file_handle.write(last_line + '\n')
+                        self.log_file_handle.flush()  # 立即刷新到磁盘
+                        self._last_logged_line = last_line
+                        
+        except Exception as e:
+            # 避免在日志写入过程中产生递归错误
+            print(f"写入日志文件失败: {str(e)}")
     
     def _initialize_gpu_devices(self):
         """初始化GPU设备列表并进行自动检测"""

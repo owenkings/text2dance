@@ -368,7 +368,7 @@ def video_answer(prompt, model, processor, tokenizer, img_grid, do_sample=True,
         
         # 构建生成参数
         generate_params = {
-            'input_ids': input_ids,
+            'inputs': input_ids,  # 修复参数名：llava模型期望'inputs'而不是'input_ids'
             'images': image_tensor,
             'image_sizes': [image_size],
             'do_sample': do_sample,
@@ -381,11 +381,11 @@ def video_answer(prompt, model, processor, tokenizer, img_grid, do_sample=True,
         }
         
         # 只有当max_new_tokens不为None时才添加该参数
-        if max_new_tokens is not None:
-            generate_params['max_new_tokens'] = max_new_tokens
-            logger.info(f"设置max_new_tokens限制: {max_new_tokens}")
-        else:
-            logger.info("未设置max_new_tokens限制，模型将自由生成")
+        #if max_new_tokens is not None:
+        #   generate_params['max_new_tokens'] = max_new_tokens
+        #    logger.info(f"设置max_new_tokens限制: {max_new_tokens}")
+        #else:
+        #    logger.info("未设置max_new_tokens限制，模型将自由生成")
         
         output_ids = model.generate(**generate_params)
         

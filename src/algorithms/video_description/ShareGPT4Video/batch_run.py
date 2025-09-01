@@ -853,8 +853,8 @@ def parse_batch_arguments():
                        help='nucleus采样参数 (默认: 0.9)')
     parser.add_argument('--temperature', type=float, default=1.0,
                        help='生成温度 (默认: 1.0)')
-    parser.add_argument('--max-new-tokens', type=int, default=200,
-                       help='最大生成token数 (默认: 200)')
+    parser.add_argument('--max-new-tokens', type=int, default=None,
+                       help='最大生成token数 (默认: None，无限制生成)')
     parser.add_argument('--num-beams', type=int, default=1,
                        help='束搜索束数 (默认: 1)')
     
