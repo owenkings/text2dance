@@ -1102,6 +1102,7 @@ class VideoDescriptionWidget(QWidget):
         super().__init__()
         self.config_manager = config_manager
         self.current_videos = []
+        self.video_durations = {}  # 缓存各视频的时长（秒），用于排序/分桶
         self.video_results = {}  # 存储视频处理结果
         self.processing_thread = None
         self.is_all_selected = False  # 全选状态标记
@@ -1163,35 +1164,90 @@ class VideoDescriptionWidget(QWidget):
         center_panel = self._create_center_panel()  # 中间面板
         right_panel = self._create_right_panel()  # 右侧面板
         
-        # 设置固定宽度，防止布局变化
-        left_panel.setMinimumWidth(300)
-        left_panel.setMaximumWidth(350)
-        center_panel.setMinimumWidth(450)
-        center_panel.setMaximumWidth(650)
-        right_panel.setMinimumWidth(400)
+        # 创建主分割器（水平分割）
+        self.main_splitter = QSplitter(Qt.Horizontal)
+        self.main_splitter.setChildrenCollapsible(False)  # 防止面板被完全折叠
         
-        # 添加到主布局，使用固定比例
-        main_layout.addWidget(left_panel, 0)  # 固定宽度
-        main_layout.addWidget(center_panel, 0)  # 固定宽度
-        main_layout.addWidget(right_panel, 1)  # 可伸缩
+        # 添加面板到分割器
+        self.main_splitter.addWidget(left_panel)
+        self.main_splitter.addWidget(center_panel)
+        self.main_splitter.addWidget(right_panel)
+        
+        # 设置初始比例和最小宽度
+        self._setup_responsive_layout()
+        
+        # 添加分割器到主布局
+        main_layout.addWidget(self.main_splitter)
+        
+        # 连接窗口大小变化事件
+        self._connect_resize_handler()
+        
+        # 初始化时调整视频列表高度
+        QTimer.singleShot(100, self._adjust_video_list_height)  # 延迟调用确保窗口已显示
     
     def _create_left_panel(self):
         """创建左侧面板"""
         panel = QWidget()
         layout = QVBoxLayout(panel)
+        layout.setAlignment(Qt.AlignTop | Qt.AlignHCenter)  # 内容顶部居中对齐
         
         # 文件上传区域
         upload_group = QGroupBox("视频上传")
         upload_layout = QVBoxLayout(upload_group)
+        upload_layout.setContentsMargins(8, 8, 8, 12)  # 设置合适的内边距，底部稍大
+        upload_layout.setAlignment(Qt.AlignCenter)  # 上传区域内容居中
         
         # 上传按钮
         upload_buttons_layout = QHBoxLayout()
+        upload_buttons_layout.setAlignment(Qt.AlignCenter)  # 按钮居中对齐
         
         self.upload_file_btn = QPushButton("上传视频文件")
+        self.upload_file_btn.setMinimumWidth(140)  # 增加最小宽度使按钮更明显
+        self.upload_file_btn.setMinimumHeight(36)  # 增加高度使按钮更明显
+        self.upload_file_btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.upload_file_btn.setStyleSheet("""
+            QPushButton {
+                font-size: 14px;
+                font-weight: bold;
+                padding: 8px 16px;
+                border: 2px solid #4CAF50;
+                border-radius: 6px;
+                background-color: #f8f9fa;
+                color: #2e7d32;
+            }
+            QPushButton:hover {
+                background-color: #e8f5e8;
+                border-color: #45a049;
+            }
+            QPushButton:pressed {
+                background-color: #c8e6c9;
+            }
+        """)
         self.upload_file_btn.clicked.connect(self._upload_video_files)
         upload_buttons_layout.addWidget(self.upload_file_btn)
         
         self.upload_folder_btn = QPushButton("上传文件夹")
+        self.upload_folder_btn.setMinimumWidth(140)  # 增加最小宽度使按钮更明显
+        self.upload_folder_btn.setMinimumHeight(36)  # 增加高度使按钮更明显
+        self.upload_folder_btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.upload_folder_btn.setStyleSheet("""
+            QPushButton {
+                font-size: 14px;
+                font-weight: bold;
+                padding: 8px 16px;
+                border: 2px solid #2196F3;
+                border-radius: 6px;
+                background-color: #f8f9fa;
+                color: #1565c0;
+            }
+            QPushButton:hover {
+                background-color: #e3f2fd;
+                border-color: #1976d2;
+            }
+            QPushButton:pressed {
+                background-color: #bbdefb;
+            }
+        """)
         self.upload_folder_btn.clicked.connect(self._upload_video_folder)
         upload_buttons_layout.addWidget(self.upload_folder_btn)
         
@@ -1199,6 +1255,7 @@ class VideoDescriptionWidget(QWidget):
         
         # 视频列表控制区域
         list_control_layout = QHBoxLayout()
+        list_control_layout.setAlignment(Qt.AlignCenter)  # 控制按钮居中对齐
         list_control_layout.addWidget(QLabel("视频列表:"))
         
         # 添加全选/取消全选切换按钮
@@ -1220,7 +1277,7 @@ class VideoDescriptionWidget(QWidget):
         self.selection_status_label.setStyleSheet("""
             QLabel {
                 color: #666;
-                font-size: 12px;
+                font-size: 11px;
                 margin-left: 5px;
             }
         """)
@@ -1232,30 +1289,51 @@ class VideoDescriptionWidget(QWidget):
         
         # 视频列表（支持复选框）
         self.video_list = QListWidget()
-        self.video_list.setMinimumHeight(240)  # 减小高度为状态标签留出空间
-        self.video_list.setMaximumHeight(240)  # 设置最大高度，确保不会过度扩展
+        self.video_list.setMinimumHeight(120)  # 设置最小高度
+        self.video_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)  # 使用Preferred策略便于动态调整
         self.video_list.setStyleSheet("""
             QListWidget {
-                border: 1px solid #ccc;
-                border-radius: 4px;
-                background-color: white;
+                border: 2px solid #d0d0d0; /* 加粗边框确保下边框清晰显示 */
+                border-radius: 6px;
+                background-color: #ffffff;
+                margin: 3px 3px 8px 3px; /* 增加底部外边距确保下边框在组边框内 */
+                padding: 6px 4px 6px 4px; /* 调整内边距，确保内容不被遮挡 */
+            }
+            QListWidget::item {
+                padding: 6px 8px;
+                border-bottom: 1px solid #f0f0f0;
+                margin: 1px 0px;
+            }
+            QListWidget::item:selected {
+                background-color: #e3f2fd;
+                border: 1px solid #2196f3;
+                border-radius: 3px;
+            }
+            QListWidget::item:hover {
+                background-color: #f5f5f5;
             }
         """)
         self.video_list.itemClicked.connect(self._on_video_selected)
         self.video_list.itemChanged.connect(self._on_video_check_changed)
         upload_layout.addWidget(self.video_list)
+        upload_layout.setStretch(upload_layout.indexOf(self.video_list), 1)
         
-        # 添加间距
-        upload_layout.addSpacing(15)
-        
+        # 保存upload_group引用以便后续调整
+        self.upload_group = upload_group
         layout.addWidget(upload_group)
+        
+        # 在视频上传组和描述要求组之间添加额外间距
+        layout.addSpacing(10)
         
         # 描述要求区域
         desc_group = QGroupBox("描述要求")
         desc_layout = QVBoxLayout(desc_group)
+        desc_layout.setContentsMargins(8, 8, 8, 8)
+        desc_layout.setAlignment(Qt.AlignCenter)  # 描述区域内容居中
         
         self.description_text = QTextEdit()
-        self.description_text.setMaximumHeight(150)
+        self.description_text.setMinimumHeight(100)
+        # self.description_text.setMaximumHeight(150)
         # 设置默认描述要求
         default_desc = "Begin by providing a general overview of the person's current action (e.g., walking, sitting, interacting) visible in the video footage. Then proceed with a detailed analysis focusing specifically on the physical movements and body positioning within the video frame. For the upper body, describe the position and movement patterns of the arms, hands, shoulders and torso. For the lower body, detail the positioning and motion of the legs, feet and overall balance dynamics. The description must remain strictly focused on observable physical actions, deliberately excluding any mention of facial expressions, clothing details or environmental elements outside the video frame boundaries."
         self.description_text.setPlainText(default_desc)
@@ -1267,6 +1345,10 @@ class VideoDescriptionWidget(QWidget):
         # 功能选项区域
         options_group = QGroupBox("功能选项")
         options_layout = QVBoxLayout(options_group)
+        options_layout.setContentsMargins(8, 8, 8, 8)
+        options_layout.setAlignment(Qt.AlignCenter)  # 功能选项区域内容居中
+        # 提高分组最小高度以容纳更大的行高，避免文字裁切
+        options_group.setMinimumHeight(260)
         
         # 算法类型从配置中读取，不再显示选择控件
         
@@ -1275,17 +1357,24 @@ class VideoDescriptionWidget(QWidget):
         options_grid.setColumnStretch(0, 1)  # 第一列占50%
         options_grid.setColumnStretch(1, 1)  # 第二列占50%
         options_grid.setHorizontalSpacing(20)  # 列间距
-        options_grid.setVerticalSpacing(10)   # 行间距
+        options_grid.setVerticalSpacing(16)   # 行间距（进一步增大，防止裁切）
+        # 为所有可见行设置最小行高，避免中文文本被裁切
+        for r in range(0, 9):
+            options_grid.setRowMinimumHeight(r, 34)
         
         # 第一行：动作描述 和 自适应播放控制
         self.action_filter_checkbox = QCheckBox("只保留动作描述")
         self.action_filter_checkbox.setToolTip("过滤掉场景、物体等描述，专注于人物动作和行为分析")
+        self.action_filter_checkbox.setMinimumHeight(28)
+        self.action_filter_checkbox.setStyleSheet("QCheckBox{font-size:13px;}")
         self.action_filter_checkbox.stateChanged.connect(self._sync_action_filter_to_center)
         options_grid.addWidget(self.action_filter_checkbox, 0, 0, Qt.AlignLeft)
         
-        self.adaptive_playback_checkbox = QCheckBox("启用自适应播放控制")
+        self.adaptive_playback_checkbox = QCheckBox("自适应播放控制")
         self.adaptive_playback_checkbox.setToolTip("使用PID控制器动态调整播放帧率，提供更平滑的播放体验")
         self.adaptive_playback_checkbox.setChecked(True)  # 默认启用
+        self.adaptive_playback_checkbox.setMinimumHeight(28)
+        self.adaptive_playback_checkbox.setStyleSheet("QCheckBox{font-size:13px;}")
         self.adaptive_playback_checkbox.stateChanged.connect(self._toggle_adaptive_playback)
         options_grid.addWidget(self.adaptive_playback_checkbox, 0, 1, Qt.AlignLeft)
         
@@ -1295,9 +1384,12 @@ class VideoDescriptionWidget(QWidget):
         model_layout.setContentsMargins(0, 0, 0, 0)
         
         model_label = QLabel("选择模型:")
+        model_label.setMinimumHeight(26)
+        model_label.setStyleSheet("QLabel{font-size:13px;}")
         model_layout.addWidget(model_label)
         
         self.model_selection_combo = QComboBox()
+        self.model_selection_combo.setMinimumHeight(26)
         self.model_selection_combo.addItems([
             "ShareVideoGPT4（本地模型）",
             "火山大模型①", 
@@ -1308,6 +1400,8 @@ class VideoDescriptionWidget(QWidget):
         self.model_selection_combo.currentTextChanged.connect(self._on_model_selection_changed)
         model_layout.addWidget(self.model_selection_combo)
         model_layout.addStretch()
+        # 该行较高，明确设置容器高度，避免被压缩
+        model_widget.setMinimumHeight(34)
         
         options_grid.addWidget(model_widget, 1, 0, 1, 2)  # 跨两列
         
@@ -1321,9 +1415,12 @@ class VideoDescriptionWidget(QWidget):
         device_layout.setContentsMargins(0, 0, 0, 0)
         
         device_label = QLabel("计算设备:")
+        device_label.setMinimumHeight(26)
+        device_label.setStyleSheet("QLabel{font-size:13px;}")
         device_layout.addWidget(device_label)
         
         self.device_combo = QComboBox()
+        self.device_combo.setMinimumHeight(26)
         self.device_combo.addItems(["Auto", "CUDA", "CPU"])
         self.device_combo.setCurrentText("CUDA")  # 默认设置为CUDA
         self.device_combo.setToolTip(
@@ -1335,6 +1432,7 @@ class VideoDescriptionWidget(QWidget):
         self.device_combo.currentTextChanged.connect(self._on_device_changed)
         device_layout.addWidget(self.device_combo)
         device_layout.addStretch()
+        device_widget.setMinimumHeight(34)
         options_grid.addWidget(device_widget, 2, 0)
         
         # 采样参数（第三行第二列）
@@ -1343,9 +1441,12 @@ class VideoDescriptionWidget(QWidget):
         sampling_layout.setContentsMargins(0, 0, 0, 0)
         
         top_p_label = QLabel("采样参数:")
+        top_p_label.setMinimumHeight(26)
+        top_p_label.setStyleSheet("QLabel{font-size:13px;}")
         sampling_layout.addWidget(top_p_label)
         
         self.top_p_spinbox = QDoubleSpinBox()
+        self.top_p_spinbox.setMinimumHeight(26)
         self.top_p_spinbox.setRange(0.8, 1.0)
         self.top_p_spinbox.setSingleStep(0.01)
         self.top_p_spinbox.setDecimals(2)
@@ -1358,6 +1459,7 @@ class VideoDescriptionWidget(QWidget):
         )
         sampling_layout.addWidget(self.top_p_spinbox)
         sampling_layout.addStretch()
+        sampling_widget.setMinimumHeight(34)
         options_grid.addWidget(sampling_widget, 2, 1)
         
         # API配置区域（初始隐藏）
@@ -1422,14 +1524,17 @@ class VideoDescriptionWidget(QWidget):
         multithread_layout = QHBoxLayout(multithread_widget)
         multithread_layout.setContentsMargins(0, 0, 0, 0)
         
-        self.multithread_checkbox = QCheckBox("启用多线程：")
+        self.multithread_checkbox = QCheckBox("多线程：")
         self.multithread_checkbox.setToolTip(
-            "启用多线程处理可以同时处理多个视频，提高处理效率\n"
+            "多线程处理可以同时处理多个视频，提高处理效率\n"
             "注意：仅在使用CUDA或Auto设备时可用，CPU模式不支持多线程"
         )
+        self.multithread_checkbox.setMinimumHeight(28)
+        self.multithread_checkbox.setStyleSheet("QCheckBox{font-size:13px;}")
         multithread_layout.addWidget(self.multithread_checkbox)
         
         self.thread_count_spinbox = QSpinBox()
+        self.thread_count_spinbox.setMinimumHeight(26)
         self.thread_count_spinbox.setMinimum(1)
         self.thread_count_spinbox.setMaximum(8)
         self.thread_count_spinbox.setValue(2)  # 默认2个线程
@@ -1442,6 +1547,7 @@ class VideoDescriptionWidget(QWidget):
         )
         multithread_layout.addWidget(self.thread_count_spinbox)
         multithread_layout.addStretch()
+        multithread_widget.setMinimumHeight(34)
         options_grid.addWidget(multithread_widget, 3, 0)
         
         # GPU设备选择（第四行第二列）
@@ -1450,9 +1556,12 @@ class VideoDescriptionWidget(QWidget):
         gpu_device_layout.setContentsMargins(0, 0, 0, 0)
         
         gpu_device_label = QLabel("GPU设备:")
+        gpu_device_label.setMinimumHeight(26)
+        gpu_device_label.setStyleSheet("QLabel{font-size:13px;}")
         gpu_device_layout.addWidget(gpu_device_label)
         
         self.gpu_device_combo = QComboBox()
+        self.gpu_device_combo.setMinimumHeight(26)
         # 初始化GPU设备列表
         self._initialize_gpu_devices()
         self.gpu_device_combo.setCurrentText("自动检测")
@@ -1464,23 +1573,28 @@ class VideoDescriptionWidget(QWidget):
         )
         gpu_device_layout.addWidget(self.gpu_device_combo)
         gpu_device_layout.addStretch()
+        gpu_device_widget.setMinimumHeight(34)
         options_grid.addWidget(gpu_device_widget, 3, 1)
         
         # 第五行：启用智能加速和启用快速预加载
-        self.smart_loading_checkbox = QCheckBox("启用智能加速")
+        self.smart_loading_checkbox = QCheckBox("智能加速")
         self.smart_loading_checkbox.setChecked(True)  # 默认启用
         self.smart_loading_checkbox.setToolTip(
             "智能加载可以根据系统资源动态调整加载策略\n"
             "自动优化内存使用和加载速度，提升整体性能"
         )
+        self.smart_loading_checkbox.setMinimumHeight(28)
+        self.smart_loading_checkbox.setStyleSheet("QCheckBox{font-size:13px;}")
         options_grid.addWidget(self.smart_loading_checkbox, 4, 0)
         
-        self.fast_preload_checkbox = QCheckBox("启用快速预加载")
+        self.fast_preload_checkbox = QCheckBox("快速预加载")
         self.fast_preload_checkbox.setChecked(True)  # 默认启用
         self.fast_preload_checkbox.setToolTip(
             "快速预加载可以提前加载下一批数据\n"
             "减少等待时间，提升处理流畅度"
         )
+        self.fast_preload_checkbox.setMinimumHeight(28)
+        self.fast_preload_checkbox.setStyleSheet("QCheckBox{font-size:13px;}")
         options_grid.addWidget(self.fast_preload_checkbox, 4, 1)
         
         # 第六行：启用GPU优化及其选项框（单独一行）
@@ -1488,19 +1602,24 @@ class VideoDescriptionWidget(QWidget):
         gpu_optimization_layout = QHBoxLayout(gpu_optimization_widget)
         gpu_optimization_layout.setContentsMargins(0, 0, 0, 0)
         
-        self.gpu_optimization_checkbox = QCheckBox("启用GPU优化批处理")
+        self.gpu_optimization_checkbox = QCheckBox("GPU优化")
         self.gpu_optimization_checkbox.setToolTip(
             "启用GPU优化批处理可以显著提升大量视频的处理性能\n"
             "通过批量推理和并行预处理减少GPU内存碎片和模型加载开销\n"
             "注意：仅在使用CUDA设备且处理多个视频时推荐启用"
         )
+        self.gpu_optimization_checkbox.setMinimumHeight(28)
+        self.gpu_optimization_checkbox.setStyleSheet("QCheckBox{font-size:13px;}")
         gpu_optimization_layout.addWidget(self.gpu_optimization_checkbox)
         
         # GPU批处理大小
         batch_size_label = QLabel("批处理大小:")
+        batch_size_label.setMinimumHeight(26)
+        batch_size_label.setStyleSheet("QLabel{font-size:13px;}")
         gpu_optimization_layout.addWidget(batch_size_label)
         
         self.gpu_batch_size_spinbox = QSpinBox()
+        self.gpu_batch_size_spinbox.setMinimumHeight(26)
         self.gpu_batch_size_spinbox.setMinimum(1)
         self.gpu_batch_size_spinbox.setMaximum(8)
         self.gpu_batch_size_spinbox.setValue(2)  # 默认2个视频一批
@@ -1515,9 +1634,12 @@ class VideoDescriptionWidget(QWidget):
         
         # 预处理线程数
         workers_label = QLabel("预处理线程:")
+        workers_label.setMinimumHeight(26)
+        workers_label.setStyleSheet("QLabel{font-size:13px;}")
         gpu_optimization_layout.addWidget(workers_label)
         
         self.gpu_max_workers_spinbox = QSpinBox()
+        self.gpu_max_workers_spinbox.setMinimumHeight(26)
         self.gpu_max_workers_spinbox.setMinimum(1)
         self.gpu_max_workers_spinbox.setMaximum(16)
         self.gpu_max_workers_spinbox.setValue(4)  # 默认4个预处理线程
@@ -1529,7 +1651,28 @@ class VideoDescriptionWidget(QWidget):
         gpu_optimization_layout.addWidget(self.gpu_max_workers_spinbox)
         gpu_optimization_layout.addStretch()
         
+        gpu_optimization_widget.setMinimumHeight(36)
         options_grid.addWidget(gpu_optimization_widget, 5, 0, 1, 2)  # 跨两列
+        
+        # 第七行：视频处理排序（仅影响处理顺序，不影响显示顺序）
+        video_sort_widget = QWidget()
+        video_sort_layout = QHBoxLayout(video_sort_widget)
+        video_sort_layout.setContentsMargins(0, 0, 0, 0)
+        
+        video_sort_label = QLabel("处理排序:")
+        video_sort_label.setMinimumHeight(26)
+        video_sort_label.setStyleSheet("QLabel{font-size:13px;}")
+        video_sort_layout.addWidget(video_sort_label)
+        
+        self.duration_sort_mode_combo = QComboBox()
+        self.duration_sort_mode_combo.addItems(["默认顺序", "按时长升序", "按时长降序", "按时长分桶"])
+        self.duration_sort_mode_combo.setToolTip("选择视频处理的顺序方式（仅影响处理顺序，不改变列表显示）:\n• 默认顺序: 按添加顺序处理\n• 按时长升序: 先处理短视频\n• 按时长降序: 先处理长视频\n• 按时长分桶: 按时长区间分组处理")
+        self.duration_sort_mode_combo.setMinimumHeight(26)
+        video_sort_layout.addWidget(self.duration_sort_mode_combo)
+        video_sort_layout.addStretch()
+        
+        video_sort_widget.setMinimumHeight(34)
+        options_grid.addWidget(video_sort_widget, 6, 0, 1, 2)  # 跨两列
         
         # 将网格布局添加到选项布局中
         options_layout.addLayout(options_grid)
@@ -1539,77 +1682,12 @@ class VideoDescriptionWidget(QWidget):
         
         layout.addWidget(options_group)
         
-        # 参数说明区域（添加滚动功能）
-        info_group = QGroupBox("参数说明")
-        info_layout = QVBoxLayout(info_group)
+        # 参数说明已迁移至中间面板的无标题滚动区域，左侧不再显示单独的“参数说明”标题和内容
         
-        # 创建滚动区域
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        scroll_area.setMinimumHeight(120)  # 减小最小高度
-        scroll_area.setMaximumHeight(250)  # 减小最大高度
-        
-        # 创建滚动内容容器
-        scroll_content = QWidget()
-        scroll_layout = QVBoxLayout(scroll_content)
-        
-        # 详细参数说明
-        mode_info = QLabel(
-            "<b>🎯 生成模式类型：</b><br>"
-            "• <b>确定性生成</b>：每次运行结果完全一致，输出稳定可重复，适合需要一致性的场景<br>"
-            "• <b>随机采样生成</b>：每次运行结果略有不同，输出更有创造性和多样性<br>"
-            "• <b>混合策略</b>：结合确定性和随机性，平衡稳定性与创造性<br><br>"
-            
-            "<b>📊 采样帧数设置：</b><br>"
-            "控制从视频中提取的关键帧数量，直接影响描述的详细程度和处理时间：<br>"
-            "• <b>自动模式（推荐）</b>：根据视频长度智能选择最佳帧数<br>"
-            "  - ≤10秒视频：16帧（快速处理，适合短片段）<br>"
-            "  - 10-30秒视频：20帧（平衡质量与速度）<br>"
-            "  - 30-60秒视频：25帧（详细分析，适合中长视频）<br>"
-            "  - >60秒视频：32帧（全面覆盖，适合长视频）<br>"
-            "• <b>手动设置</b>：推荐范围8-32帧，帧数越多描述越详细但处理时间越长<br><br>"
-            
-            "<b>📝 描述长度建议：</b><br>"
-            "向AI建议生成描述的大致长度，但不强制限制：<br>"
-            "• <b>无限制生成</b>：不给出长度建议，让AI根据视频内容自由发挥<br>"
-            "• <b>建议模式</b>：给出长度建议（如150-800字符），AI会尽量遵循但不会被强制截断<br>"
-            "• AI可能根据视频复杂度生成比建议更长或更短的描述<br>"
-            "• 这确保了描述的完整性，不会因为长度限制而中途截断<br><br>"
-            
-            "<b>⚡ 功能选项说明：</b><br>"
-            "• <b>启用自动保存</b>：自动保存视频列表的输出内容到文件，支持多种格式<br>"
-            "  处理完成后会自动保存结果，无需手动操作<br>"
-            "• <b>用户选择格式</b>：允许用户选择保存文件的格式（JSON、TXT、CSV、MD等）<br>"
-            "  启用后会在处理结束时弹出格式选择对话框<br>"
-            "• <b>启用导出功能</b>：提供手动导出功能，可随时导出处理结果<br>"
-            "• <b>自适应播放控制</b>：使用PID控制器动态调整播放帧率，提供更平滑的播放体验<br><br>"
-            
-            "<b>💡 使用建议：</b><br>"
-            "• 首次使用建议开启所有功能选项，熟悉后可根据需要调整<br>"
-            "• 对于重要视频建议启用备份功能<br>"
-            "• 批量处理时建议使用确定性生成模式以保持一致性<br>"
-            "• 处理长视频时可适当增加采样帧数以获得更全面的描述"
-        )
-        mode_info.setWordWrap(True)
-        mode_info.setStyleSheet(
-            "QLabel {"
-            "    background-color: #f8f9fa;"
-            "    border: 1px solid #dee2e6;"
-            "    border-radius: 5px;"
-            "    padding: 15px;"
-            "    font-size: 12px;"
-            "    line-height: 1.5;"
-            "}"
-        )
-        scroll_layout.addWidget(mode_info)
-        
-        # 设置滚动区域内容
-        scroll_area.setWidget(scroll_content)
-        info_layout.addWidget(scroll_area)
-        
-        layout.addWidget(info_group)
+        # 调整左侧分组的伸缩比例，确保视频列表获得更多空间
+        layout.setStretch(layout.indexOf(upload_group), 5)
+        layout.setStretch(layout.indexOf(desc_group), 1)
+        layout.setStretch(layout.indexOf(options_group), 2)
         
         layout.addStretch()
         return panel
@@ -1618,49 +1696,66 @@ class VideoDescriptionWidget(QWidget):
         """创建中间面板（视频播放）"""
         panel = QWidget()
         layout = QVBoxLayout(panel)
+        layout.setAlignment(Qt.AlignTop | Qt.AlignHCenter)  # 中间面板内容居中对齐
         
         # 视频播放区域
         video_group = QGroupBox("视频播放")
         video_layout = QVBoxLayout(video_group)
+        video_layout.setSpacing(4)
+        video_layout.setContentsMargins(12, 12, 12, 12)
+        video_layout.setAlignment(Qt.AlignCenter)  # 视频播放区域内容居中
         
         # 视频显示标签
         self.video_label = QLabel()
-        self.video_label.setMinimumHeight(300)
-        self.video_label.setMaximumHeight(400)  # 设置最大高度
-        self.video_label.setMinimumWidth(400)
-        self.video_label.setMaximumWidth(600)   # 设置最大宽度
-        self.video_label.setStyleSheet("border: 1px solid gray; background-color: black;")
+        self.video_label.setMinimumHeight(230)
+        self.video_label.setMaximumHeight(300)
+        # 取消固定的最大宽高，允许随容器自适应
+        # self.video_label.setMaximumHeight(400)
+        # self.video_label.setMinimumWidth(400)
+        # self.video_label.setMaximumWidth(600)
+        self.video_label.setStyleSheet("border: 1px solid #ccc; background-color: white;")
         self.video_label.setAlignment(Qt.AlignCenter)
         self.video_label.setText("请选择视频文件")
-        self.video_label.setScaledContents(False)  # 关闭自动缩放内容
-        # 设置尺寸策略，防止自动调整大小
-        self.video_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.video_label.setScaledContents(False)  # 保持比例缩放，由代码控制
+        # 使用可扩展策略，随父布局伸缩
+        self.video_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         video_layout.addWidget(self.video_label)
+        video_layout.addSpacing(4)
         
-        # 播放控制
+        # 进度条控制行
         controls_layout = QHBoxLayout()
-        
-        # 后退按钮
-        self.backward_btn = QPushButton("⏪")
-        self.backward_btn.setToolTip("后退10秒")
-        self.backward_btn.clicked.connect(self._backward_10s)
-        controls_layout.addWidget(self.backward_btn)
-        
-        # 播放/暂停按钮
-        self.play_btn = QPushButton("▶")
-        self.play_btn.setToolTip("播放/暂停")
-        self.play_btn.clicked.connect(self._toggle_playback)
-        controls_layout.addWidget(self.play_btn)
-        
-        # 前进按钮
-        self.forward_btn = QPushButton("⏩")
-        self.forward_btn.setToolTip("前进10秒")
-        self.forward_btn.clicked.connect(self._forward_10s)
-        controls_layout.addWidget(self.forward_btn)
+        controls_layout.setContentsMargins(0, 4, 0, 0)
+        controls_layout.setSpacing(6)
+        controls_layout.setAlignment(Qt.AlignCenter)  # 进度条控制居中
         
         # 进度条
         self.position_slider = QSlider(Qt.Horizontal)
         self.position_slider.setToolTip("拖动调整播放位置")
+        self.position_slider.setMinimumHeight(16)
+        self.position_slider.setStyleSheet("""
+            QSlider::groove:horizontal {
+                border: 1px solid #ddd;
+                height: 4px;
+                background: #f8f9fa;
+                border-radius: 2px;
+            }
+            QSlider::handle:horizontal {
+                background: #007bff;
+                border: 1px solid #007bff;
+                width: 12px;
+                height: 12px;
+                margin: -5px 0;
+                border-radius: 6px;
+            }
+            QSlider::handle:horizontal:hover {
+                background: #0056b3;
+                border-color: #0056b3;
+            }
+            QSlider::sub-page:horizontal {
+                background: #007bff;
+                border-radius: 2px;
+            }
+        """)
         self.position_slider.sliderMoved.connect(self._set_position)
         self.position_slider.sliderPressed.connect(self._slider_pressed)
         self.position_slider.sliderReleased.connect(self._slider_released)
@@ -1671,10 +1766,92 @@ class VideoDescriptionWidget(QWidget):
         self.time_label.setMinimumWidth(100)
         controls_layout.addWidget(self.time_label)
         
-        video_layout.addLayout(controls_layout)
+        # 将进度条和时间显示合并到下方播放控制行中
         
-        # 第二行控制：音量和播放速度
+        # 播放控制按钮行（在视频播放窗口下方）
+        playback_controls_layout = QHBoxLayout()
+        playback_controls_layout.setSpacing(4)  # 紧凑按钮间距
+        playback_controls_layout.setContentsMargins(0, 2, 0, 0)
+        playback_controls_layout.setAlignment(Qt.AlignCenter)  # 播放控制按钮居中
+        
+        # 取消居中拉伸，紧凑排列
+        
+        # 后退按钮
+        self.backward_btn = QPushButton("⏪")
+        self.backward_btn.setToolTip("后退10秒")
+        self.backward_btn.setMinimumSize(32, 24)
+        self.backward_btn.setStyleSheet("""
+            QPushButton {
+                font-size: 12px;
+                border: 1px solid #ddd;
+                border-radius: 4px;
+                background-color: #f8f9fa;
+            }
+            QPushButton:hover {
+                background-color: #e9ecef;
+                border-color: #adb5bd;
+            }
+            QPushButton:pressed {
+                background-color: #dee2e6;
+            }
+        """)
+        self.backward_btn.clicked.connect(self._backward_10s)
+        playback_controls_layout.addWidget(self.backward_btn)
+        
+        # 播放/暂停按钮
+        self.play_btn = QPushButton("▶")
+        self.play_btn.setToolTip("播放/暂停")
+        self.play_btn.setMinimumSize(36, 24)
+        self.play_btn.setStyleSheet("""
+            QPushButton {
+                font-size: 12px;
+                font-weight: 600;
+                border: 1px solid #007bff;
+                border-radius: 4px;
+                background-color: #007bff;
+                color: white;
+            }
+            QPushButton:hover {
+                background-color: #0056b3;
+                border-color: #0056b3;
+            }
+            QPushButton:pressed {
+                background-color: #004085;
+            }
+        """)
+        self.play_btn.clicked.connect(self._toggle_playback)
+        playback_controls_layout.addWidget(self.play_btn)
+        
+        # 前进按钮
+        self.forward_btn = QPushButton("⏩")
+        self.forward_btn.setToolTip("前进10秒")
+        self.forward_btn.setMinimumSize(32, 24)
+        self.forward_btn.setStyleSheet("""
+            QPushButton {
+                font-size: 12px;
+                border: 1px solid #ddd;
+                border-radius: 4px;
+                background-color: #f8f9fa;
+            }
+            QPushButton:hover {
+                background-color: #e9ecef;
+                border-color: #adb5bd;
+            }
+            QPushButton:pressed {
+                background-color: #dee2e6;
+            }
+        """)
+        self.forward_btn.clicked.connect(self._forward_10s)
+        playback_controls_layout.addWidget(self.forward_btn)
+        
+        # 与进度条保持适度间隔
+        playback_controls_layout.addSpacing(4)
+        
+        # 音量和播放速度控制行
         controls_layout2 = QHBoxLayout()
+        controls_layout2.setContentsMargins(0, 2, 0, 0)
+        controls_layout2.setSpacing(4)
+        controls_layout2.setAlignment(Qt.AlignCenter)  # 音量和播放速度控制居中
         
         # 音量控制
         volume_label = QLabel("音量:")
@@ -1683,8 +1860,33 @@ class VideoDescriptionWidget(QWidget):
         self.volume_slider = QSlider(Qt.Horizontal)
         self.volume_slider.setRange(0, 100)
         self.volume_slider.setValue(50)
-        self.volume_slider.setMaximumWidth(100)
+        self.volume_slider.setMaximumWidth(90)
+        self.volume_slider.setMinimumHeight(18)
         self.volume_slider.setToolTip("调整音量")
+        self.volume_slider.setStyleSheet("""
+            QSlider::groove:horizontal {
+                border: 1px solid #ddd;
+                height: 4px;
+                background: #f8f9fa;
+                border-radius: 2px;
+            }
+            QSlider::handle:horizontal {
+                background: #28a745;
+                border: 1px solid #28a745;
+                width: 12px;
+                height: 12px;
+                margin: -5px 0;
+                border-radius: 6px;
+            }
+            QSlider::handle:horizontal:hover {
+                background: #1e7e34;
+                border-color: #1e7e34;
+            }
+            QSlider::sub-page:horizontal {
+                background: #28a745;
+                border-radius: 2px;
+            }
+        """)
         self.volume_slider.valueChanged.connect(self._set_volume)
         controls_layout2.addWidget(self.volume_slider)
         
@@ -1702,6 +1904,31 @@ class VideoDescriptionWidget(QWidget):
         self.speed_combo.addItems(["0.5x", "0.75x", "1.0x", "1.25x", "1.5x", "2.0x"])
         self.speed_combo.setCurrentText("1.0x")
         self.speed_combo.setToolTip("调整播放速度")
+        self.speed_combo.setMinimumHeight(22)
+        self.speed_combo.setStyleSheet("""
+            QComboBox {
+                border: 1px solid #ddd;
+                border-radius: 4px;
+                padding: 4px 8px;
+                background-color: #f8f9fa;
+                font-size: 12px;
+            }
+            QComboBox:hover {
+                background-color: #e9ecef;
+                border-color: #adb5bd;
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 20px;
+            }
+            QComboBox::down-arrow {
+                image: none;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 4px solid #6c757d;
+                margin-right: 4px;
+            }
+        """)
         self.speed_combo.currentTextChanged.connect(self._set_playback_rate)
         controls_layout2.addWidget(self.speed_combo)
         
@@ -1711,14 +1938,18 @@ class VideoDescriptionWidget(QWidget):
         self.mute_btn.clicked.connect(self._toggle_mute)
         controls_layout2.addWidget(self.mute_btn)
         
-        video_layout.addLayout(controls_layout)
+        # 先放置音量/倍速行
         video_layout.addLayout(controls_layout2)
+        # 将进度条和时间显示并入播放控制行，并放在音量/倍速行之后
+        playback_controls_layout.addLayout(controls_layout)
+        video_layout.addLayout(playback_controls_layout)
         
         layout.addWidget(video_group)
         
         # 添加功能选项区域到视频播放下方
         options_group = QGroupBox("快速设置")
         options_layout = QVBoxLayout(options_group)
+        options_layout.setAlignment(Qt.AlignCenter)  # 快速设置区域内容居中
         
         # 使用网格布局确保对齐
         from PyQt5.QtWidgets import QGridLayout
@@ -1874,23 +2105,66 @@ class VideoDescriptionWidget(QWidget):
         )
         options_layout.addWidget(self.center_progress_bar)
         
-        # 功能说明
-        info_label = QLabel(
-            "💡 提示: 在此区域可以快速调整主要参数，详细设置请查看左侧面板。\n"
-            "🎯 建议: 短视频使用较少帧数，长视频可适当增加帧数以获得更好效果。"
+        # 功能说明（改为无标题滚动说明区）
+        center_scroll = QScrollArea()
+        center_scroll.setWidgetResizable(True)
+        center_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        center_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        center_scroll.setMinimumHeight(180)
+        center_scroll.setMaximumHeight(360)
+        center_scroll_content = QWidget()
+        center_scroll_layout = QVBoxLayout(center_scroll_content)
+        
+        center_mode_info = QLabel(
+            """
+            <b>🎯 生成模式：</b><br>
+            • 确定性生成：结果稳定一致，适合批量与复现需求<br>
+            • 随机采样生成：结果更具多样性与创造性<br>
+            • 混合策略：在稳定与丰富之间折中<br><br>
+            <b>📝 描述长度建议：</b><br>
+            • 选项：简要/标准/详细/非常详细/无限制/自定义<br>
+            • 自定义长度：为AI提供建议字符数（不会强制截断）<br>
+            • 注意：这是“建议值”，AI可根据视频复杂度适当增减以保证完整性<br><br>
+            <b>📊 采样帧数：</b><br>
+            • 0 = 自动：按视频时长自适应（≤10秒16帧；10-30秒20帧；30-60秒25帧；>60秒32帧）<br>
+            • 手动：推荐范围 8-32 帧；帧数越多覆盖越全面、耗时越长<br><br>
+            <b>🎛️ 采样参数（top_p）：</b><br>
+            • 0.8-0.85：更聚焦、更简洁；0.9（默认）：平衡；0.95-1.0：更丰富<br><br>
+            <b>🖥️ 计算设备：</b><br>
+            • Auto（推荐）/CUDA/CPU；GPU设备可指定 cuda:0 等<br><br>
+            <b>🧩 并行与批处理：</b><br>
+            • 多线程与线程数设置；GPU优化批处理：合理设置批大小与预处理线程数<br>
+            • 处理大量视频时更明显；单段短视频收益有限<br><br>
+            <b>⚡ 性能与优化说明：</b><br>
+            • 智能加速：根据系统负载动态调整加载与缓存，降低峰值占用<br>
+            • 快速预加载：提前准备下一批数据，减少空转等待，提升吞吐<br>
+            • 批大小建议：8GB显存 1-2；8-16GB 2-4；16GB+ 4-8（需结合分辨率）<br>
+            • 预处理线程：与CPU/磁盘有关，建议 2-4/8-16GB；4-8/16GB+；过多会引发上下文切换开销<br>
+            • 遇到显存不足（OOM）：降低批大小/分辨率，关闭GPU优化或换用CPU；同时关闭其他占GPU程序<br>
+            • I/O 成为瓶颈（机械盘/网盘）：提高预加载、适当降低线程数更稳<br>
+            • 日志会输出“设备/显存状态”，据此迭代参数，逐步收敛到稳定高效配置<br><br>
+            <b>🧭 内容控制：</b><br>
+            • 只保留动作描述、自适应播放控制<br><br>
+            <b>💾 自动保存：</b><br>
+            • 导出格式：JSON/TXT/CSV/MD/全部/关闭；处理完成自动保存<br><br>
+            <b>🔑 API配置：</b><br>
+            • 端点/密钥/模型名称按服务方要求填写；密钥可隐藏/显示
+            """
         )
-        info_label.setStyleSheet(
-            "QLabel {"
-            "    background-color: #ecf0f1;"
-            "    border: 1px solid #bdc3c7;"
-            "    border-radius: 4px;"
-            "    padding: 8px;"
-            "    color: #2c3e50;"
-            "    font-size: 12px;"
-            "}"
+        center_mode_info.setWordWrap(True)
+        center_mode_info.setStyleSheet(
+            "QLabel { background-color: #ecf0f1; border: 1px solid #bdc3c7; border-radius: 4px; padding: 10px; color: #2c3e50; font-size: 12px; line-height: 1.5; }"
         )
-        info_label.setWordWrap(True)
-        options_layout.addWidget(info_label)
+        center_scroll_layout.addWidget(center_mode_info)
+        
+        # 预留2-3行空间用于未来新增选项
+        spacer = QWidget()
+        spacer.setMinimumHeight(60)
+        center_scroll_layout.addWidget(spacer)
+        center_scroll_layout.addStretch()
+        
+        center_scroll.setWidget(center_scroll_content)
+        options_layout.addWidget(center_scroll)
         
         layout.addWidget(options_group)
         
@@ -1900,6 +2174,7 @@ class VideoDescriptionWidget(QWidget):
         """创建右侧面板（日志和结果）"""
         panel = QWidget()
         layout = QVBoxLayout(panel)
+        layout.setAlignment(Qt.AlignTop | Qt.AlignHCenter)  # 右侧面板内容居中对齐
         
         # 创建选项卡
         tab_widget = QTabWidget()
@@ -1907,6 +2182,7 @@ class VideoDescriptionWidget(QWidget):
         # 处理日志选项卡
         log_tab = QWidget()
         log_layout = QVBoxLayout(log_tab)
+        log_layout.setAlignment(Qt.AlignCenter)  # 日志选项卡内容居中
         
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
@@ -1922,6 +2198,7 @@ class VideoDescriptionWidget(QWidget):
         # 详细结果选项卡
         result_tab = QWidget()
         result_layout = QVBoxLayout(result_tab)
+        result_layout.setAlignment(Qt.AlignCenter)  # 结果选项卡内容居中
         
         self.result_text = QTextEdit()
         self.result_text.setReadOnly(True)
@@ -1929,6 +2206,7 @@ class VideoDescriptionWidget(QWidget):
         
         # 导出按钮
         export_layout = QHBoxLayout()
+        export_layout.setAlignment(Qt.AlignCenter)  # 导出按钮居中
         
         self.export_json_btn = QPushButton("导出JSON")
         self.export_json_btn.clicked.connect(lambda: self._export_results('json'))
@@ -2031,6 +2309,15 @@ class VideoDescriptionWidget(QWidget):
                 if hasattr(self, 'gpu_max_workers_spinbox'):
                     self.gpu_max_workers_spinbox.setValue(gpu_max_workers)
                     
+                # 恢复时长排序/分桶模式
+                if hasattr(self, 'duration_sort_mode_combo'):
+                    try:
+                        saved_mode = self.config_manager.get('algorithms.video_description.duration_sort_mode', '默认顺序') if hasattr(self, 'config_manager') and self.config_manager else '默认顺序'
+                        if saved_mode:
+                            self.duration_sort_mode_combo.setCurrentText(saved_mode)
+                    except Exception as e2:
+                        self._log_message(f"加载时长排序模式失败: {str(e2)}")
+                    
         except Exception as e:
             self._log_message(f"加载配置失败: {str(e)}")
     
@@ -2041,6 +2328,10 @@ class VideoDescriptionWidget(QWidget):
         
         # 自动保存选项同步
         self.auto_save_format_combo.currentTextChanged.connect(self._on_auto_save_format_changed)
+        
+        # 排序/分桶模式切换
+        if hasattr(self, 'duration_sort_mode_combo'):
+            self.duration_sort_mode_combo.currentTextChanged.connect(self._on_duration_sort_mode_changed)
         
         # 连接GPU优化选项信号
         if hasattr(self, 'gpu_optimization_checkbox'):
@@ -2076,6 +2367,138 @@ class VideoDescriptionWidget(QWidget):
                 main_window.app.config_changed.connect(self._on_config_changed)
         except Exception as e:
             self._log_message(f"连接配置变化信号失败: {str(e)}")
+    
+    def _setup_responsive_layout(self):
+        """设置响应式布局"""
+        # 设置面板最小宽度
+        left_panel = self.main_splitter.widget(0)
+        center_panel = self.main_splitter.widget(1)
+        right_panel = self.main_splitter.widget(2)
+        
+        left_panel.setMinimumWidth(280)
+        center_panel.setMinimumWidth(400)
+        right_panel.setMinimumWidth(350)
+        
+        # 根据当前窗口大小设置初始比例
+        self._adjust_layout_for_window_size()
+        
+        # 连接分割器位置变化信号，保存用户偏好
+        self.main_splitter.splitterMoved.connect(self._save_splitter_state)
+        
+        # 加载保存的分割器状态
+        self._load_splitter_state()
+    
+    def _adjust_layout_for_window_size(self):
+        """根据窗口大小调整布局"""
+        try:
+            # 获取当前窗口宽度
+            window_width = self.width()
+            if window_width <= 0:
+                # 如果还没有显示，使用默认值
+                window_width = 1200
+            
+            # 根据窗口宽度设置不同的比例
+            if window_width < 1000:
+                # 小屏幕：紧凑布局
+                sizes = [280, 400, 350]
+            elif window_width < 1400:
+                # 中等屏幕：平衡布局
+                sizes = [320, 480, 400]
+            else:
+                # 大屏幕：宽松布局
+                sizes = [350, 550, 450]
+            
+            # 调整比例以适应实际窗口宽度
+            total_size = sum(sizes)
+            if total_size < window_width:
+                # 按比例扩展
+                scale = window_width / total_size
+                sizes = [int(size * scale) for size in sizes]
+            
+            self.main_splitter.setSizes(sizes)
+            
+        except Exception as e:
+            self._log_message(f"调整布局失败: {str(e)}")
+    
+    def _connect_resize_handler(self):
+        """连接窗口大小变化处理器"""
+        # 使用定时器防止频繁调整
+        self.resize_timer = QTimer()
+        self.resize_timer.setSingleShot(True)
+        self.resize_timer.timeout.connect(self._on_window_resized)
+    
+    def resizeEvent(self, event):
+        """窗口大小变化事件"""
+        super().resizeEvent(event)
+        # 延迟调整布局，避免频繁计算
+        if hasattr(self, 'resize_timer'):
+            self.resize_timer.start(100)  # 100ms延迟
+    
+    def _on_window_resized(self):
+        """窗口大小变化处理"""
+        if hasattr(self, 'main_splitter'):
+            self._adjust_layout_for_window_size()
+        # 调整视频列表高度
+        self._adjust_video_list_height()
+    
+    def _adjust_video_list_height(self):
+        """根据窗口高度动态调整视频列表高度"""
+        try:
+            if not hasattr(self, 'video_list') or not hasattr(self, 'upload_group'):
+                return
+            
+            # 获取当前窗口高度
+            window_height = self.height()
+            if window_height <= 0:
+                window_height = 800  # 默认高度
+            
+            # 计算上传组的可用高度
+            # 考虑主布局边距、面板间距、描述区域等占用的空间
+            reserved_height = 400  # 为其他组件预留的高度（描述区域、功能选项区域、边距等）
+            available_height = max(200, window_height - reserved_height)
+            
+            # 计算上传组内部其他组件占用的高度
+            upload_buttons_height = 50  # 上传按钮区域高度
+            list_control_height = 35   # 列表控制区域高度
+            group_margins = 24         # 组边距（上下各12px）
+            list_margins = 16          # 列表外边距和内边距
+            
+            # 计算视频列表可用的最大高度
+            max_list_height = available_height - upload_buttons_height - list_control_height - group_margins - list_margins
+            
+            # 设置视频列表高度约束
+            min_height = 120  # 最小高度
+            max_height = max(min_height, max_list_height)
+            
+            # 应用高度约束
+            self.video_list.setMinimumHeight(min_height)
+            self.video_list.setMaximumHeight(max_height)
+            
+            # 确保上传组也有合适的高度约束
+            upload_group_height = upload_buttons_height + list_control_height + max_height + group_margins + list_margins
+            self.upload_group.setMaximumHeight(upload_group_height + 20)  # 额外留一些空间
+            
+        except Exception as e:
+            self._log_message(f"调整视频列表高度失败: {str(e)}")
+    
+    def _save_splitter_state(self):
+        """保存分割器状态"""
+        try:
+            if hasattr(self, 'config_manager') and self.config_manager and hasattr(self, 'main_splitter'):
+                sizes = self.main_splitter.sizes()
+                self.config_manager.set('ui.video_description.splitter_sizes', sizes)
+        except Exception as e:
+            self._log_message(f"保存分割器状态失败: {str(e)}")
+    
+    def _load_splitter_state(self):
+        """加载分割器状态"""
+        try:
+            if hasattr(self, 'config_manager') and self.config_manager and hasattr(self, 'main_splitter'):
+                sizes = self.config_manager.get('ui.video_description.splitter_sizes', None)
+                if sizes and len(sizes) == 3:
+                    self.main_splitter.setSizes(sizes)
+        except Exception as e:
+            self._log_message(f"加载分割器状态失败: {str(e)}")
     
     def _on_device_changed(self):
         """设备选择变化处理"""
@@ -2391,7 +2814,23 @@ class VideoDescriptionWidget(QWidget):
             for file_path in files:
                 if file_path not in self.current_videos:
                     self.current_videos.append(file_path)
+                    # 读取并缓存视频时长
+                    try:
+                        cap = cv2.VideoCapture(file_path)
+                        if cap.isOpened():
+                            fps = cap.get(cv2.CAP_PROP_FPS) or 0
+                            frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
+                            duration = frame_count / fps if fps > 0 else 0
+                            self.video_durations[file_path] = float(duration)
+                        else:
+                            self.video_durations[file_path] = None
+                        cap.release()
+                    except Exception:
+                        self.video_durations[file_path] = None
                     self._add_video_to_list(file_path)
+            # 上传完成后根据模式应用排序/分桶
+            if hasattr(self, 'duration_sort_mode_combo'):
+                self._apply_duration_sorting()
     
     def _upload_video_folder(self):
         """上传视频文件夹（支持累积式添加）"""
@@ -2423,6 +2862,19 @@ class VideoDescriptionWidget(QWidget):
                 file_str = str(file_path)
                 if file_str not in self.current_videos:
                     self.current_videos.append(file_str)
+                    # 缓存时长
+                    try:
+                        cap = cv2.VideoCapture(file_str)
+                        if cap.isOpened():
+                            fps = cap.get(cv2.CAP_PROP_FPS) or 0
+                            frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
+                            duration = frame_count / fps if fps > 0 else 0
+                            self.video_durations[file_str] = float(duration)
+                        else:
+                            self.video_durations[file_str] = None
+                        cap.release()
+                    except Exception:
+                        self.video_durations[file_str] = None
                     self._add_video_to_list(file_str)
                     added_count += 1
                     
@@ -2436,29 +2888,36 @@ class VideoDescriptionWidget(QWidget):
             if processed_count > 0:
                 message += f"，其中 {processed_count} 个已有处理结果"
             self._log_message(message)
+        
+        # 应用排序/分桶
+        if hasattr(self, 'duration_sort_mode_combo'):
+            self._apply_duration_sorting()
     
     def _select_all_videos(self):
-        """全选所有视频"""
+        """全选所有视频（忽略分组头）"""
         for i in range(self.video_list.count()):
             item = self.video_list.item(i)
-            item.setCheckState(Qt.Checked)
+            if item.flags() & Qt.ItemIsUserCheckable:
+                item.setCheckState(Qt.Checked)
         self._update_selection_status()
     
     def _deselect_all_videos(self):
-        """取消全选所有视频"""
+        """取消全选所有视频（忽略分组头）"""
         for i in range(self.video_list.count()):
             item = self.video_list.item(i)
-            item.setCheckState(Qt.Unchecked)
+            if item.flags() & Qt.ItemIsUserCheckable:
+                item.setCheckState(Qt.Unchecked)
         self._update_selection_status()
     
     def _get_selected_videos(self):
-        """获取选中的视频列表"""
+        """获取选中的视频列表（忽略分组头等不可勾选项）"""
         selected_videos = []
         for i in range(self.video_list.count()):
             item = self.video_list.item(i)
-            if item.checkState() == Qt.Checked:
+            if (item.flags() & Qt.ItemIsUserCheckable) and item.checkState() == Qt.Checked:
                 video_path = item.data(Qt.UserRole)
-                selected_videos.append(video_path)
+                if video_path:
+                    selected_videos.append(video_path)
         return selected_videos
     
     def _on_video_check_changed(self, item):
@@ -2482,21 +2941,164 @@ class VideoDescriptionWidget(QWidget):
             self._select_all_videos()
     
     def _update_selection_status(self):
-        """更新选择状态显示"""
-        selected_count = len(self._get_selected_videos())
-        total_count = self.video_list.count()
-        self.selection_status_label.setText(f"已选择：{selected_count}/{total_count}")
+        """更新选择状态显示（忽略分组头）"""
+        selected_count = 0
+        total_checkable = 0
+        for i in range(self.video_list.count()):
+            it = self.video_list.item(i)
+            if it.flags() & Qt.ItemIsUserCheckable:
+                total_checkable += 1
+                if it.checkState() == Qt.Checked:
+                    selected_count += 1
+        self.selection_status_label.setText(f"已选择：{selected_count}/{total_checkable}")
         
         # 更新切换按钮状态
-        if total_count == 0:
+        if total_checkable == 0:
             self.is_all_selected = False
             self.select_toggle_btn.setText("全选")
-        elif selected_count == total_count:
+        elif selected_count == total_checkable:
             self.is_all_selected = True
             self.select_toggle_btn.setText("取消全选")
         else:
             self.is_all_selected = False
             self.select_toggle_btn.setText("全选")
+    
+    def _on_duration_sort_mode_changed(self, mode_text: str):
+        """时长排序/分桶模式变化"""
+        try:
+            if hasattr(self, 'config_manager') and self.config_manager:
+                self.config_manager.set('algorithms.video_description.duration_sort_mode', mode_text)
+        except Exception as e:
+            self._log_message(f"保存时长排序模式失败: {str(e)}")
+        self._apply_duration_sorting()
+    
+    def _apply_duration_sorting(self):
+        """根据下拉框选择对视频列表进行排序或分桶显示"""
+        try:
+            if not hasattr(self, 'video_list') or not hasattr(self, 'duration_sort_mode_combo'):
+                return
+            mode = self.duration_sort_mode_combo.currentText()
+            # 收集当前所有视频项（忽略分组头）
+            items = []
+            for i in range(self.video_list.count()):
+                item = self.video_list.item(i)
+                if item.flags() & Qt.ItemIsUserCheckable:
+                    items.append(item)
+            if not items:
+                return
+            
+            # 备份原始顺序（只生成一次）
+            if not hasattr(self, '_original_video_order'):
+                self._original_video_order = [it.data(Qt.UserRole) for it in items]
+            
+            # 构建 (video_path, item, duration_seconds, checked) 列表
+            entries = []
+            for it in items:
+                vp = it.data(Qt.UserRole)
+                checked = (it.checkState() == Qt.Checked)
+                dur = self._ensure_video_duration(vp)
+                entries.append((vp, it, dur, checked))
+            
+            def rebuild_from_order(ordered_entries, with_groups=False):
+                # 重建列表，同时保持复选框状态
+                self.video_list.clear()
+                if with_groups:
+                    # 定义分桶并收集
+                    groups = {
+                        '0-10s': [],
+                        '10-30s': [],
+                        '30-60s': [],
+                        '1-2min': [],
+                        '2-5min': [],
+                        '5min+': []
+                    }
+                    for vp, _it, dur, checked in ordered_entries:
+                        if dur is None or dur < 0:
+                            group_key = '0-10s'
+                        elif dur <= 10:
+                            group_key = '0-10s'
+                        elif dur <= 30:
+                            group_key = '10-30s'
+                        elif dur <= 60:
+                            group_key = '30-60s'
+                        elif dur <= 120:
+                            group_key = '1-2min'
+                        elif dur <= 300:
+                            group_key = '2-5min'
+                        else:
+                            group_key = '5min+'
+                        groups[group_key].append((vp, dur, checked))
+                    
+                    bucket_order = ['0-10s', '10-30s', '30-60s', '1-2min', '2-5min', '5min+']
+                    for gkey in bucket_order:
+                        if not groups[gkey]:
+                            continue
+                        header = self._create_group_header(gkey)
+                        self.video_list.addItem(header)
+                        for vp, dur, checked in groups[gkey]:
+                            self._recreate_video_item(vp, checked)
+                else:
+                    for vp, _it, _dur, checked in ordered_entries:
+                        self._recreate_video_item(vp, checked)
+                # 刷新选择状态
+                self._update_selection_status()
+            
+            if mode == '默认顺序':
+                order_map = {vp: idx for idx, vp in enumerate(self._original_video_order)}
+                ordered = sorted(entries, key=lambda x: order_map.get(x[0], 1e9))
+                rebuild_from_order(ordered, with_groups=False)
+            elif mode == '按时长升序':
+                ordered = sorted(entries, key=lambda x: (float('inf') if (x[2] is None or x[2] < 0) else x[2], os.path.basename(x[0]).lower()))
+                rebuild_from_order(ordered, with_groups=False)
+            elif mode == '按时长降序':
+                ordered = sorted(entries, key=lambda x: (-(x[2]) if (x[2] is not None and x[2] >= 0) else float('inf'), os.path.basename(x[0]).lower()))
+                rebuild_from_order(ordered, with_groups=False)
+            elif mode == '按时长分桶':
+                ordered = sorted(entries, key=lambda x: (x[2] if x[2] is not None else float('inf')))
+                rebuild_from_order(ordered, with_groups=True)
+        except Exception as e:
+            self._log_message(f"应用时长排序失败: {str(e)}")
+    
+    def _ensure_video_duration(self, video_path: str):
+        """获取视频时长（秒），优先使用缓存，失败返回None"""
+        if hasattr(self, 'video_durations') and video_path in self.video_durations:
+            return self.video_durations.get(video_path)
+        try:
+            cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                cap.release()
+                return None
+            fps = cap.get(cv2.CAP_PROP_FPS) or 0
+            frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
+            dur = frame_count / fps if fps > 0 else 0
+            cap.release()
+            if hasattr(self, 'video_durations'):
+                self.video_durations[video_path] = float(dur)
+            return float(dur)
+        except Exception:
+            return None
+    
+    def _create_group_header(self, text: str) -> QListWidgetItem:
+        """创建不可选择且不可勾选的分组头"""
+        header = QListWidgetItem(text)
+        f = header.font()
+        f.setBold(True)
+        header.setFont(f)
+        header.setFlags(header.flags() & ~Qt.ItemIsUserCheckable & ~Qt.ItemIsSelectable & ~Qt.ItemIsEnabled)
+        return header
+    
+    def _recreate_video_item(self, video_path: str, checked: bool):
+        """按现有样式重建视频项（保持复选框状态）"""
+        item = QListWidgetItem()
+        video_name = os.path.basename(video_path)
+        if self._is_video_processed(video_path):
+            item.setText(f"✅ {video_name}")
+        else:
+            item.setText(video_name)
+        item.setData(Qt.UserRole, video_path)
+        item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+        item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
+        self.video_list.addItem(item)
     
     def _delete_selected_videos(self):
         """删除选中的视频"""
@@ -2529,6 +3131,10 @@ class VideoDescriptionWidget(QWidget):
             self._update_selection_status()
             
             self._log_message(f"已删除 {len(selected_videos)} 个视频")
+            
+            # 删除后根据模式应用排序/分桶
+            if hasattr(self, 'duration_sort_mode_combo'):
+                self._apply_duration_sorting()
     
     def _add_video_to_list(self, video_path):
         """添加视频到列表（带复选框）"""
@@ -2562,7 +3168,18 @@ class VideoDescriptionWidget(QWidget):
     
     def _on_video_selected(self, item):
         """视频选中事件"""
+        if item is None:
+            return
+        # 忽略分组头或不可勾选的项
+        try:
+            if not (item.flags() & Qt.ItemIsUserCheckable):
+                return
+        except Exception:
+            pass
+        
         video_path = item.data(Qt.UserRole)
+        if not video_path:
+            return
         
         # 播放视频
         self._play_video(video_path)
@@ -2804,11 +3421,11 @@ class VideoDescriptionWidget(QWidget):
             # 创建QImage
             qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
             
-            # 获取固定的显示区域大小
-            display_width = 400
-            display_height = 300
+            # 使用video_label当前可用尺寸进行缩放，保持宽高比
+            label_size = self.video_label.size()
+            display_width = max(1, label_size.width())
+            display_height = max(1, label_size.height())
             
-            # 缩放图像以适应固定尺寸，保持宽高比
             scaled_pixmap = QPixmap.fromImage(qt_image).scaled(
                 display_width, display_height, Qt.KeepAspectRatio, Qt.SmoothTransformation
             )

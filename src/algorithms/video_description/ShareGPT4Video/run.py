@@ -338,15 +338,21 @@ def video_answer(prompt, model, processor, tokenizer, img_grid, do_sample=True,
     logger.info(f"图像数量: {len(img_grid)}")
     
     logger.info("处理图像...")
+    t_img_start = datetime.now()
     image_tensor = process_images(img_grid, processor, model.config)[0]
+    t_img_end = datetime.now()
     logger.info(f"图像张量形状: {image_tensor.shape}")
+    logger.info(f"阶段计时: 图像处理 {(t_img_end - t_img_start).total_seconds():.3f}s")
     
     logger.info("处理输入文本...")
+    t_tok_start = datetime.now()
     input_ids = tokenizer_image_token(
         prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt')
     input_ids = input_ids.unsqueeze(0).to(
         device=model.device, non_blocking=True)
+    t_tok_end = datetime.now()
     logger.info(f"输入ID形状: {input_ids.shape}")
+    logger.info(f"阶段计时: 文本编码 {(t_tok_end - t_tok_start).total_seconds():.3f}s")
     logger.info(f"模型设备: {model.device}")
     
     pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token is not None else tokenizer.eos_token_id
@@ -387,15 +393,39 @@ def video_answer(prompt, model, processor, tokenizer, img_grid, do_sample=True,
         #else:
         #    logger.info("未设置max_new_tokens限制，模型将自由生成")
         
+        # 记录输入token数
+        try:
+            logger.info(f"输入token数: {int(input_ids.shape[-1])}")
+        except Exception:
+            pass
+        
+        t_gen_start = datetime.now()
         output_ids = model.generate(**generate_params)
+        t_gen_end = datetime.now()
+        
+        # 统计输出token数
+        try:
+            gen_tokens = int(output_ids.shape[-1]) if hasattr(output_ids, 'shape') else None
+            if gen_tokens is not None:
+                logger.info(f"阶段计时: 生成 {(t_gen_end - t_gen_start).total_seconds():.3f}s, 输出token数: {gen_tokens}")
+            else:
+                logger.info(f"阶段计时: 生成 {(t_gen_end - t_gen_start).total_seconds():.3f}s")
+        except Exception:
+            logger.info(f"阶段计时: 生成 {(t_gen_end - t_gen_start).total_seconds():.3f}s")
         
         logger.info(f"生成的输出ID形状: {output_ids.shape}")
         
         logger.info("解码输出...")
+        t_dec_start = datetime.now()
         outputs = tokenizer.batch_decode(
             output_ids, skip_special_tokens=True)[0].strip()
+        t_dec_end = datetime.now()
         
-        logger.info(f"解码后输出长度: {len(outputs)} 字符")
+        try:
+            logger.info(f"解码后输出长度: {len(outputs)} 字符")
+        except Exception:
+            pass
+        logger.info(f"阶段计时: 解码 {(t_dec_end - t_dec_start).total_seconds():.3f}s")
     
     if print_res and not silent_mode:  # debug usage
         print('### PROMPTING LM WITH: ', prompt)

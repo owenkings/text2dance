@@ -653,6 +653,9 @@ class MainWindow(QMainWindow):
             current_tab = self.settings.value("currentTab", 0, type=int)
             self.tab_widget.setCurrentIndex(current_tab)
             
+            # 延迟加载各个组件的分割器状态（确保组件已完全初始化）
+            QTimer.singleShot(100, self._load_component_states)
+            
         except Exception as e:
             print(f"加载设置失败: {e}")
     
@@ -668,8 +671,21 @@ class MainWindow(QMainWindow):
             # 保存当前选项卡
             self.settings.setValue("currentTab", self.tab_widget.currentIndex())
             
+            # 保存各个组件的分割器状态
+            if hasattr(self, 'video_description_widget') and self.video_description_widget:
+                self.video_description_widget._save_splitter_state()
+            
         except Exception as e:
             print(f"保存设置失败: {e}")
+    
+    def _load_component_states(self):
+        """加载各个组件的状态"""
+        try:
+            # 加载视频描述组件的分割器状态
+            if hasattr(self, 'video_description_widget') and self.video_description_widget:
+                self.video_description_widget._load_splitter_state()
+        except Exception as e:
+            print(f"加载组件状态失败: {e}")
     
     # 槽函数
     def _new_project(self):

@@ -103,7 +103,7 @@ class ConfigWidget(QWidget):
         basic_layout.addRow("界面主题:", self.theme_combo)
         
         # 自动保存
-        self.auto_save_check = QCheckBox("启用自动保存")
+        self.auto_save_check = QCheckBox("自动保存")
         basic_layout.addRow(self.auto_save_check)
         
         # 自动保存间隔

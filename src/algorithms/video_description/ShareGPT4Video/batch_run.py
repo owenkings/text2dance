@@ -466,10 +466,16 @@ class BatchVideoProcessor:
             self.logger.info(f"批次范围: {batch_start+1}-{batch_end}/{total_videos}")
             
             # 并行预处理视频帧
+            t_pre_start = datetime.now()
             batch_data = self._preprocess_video_batch(batch_configs, max_workers)
+            t_pre_end = datetime.now()
+            self.logger.info(f"批次预处理耗时: {(t_pre_end - t_pre_start).total_seconds():.3f}s")
             
             # GPU批量推理
+            t_inf_start = datetime.now()
             batch_results = self._gpu_batch_inference(batch_data)
+            t_inf_end = datetime.now()
+            self.logger.info(f"批次推理耗时: {(t_inf_end - t_inf_start).total_seconds():.3f}s")
             
             results.extend(batch_results)
             
@@ -500,10 +506,13 @@ class BatchVideoProcessor:
         
         def preprocess_single_video(config):
             """预处理单个视频"""
+            _t0 = datetime.now()
             try:
                 video_path = config.get('video_path')
                 query = config.get('query', 'Describe this video in detail.')
                 num_frames = config.get('num_frames', 16)
+                _auto_selected = (num_frames == 0)
+                _duration_sec = None
                 
                 # 加载视频帧
                 from run import single_test
@@ -551,6 +560,7 @@ class BatchVideoProcessor:
                         total_frames = len(vr)
                         fps = vr.get_avg_fps()
                         duration = total_frames / fps
+                        _duration_sec = float(duration)
                         
                         if duration <= 10:
                             num_frames = 8
@@ -579,22 +589,33 @@ class BatchVideoProcessor:
                 conv.append_message(conv.roles[1], None)
                 prompt = conv.get_prompt()
                 
+                _t1 = datetime.now()
                 return {
                     'config': config,
                     'img_grid': img_grid,
                     'prompt': prompt,
                     'success': True,
-                    'error': None
+                    'error': None,
+                    'stage_times': {
+                        'preprocess': (_t1 - _t0).total_seconds()
+                    },
+                    'selected_num_frames': int(num_frames),
+                    'auto_selected_frames': bool(_auto_selected),
+                    'video_duration_sec': _duration_sec
                 }
                 
             except Exception as e:
+                _t1 = datetime.now()
                 self.logger.error(f"预处理视频失败 {config.get('video_path')}: {str(e)}")
                 return {
                     'config': config,
                     'img_grid': None,
                     'prompt': None,
                     'success': False,
-                    'error': str(e)
+                    'error': str(e),
+                    'stage_times': {
+                        'preprocess': (_t1 - _t0).total_seconds()
+                    }
                 }
         
         # 并行预处理
@@ -607,7 +628,8 @@ class BatchVideoProcessor:
                 batch_data.append(result)
         
         success_count = sum(1 for data in batch_data if data['success'])
-        self.logger.info(f"预处理完成，成功: {success_count}/{len(batch_configs)}")
+        t_batch_pre_end = datetime.now()
+        self.logger.info(f"预处理完成，成功: {success_count}/{len(batch_configs)}，总耗时: {(t_batch_pre_end - t_batch_pre_start).total_seconds():.3f}s")
         
         return batch_data
     
@@ -640,7 +662,8 @@ class BatchVideoProcessor:
                 'error_message': data['error'],
                 'processing_time': 0,
                 'timestamp': datetime.now().isoformat(),
-                'parameters': {}
+                'parameters': {},
+                'stage_times': data.get('stage_times', {})
             }
             results.append(result)
         
@@ -659,6 +682,7 @@ class BatchVideoProcessor:
             self.logger.info("处理批量图像...")
             image_tensors = []
             image_sizes = []
+            image_proc_times = []
             
             for img_grid in img_grids:
                 if not isinstance(img_grid, (list, tuple)):
@@ -673,7 +697,9 @@ class BatchVideoProcessor:
             # 处理文本输入
             self.logger.info("处理批量文本输入...")
             input_ids_list = []
+            tokenize_times = []
             for prompt in prompts:
+                _tt0 = datetime.now()
                 input_ids = tokenizer_image_token(
                     prompt, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt')
                 input_ids = input_ids.unsqueeze(0)
@@ -687,8 +713,8 @@ class BatchVideoProcessor:
                 batch_outputs = []
                 
                 # 逐个推理（因为不同视频的输入长度可能不同）
-                for i, (input_ids, image_tensor, image_size, config) in enumerate(
-                    zip(input_ids_list, image_tensors, image_sizes, configs)):
+                for i, (input_ids, image_tensor, image_size, config, data_item) in enumerate(
+                    zip(input_ids_list, image_tensors, image_sizes, configs, successful_data)):
                     
                     start_time = datetime.now()
                     
@@ -711,10 +737,10 @@ class BatchVideoProcessor:
                     max_new_tokens = config.get('max_new_tokens')
                     if max_new_tokens is not None and max_new_tokens > 0:
                         params['max_new_tokens'] = max_new_tokens
-                    # 如果max_new_tokens为None或0，则不设置该参数，让模型自由生成
                     
                     # 生成
                     try:
+                        t_gen_start = datetime.now()
                         output_ids = self.model.generate(
                             input_ids,
                             images=image_tensor,
@@ -723,13 +749,35 @@ class BatchVideoProcessor:
                             use_cache=True,
                             **params
                         )
+                        t_gen_end = datetime.now()
                         
                         # 解码
+                        t_dec_start = datetime.now()
                         output_text = self.tokenizer.batch_decode(
                             output_ids, skip_special_tokens=True)[0].strip()
+                        t_dec_end = datetime.now()
                         
                         end_time = datetime.now()
                         processing_time = (end_time - start_time).total_seconds()
+                        
+                        # token统计
+                        try:
+                            in_tok = int(input_ids.shape[-1])
+                        except Exception:
+                            in_tok = None
+                        try:
+                            out_tok = int(output_ids.shape[-1]) if hasattr(output_ids, 'shape') else None
+                        except Exception:
+                            out_tok = None
+                        
+                        stage_times = data_item.get('stage_times', {}).copy()
+                        stage_times.update({
+                            'image_process': image_proc_times[i],
+                            'tokenize': tokenize_times[i],
+                            'generate': (t_gen_end - t_gen_start).total_seconds(),
+                            'decode': (t_dec_end - t_dec_start).total_seconds(),
+                            'total': processing_time
+                        })
                         
                         result = {
                             'video_path': config.get('video_path'),
@@ -739,10 +787,19 @@ class BatchVideoProcessor:
                             'error_message': '',
                             'processing_time': processing_time,
                             'timestamp': end_time.isoformat(),
-                            'parameters': params
+                            'parameters': params,
+                            'stage_times': stage_times,
+                            'token_counts': {
+                                'input_tokens': in_tok,
+                                'output_tokens': out_tok
+                            },
+                            'selected_num_frames': data_item.get('selected_num_frames'),
+                            'auto_selected_frames': data_item.get('auto_selected_frames'),
+                            'video_duration_sec': data_item.get('video_duration_sec')
                         }
                         
-                        self.logger.info(f"成功处理视频 {i+1}/{len(successful_data)}: {config.get('video_path')}")
+                        self.logger.info(
+                            f"成功处理视频 {i+1}/{len(successful_data)}: {config.get('video_path')} | 生成: {stage_times['generate']:.3f}s, 解码: {stage_times['decode']:.3f}s, 输入tok: {in_tok}, 输出tok: {out_tok}")
                         
                     except Exception as e:
                         end_time = datetime.now()
@@ -757,7 +814,8 @@ class BatchVideoProcessor:
                             'error_message': error_msg,
                             'processing_time': 0,
                             'timestamp': end_time.isoformat(),
-                            'parameters': params
+                            'parameters': params,
+                            'stage_times': data_item.get('stage_times', {})
                         }
                     
                     results.append(result)
@@ -775,7 +833,8 @@ class BatchVideoProcessor:
                     'error_message': f"批量推理异常: {str(e)}",
                     'processing_time': 0,
                     'timestamp': datetime.now().isoformat(),
-                    'parameters': {}
+                    'parameters': {},
+                    'stage_times': data.get('stage_times', {})
                 }
                 results.append(result)
         
