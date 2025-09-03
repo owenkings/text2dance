@@ -1308,6 +1308,7 @@ class VideoDescriptionWidget(QWidget):
                 background-color: #e3f2fd;
                 border: 1px solid #2196f3;
                 border-radius: 3px;
+                color: #000000; /* 确保选中时文字为黑色，保持可读性 */
             }
             QListWidget::item:hover {
                 background-color: #f5f5f5;

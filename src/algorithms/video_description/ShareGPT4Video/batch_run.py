@@ -502,6 +502,7 @@ class BatchVideoProcessor:
         """
         self.logger.info(f"开始并行预处理 {len(batch_configs)} 个视频")
         
+        t_batch_pre_start = datetime.now()  # 添加缺失的时间戳变量
         batch_data = []
         
         def preprocess_single_video(config):
@@ -685,6 +686,7 @@ class BatchVideoProcessor:
             image_proc_times = []
             
             for img_grid in img_grids:
+                _img_start = datetime.now()
                 if not isinstance(img_grid, (list, tuple)):
                     img_grid = [img_grid]
                 
@@ -693,6 +695,8 @@ class BatchVideoProcessor:
                 
                 image_tensor = process_images(img_grid, self.processor, self.model.config)[0]
                 image_tensors.append(image_tensor)
+                _img_end = datetime.now()
+                image_proc_times.append((_img_end - _img_start).total_seconds())
             
             # 处理文本输入
             self.logger.info("处理批量文本输入...")
@@ -704,6 +708,8 @@ class BatchVideoProcessor:
                     prompt, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt')
                 input_ids = input_ids.unsqueeze(0)
                 input_ids_list.append(input_ids)
+                _tt1 = datetime.now()
+                tokenize_times.append((_tt1 - _tt0).total_seconds())
             
             # 批量推理
             self.logger.info("开始批量推理...")
