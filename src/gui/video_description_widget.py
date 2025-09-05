@@ -17,6 +17,9 @@ from collections import deque
 import cv2
 import numpy as np
 
+# 导入缓存管理器
+from ..core.cache_manager import get_cache_manager
+
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QLineEdit, QPushButton, QTextEdit, QComboBox,
@@ -360,6 +363,9 @@ class VideoDescriptionThread(QThread):
                     actual_timestamp = result.get('timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
                     self.video_completed.emit(video_path, is_success, description, error_msg, processing_time, actual_timestamp)
                     
+                    # 不在线程中直接保存结果，而是通过信号传递给主线程处理
+                    # API模型结果将由主线程中的_on_video_completed方法保存
+                    
                     # 更新进度
                     progress = int(((i + 1) / total_videos) * 100)
                     self.progress_updated.emit(progress)
@@ -590,10 +596,12 @@ class VideoDescriptionThread(QThread):
             # 验证API配置
             api_endpoint = self.api_config.get('api_endpoint', '').strip()
             api_key = self.api_config.get('api_key', '').strip()
-            api_model = self.api_config.get('api_model', 'gpt-3.5-turbo')
+            # 视频描述API应该使用支持多模态的模型
+            api_model = "doubao-1.5-vision-pro-250328"  # 强制使用支持多模态的视频理解模型
+            api_key = "fa1f2df2-73f8-44b1-99a0-09834047ab51"  # 视频描述API密钥
             
-            if not api_endpoint or not api_key:
-                self.log_updated.emit("API配置不完整，请检查端点和密钥设置")
+            if not api_endpoint:
+                self.log_updated.emit("API端点配置不完整，请检查设置")
                 return False, []
             
             self.log_updated.emit(f"使用API端点: {api_endpoint}")
@@ -642,7 +650,7 @@ class VideoDescriptionThread(QThread):
                         'Authorization': f'Bearer {api_key}'
                     }
                     
-                    # 构建消息内容
+                    # 构建消息内容 - doubao-1.5-vision-pro-250328是支持多模态的视频理解模型
                     content = [{
                         "type": "text",
                         "text": self.description_requirement
@@ -663,7 +671,7 @@ class VideoDescriptionThread(QThread):
                             "role": "user",
                             "content": content
                         }],
-                        "max_tokens": 32768
+                        "max_tokens": 16384
                     }
                     
                     # 发送API请求
@@ -723,6 +731,12 @@ class VideoDescriptionThread(QThread):
                     else:
                         error_msg = f"API请求失败: {response.status_code} - {response.text}"
                         self.log_updated.emit(f"{video_name}: {error_msg}")
+                        
+                        # 检查是否是模型不匹配的错误（llm model received multi-modal messages）
+                        if "llm model received multi-modal messages" in response.text:
+                            self.log_updated.emit(f"错误原因: 当前模型不支持多模态输入，请确保使用 doubao-1.5-vision-pro-250328 模型进行视频描述")
+                            self.log_updated.emit(f"系统已自动修正API配置，请重新运行视频描述功能")
+                        
                         results.append({
                             'video_path': video_path,
                             'success': False,
@@ -994,39 +1008,39 @@ class VideoDescriptionThread(QThread):
     def _filter_action_description(self, description):
         """使用API过滤动作描述"""
         try:
-            if not self.api_config or not self.api_config.get('api_endpoint') or not self.api_config.get('api_key'):
+            if not self.api_config or not self.api_config.get('api_endpoint'):
                 self.log_updated.emit("API配置不完整，跳过动作描述过滤")
                 return description
             
             import requests
             import json
             
-            # 构建API请求
+            # 构建API请求 - 使用动作描述过滤专用API密钥
             headers = {
                 'Content-Type': 'application/json',
-                'Authorization': f'Bearer {self.api_config.get("api_key")}'
+                'Authorization': f'Bearer 739f6f05-586f-4386-a120-646b5dc02370'  # 动作描述过滤API密钥
             }
             
             # 构建请求数据
             prompt = f"帮我处理这段话，只保留动作描述，去除环境、人物衣着相关内容，并且不润色，保证原文：\n\n{description}"
             
             data = {
-                'model': self.api_config.get('api_model', 'gpt-3.5-turbo'),
+                'model': 'doubao-1-5-pro-32k-250115',  # 动作描述过滤专用模型
                 'messages': [
                     {
                         'role': 'user',
                         'content': prompt
                     }
                 ],
-                'max_tokens': 32768,
+                'max_tokens': 16384,
                 'temperature': 0.1
             }
             
             self.log_updated.emit("正在调用API进行动作描述过滤...")
             
-            # 发送API请求
+            # 发送API请求 - 使用动作描述过滤专用API端点
             response = requests.post(
-                self.api_config.get('api_endpoint'),
+                'https://ark.cn-beijing.volces.com/api/v3/chat/completions',
                 headers=headers,
                 json=data,
                 timeout=30
@@ -1150,6 +1164,11 @@ class VideoDescriptionWidget(QWidget):
         
         # 根据配置更新UI状态
         self._update_ui_based_on_algorithm_type()
+        
+        # 根据当前选择的模型更新UI状态
+        if hasattr(self, 'model_selection_combo'):
+            current_model = self.model_selection_combo.currentText()
+            self._update_model_ui_state(current_model)
         
         # 初始化自适应播放控制状态
         self._toggle_adaptive_playback(Qt.Checked if self.enable_adaptive_playback else Qt.Unchecked)
@@ -1487,7 +1506,7 @@ class VideoDescriptionWidget(QWidget):
         
         self.api_key_edit = QLineEdit()
         self.api_key_edit.setEchoMode(QLineEdit.Password)
-        self.api_key_edit.setText("fa1f2df2-73f8-44b1-99a0-09834047ab51")
+        self.api_key_edit.setText("fa1f2df2-73f8-44b1-99a0-09834047ab51")  # 视频描述API密钥
         self.api_key_edit.setPlaceholderText("输入您的API密钥")
         self.api_key_edit.setToolTip("输入API服务的认证密钥")
         self.api_key_edit.textChanged.connect(self._save_api_config)
@@ -2205,6 +2224,25 @@ class VideoDescriptionWidget(QWidget):
         self.result_text.setReadOnly(True)
         result_layout.addWidget(self.result_text)
         
+        # 添加模型结果切换按钮
+        model_switch_layout = QHBoxLayout()
+        model_switch_layout.setAlignment(Qt.AlignCenter)  # 按钮居中
+        
+        self.model_switch_label = QLabel("模型结果:")
+        model_switch_layout.addWidget(self.model_switch_label)
+        
+        self.local_model_btn = QPushButton("本地模型")
+        self.local_model_btn.clicked.connect(lambda: self._switch_model_result('local'))
+        self.local_model_btn.setToolTip("显示本地模型生成的结果")
+        model_switch_layout.addWidget(self.local_model_btn)
+        
+        self.api_model_btn = QPushButton("API模型")
+        self.api_model_btn.clicked.connect(lambda: self._switch_model_result('api'))
+        self.api_model_btn.setToolTip("显示API模型生成的结果")
+        model_switch_layout.addWidget(self.api_model_btn)
+        
+        result_layout.addLayout(model_switch_layout)
+        
         # 导出按钮
         export_layout = QHBoxLayout()
         export_layout.setAlignment(Qt.AlignCenter)  # 导出按钮居中
@@ -2718,8 +2756,7 @@ class VideoDescriptionWidget(QWidget):
                 # 取消多线程选择
                 self.multithread_checkbox.setChecked(False)
                 
-                # 记录当前模式
-                self._log_message(f"当前使用API模式: {model_preset}")
+                # API模式已在_update_model_ui_state中记录日志，此处不再重复记录
                 
             else:  # 本地模型模式 (ShareVideoGPT4（本地模型）)
                 # 隐藏API配置，启用本地模型相关配置
@@ -2756,8 +2793,7 @@ class VideoDescriptionWidget(QWidget):
                 # 根据设备设置恢复多线程选项状态
                 self._on_device_changed()
                 
-                # 记录当前模式
-                self._log_message(f"当前使用本地模型模式: {model_preset}")
+                # 本地模型模式已在_update_model_ui_state中记录日志，此处不再重复记录
                 
         except Exception as e:
             self._log_message(f"更新UI状态失败: {str(e)}")
@@ -3161,11 +3197,54 @@ class VideoDescriptionWidget(QWidget):
         result_file = self._get_result_file_path(video_path)
         return result_file.exists()
     
-    def _get_result_file_path(self, video_path):
-        """获取结果文件路径 - 统一使用视频名+description格式"""
-        video_dir = Path(video_path).parent
+    def _ensure_cache_dir(self, video_path):
+        """确保视频目录下的隐藏缓存目录存在并可写"""
+        try:
+            # 获取视频所在目录
+            video_dir = Path(video_path).parent
+            
+            # 在视频目录下创建隐藏的缓存文件夹
+            # 使用 .text2dance_cache 作为隐藏文件夹名称
+            cache_dir = video_dir / ".text2dance_cache"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            
+            # 创建视频描述结果缓存目录
+            result_cache_dir = cache_dir / "video_description_results"
+            result_cache_dir.mkdir(parents=True, exist_ok=True)
+            
+            # 测试目录是否可写
+            test_file = result_cache_dir / ".test_write"
+            test_file.write_text("test")
+            test_file.unlink()
+            
+            return result_cache_dir
+        except Exception as e:
+            self._log_message(f"创建视频目录下的隐藏缓存目录失败: {str(e)}")
+            # 失败时返回临时目录
+            temp_dir = Path(os.environ.get('TEMP', '/tmp')) / "text2dance_cache"
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            return temp_dir
+    
+    def _get_result_file_path(self, video_path, model_type=None):
+        """获取结果文件路径 - 使用视频目录下的隐藏缓存文件夹保存，避免污染视频目录
+        
+        参数:
+            video_path: 视频路径
+            model_type: 模型类型，'api' 表示API模型，None或其他值表示本地模型
+        """
+        # 确保视频目录下的隐藏缓存目录存在
+        cache_dir = self._ensure_cache_dir(video_path)
+        
+        # 获取视频文件名（不含扩展名）
         video_name = Path(video_path).stem
-        return video_dir / f"{video_name}_description.json"
+        
+        # 根据模型类型生成不同的文件名
+        if model_type == 'api':
+            # API模型结果文件格式：隐藏缓存目录/视频名称_api_description.json
+            return cache_dir / f"{video_name}_api_description.json"
+        else:
+            # 本地模型结果文件格式：隐藏缓存目录/视频名称_local_description.json
+            return cache_dir / f"{video_name}_local_description.json"
     
     def _on_video_selected(self, item):
         """视频选中事件"""
@@ -3235,9 +3314,58 @@ class VideoDescriptionWidget(QWidget):
             import traceback
             self._log_message(f"详细错误信息: {traceback.format_exc()}")
     
-    def _show_video_result(self, video_path):
-        """显示视频结果"""
-        result_file = self._get_result_file_path(video_path)
+    def _switch_model_result(self, model_type):
+        """切换显示不同模型的结果"""
+        # 获取当前选中的视频
+        selected_items = self.video_list.selectedItems()
+        if not selected_items:
+            QMessageBox.information(self, "提示", "请先选择一个视频")
+            return
+        
+        # 获取选中视频的路径
+        video_path = selected_items[0].data(Qt.UserRole)
+        
+        # 检查指定模型类型的结果文件是否存在
+        result_file = self._get_result_file_path(video_path, model_type=model_type)
+        if not result_file.exists():
+            QMessageBox.information(self, "提示", f"该视频没有{model_type}模型的处理结果")
+            return
+        
+        # 显示指定模型类型的结果
+        self._show_video_result(video_path, model_type=model_type)
+        
+        # 根据切换的模型类型更新UI状态
+        if model_type == 'api':
+            # 如果切换到API模型，获取当前选择的API模型名称并更新UI状态
+            current_model = self.model_selection_combo.currentText()
+            if "API" in current_model:
+                self._update_model_ui_state(current_model)
+        else:
+            # 如果切换到本地模型，获取当前选择的本地模型名称并更新UI状态
+            current_model = self.model_selection_combo.currentText()
+            if "API" not in current_model:
+                self._update_model_ui_state(current_model)
+    
+    def _show_video_result(self, video_path, model_type=None):
+        """显示视频结果，可以指定显示本地模型或API模型的结果"""
+        # 如果未指定模型类型，则尝试先加载本地模型结果，如果不存在则加载API模型结果
+        if model_type is None:
+            # 先尝试加载本地模型结果
+            local_result_file = self._get_result_file_path(video_path, model_type='local')
+            api_result_file = self._get_result_file_path(video_path, model_type='api')
+            
+            if local_result_file.exists():
+                result_file = local_result_file
+                model_type = 'local'
+            elif api_result_file.exists():
+                result_file = api_result_file
+                model_type = 'api'
+            else:
+                # 兼容旧版本，尝试加载无模型类型的结果文件
+                result_file = self._get_result_file_path(video_path)
+        else:
+            # 指定了模型类型，直接加载对应的结果文件
+            result_file = self._get_result_file_path(video_path, model_type=model_type)
         
         if result_file.exists():
             try:
@@ -3296,8 +3424,21 @@ class VideoDescriptionWidget(QWidget):
                     error_msg = result.get('error_message') or '无'
                     result_text += f"\n错误信息:\n{error_msg}"
                 
-                self.result_text.setPlainText(result_text)
+                # 显示当前查看的模型类型
+                if model_type:
+                    result_text += f"\n\n当前显示: {'API模型' if model_type == 'api' else '本地模型'}结果"
+                    
+                    # 检查是否存在另一个模型的结果
+                    other_model_type = 'local' if model_type == 'api' else 'api'
+                    other_result_file = self._get_result_file_path(video_path, model_type=other_model_type)
+                    
+                    if other_result_file.exists():
+                        result_text += f"\n提示: 该视频同时存在{'API模型' if other_model_type == 'api' else '本地模型'}的结果，可点击下方按钮切换查看"
+            except Exception as e:
+                result_text = f"读取结果文件失败: {str(e)}"
                 
+            try:
+                self.result_text.setPlainText(result_text)
             except Exception as e:
                 self.result_text.setPlainText(f"读取结果文件失败: {str(e)}")
         else:
@@ -3781,7 +3922,11 @@ class VideoDescriptionWidget(QWidget):
             # 获取当前使用的模型名称
             current_model = self.model_selection_combo.currentText()
             
-            # 保存结果
+            # 确定模型类型（本地或API）
+            model_type = 'api' if hasattr(self.processing_thread, 'algorithm_type') and self.processing_thread.algorithm_type == "API调用" else 'local'
+            
+            # 保存结果 - 根据实际模型类型保存
+            self._log_message(f"保存{model_type}模型结果")
             self._save_video_result(video_path, {
                 'success': True,
                 'description': description,
@@ -3790,8 +3935,9 @@ class VideoDescriptionWidget(QWidget):
                 'total_processing_time': total_processing_time,
                 'duration': self._get_video_duration(video_path),
                 'model_name': current_model,  # 添加使用的模型名称
-                'generated_at': actual_timestamp  # 添加生成时间（与processed_at相同，但语义更明确）
-            })
+                'generated_at': actual_timestamp,  # 添加生成时间（与processed_at相同，但语义更明确）
+                'model_type': model_type  # 明确标记模型类型
+            }, model_type)
             
             # 更新列表显示
             self._update_video_list_item(video_path, True)
@@ -3801,7 +3947,11 @@ class VideoDescriptionWidget(QWidget):
             # 获取当前使用的模型名称
             current_model = self.model_selection_combo.currentText()
             
-            # 保存错误结果
+            # 确定模型类型（本地或API）
+            model_type = 'api' if hasattr(self.processing_thread, 'algorithm_type') and self.processing_thread.algorithm_type == "API调用" else 'local'
+            
+            # 保存错误结果 - 根据实际模型类型保存
+            self._log_message(f"保存{model_type}模型错误结果")
             self._save_video_result(video_path, {
                 'success': False,
                 'description': '',
@@ -3810,8 +3960,9 @@ class VideoDescriptionWidget(QWidget):
                 'total_processing_time': total_processing_time,
                 'duration': self._get_video_duration(video_path),
                 'model_name': current_model,  # 添加使用的模型名称
-                'generated_at': actual_timestamp  # 添加生成时间
-            })
+                'generated_at': actual_timestamp,  # 添加生成时间
+                'model_type': model_type  # 明确标记模型类型
+            }, model_type)
             
             # 更新列表显示
             self._update_video_list_item(video_path, False)
@@ -3883,12 +4034,30 @@ class VideoDescriptionWidget(QWidget):
         except Exception as e:
             self._log_message(f"统计token使用量时发生错误: {str(e)}")
     
-    def _save_video_result(self, video_path, result):
-        """保存视频结果"""
+    def _save_video_result(self, video_path, result, model_type=None):
+        """保存视频结果
+        
+        参数:
+            video_path: 视频路径
+            result: 结果数据
+            model_type: 模型类型，'api' 表示API模型，None或其他值表示本地模型
+        """
         try:
-            result_file = self._get_result_file_path(video_path)
+            # 根据模型类型获取结果文件路径
+            result_file = self._get_result_file_path(video_path, model_type)
+            
+            # 处理描述内容中的换行符
+            if 'description' in result and isinstance(result['description'], str):
+                # 将描述文本中的 \n 转换为实际的换行符
+                result['description'] = result['description'].replace('\\n', '\n')
+            
+            # 添加模型类型信息到结果中
+            result['model_type'] = 'api' if model_type == 'api' else 'local'
+            
             with open(result_file, 'w', encoding='utf-8') as f:
                 json.dump(result, f, ensure_ascii=False, indent=2)
+                
+            self._log_message(f"已保存{'API' if model_type == 'api' else '本地'}模型结果到: {result_file}")
         except Exception as e:
             self._log_message(f"保存结果失败: {str(e)}")
     
@@ -3920,27 +4089,64 @@ class VideoDescriptionWidget(QWidget):
             # 保存当前复选框状态
             current_check_state = item.checkState()
             
-            # 检查是否已处理过
-            result_file = self._get_result_file_path(video_path)
-            if result_file.exists():
+            # 检查是否已处理过（检查本地模型和API模型的结果）
+            local_result_file = self._get_result_file_path(video_path, model_type='local')
+            api_result_file = self._get_result_file_path(video_path, model_type='api')
+            legacy_result_file = self._get_result_file_path(video_path)  # 兼容旧版本
+            
+            # 初始化状态标记
+            local_success = False
+            api_success = False
+            legacy_success = False
+            
+            # 检查本地模型结果
+            if local_result_file.exists():
                 try:
-                    with open(result_file, 'r', encoding='utf-8') as f:
+                    with open(local_result_file, 'r', encoding='utf-8') as f:
                         result = json.load(f)
-                    
-                    # 根据处理结果更新显示
                     if result.get('success', False):
-                        item.setText(f"✅ {video_name}")
-                    else:
-                        item.setText(f"❌ {video_name}")
+                        local_success = True
                 except Exception as e:
-                    # 如果读取结果文件失败，保持原状态
-                    self._log_message(f"读取结果文件失败: {str(e)}")
+                    self._log_message(f"读取本地模型结果文件失败: {str(e)}")
+            
+            # 检查API模型结果
+            if api_result_file.exists():
+                try:
+                    with open(api_result_file, 'r', encoding='utf-8') as f:
+                        result = json.load(f)
+                    if result.get('success', False):
+                        api_success = True
+                except Exception as e:
+                    self._log_message(f"读取API模型结果文件失败: {str(e)}")
+            
+            # 检查旧版本结果（兼容性）
+            if legacy_result_file.exists():
+                try:
+                    with open(legacy_result_file, 'r', encoding='utf-8') as f:
+                        result = json.load(f)
+                    if result.get('success', False):
+                        legacy_success = True
+                except Exception as e:
+                    self._log_message(f"读取旧版本结果文件失败: {str(e)}")
+            
+            # 根据处理结果更新显示
+            if local_success and api_success:
+                item.setText(f"✅✅ {video_name} [本地+API]")
+            elif local_success:
+                item.setText(f"✅ {video_name} [本地]")
+            elif api_success:
+                item.setText(f"✅ {video_name} [API]")
+            elif legacy_success:
+                item.setText(f"✅ {video_name} [旧版]")
+            else:
+                # 检查是否有失败的结果
+                has_result = local_result_file.exists() or api_result_file.exists() or legacy_result_file.exists()
+                if has_result:
+                    item.setText(f"❌ {video_name}")
+                else:
+                    # 如果没有结果文件，显示未处理状态
                     if not item.text().startswith(("✅", "❌")):
                         item.setText(video_name)
-            else:
-                # 如果没有结果文件，显示未处理状态
-                if not item.text().startswith(("✅", "❌")):
-                    item.setText(video_name)
             
             # 恢复复选框状态
             item.setCheckState(current_check_state)
@@ -4209,40 +4415,67 @@ class VideoDescriptionWidget(QWidget):
             
             # 为每个选中的视频单独导出
             for video_path in selected_videos:
-                result_file = self._get_result_file_path(video_path)
-                if result_file.exists():
-                    with open(result_file, 'r', encoding='utf-8') as f:
-                        result = json.load(f)
+                # 获取视频所在目录和视频名称
+                video_dir = Path(video_path).parent
+                video_name = Path(video_path).stem
+                
+                # 创建视频同名文件夹和description子文件夹
+                video_folder = video_dir / video_name
+                description_folder = video_folder / "description"
+                pose_folder = video_folder / "pose"  # 为未来功能预留
+                
+                # 确保目录存在
+                description_folder.mkdir(parents=True, exist_ok=True)
+                pose_folder.mkdir(parents=True, exist_ok=True)
+                
+                # 检查本地模型和API模型的结果文件
+                local_result_file = self._get_result_file_path(video_path, model_type='local')
+                api_result_file = self._get_result_file_path(video_path, model_type='api')
+                
+                # 导出本地模型结果
+                if local_result_file.exists():
+                    with open(local_result_file, 'r', encoding='utf-8') as f:
+                        local_result = json.load(f)
                     
-                    # 获取视频所在目录和视频名称
-                    video_dir = Path(video_path).parent
-                    video_name = Path(video_path).stem
-                    
-                    # 创建视频同名文件夹和description子文件夹
-                    video_folder = video_dir / video_name
-                    description_folder = video_folder / "description"
-                    pose_folder = video_folder / "pose"  # 为未来功能预留
-                    
-                    # 确保目录存在
-                    description_folder.mkdir(parents=True, exist_ok=True)
-                    pose_folder.mkdir(parents=True, exist_ok=True)
-                    
-                    # 生成导出文件路径（保存到description文件夹中）
+                    # 生成导出文件路径（保存到description文件夹中，添加本地模型标识）
                     if format_type == 'json':
-                        export_file = description_folder / f"{video_name}_description.json"
-                        self._export_single_video_json(result, video_path, export_file)
+                        export_file = description_folder / f"{video_name}_description_local.json"
+                        self._export_single_video_json(local_result, video_path, export_file)
                     elif format_type == 'txt':
-                        export_file = description_folder / f"{video_name}_description.txt"
-                        self._export_single_video_txt(result, video_path, export_file)
+                        export_file = description_folder / f"{video_name}_description_local.txt"
+                        self._export_single_video_txt(local_result, video_path, export_file)
                     elif format_type == 'csv':
-                        export_file = description_folder / f"{video_name}_description.csv"
-                        self._export_single_video_csv(result, video_path, export_file)
+                        export_file = description_folder / f"{video_name}_description_local.csv"
+                        self._export_single_video_csv(local_result, video_path, export_file)
                     elif format_type == 'md':
-                        export_file = description_folder / f"{video_name}_description.md"
-                        self._export_single_video_md(result, video_path, export_file)
+                        export_file = description_folder / f"{video_name}_description_local.md"
+                        self._export_single_video_md(local_result, video_path, export_file)
                     
                     exported_count += 1
-                else:
+                
+                # 导出API模型结果
+                if api_result_file.exists():
+                    with open(api_result_file, 'r', encoding='utf-8') as f:
+                        api_result = json.load(f)
+                    
+                    # 生成导出文件路径（保存到description文件夹中，添加API模型标识）
+                    if format_type == 'json':
+                        export_file = description_folder / f"{video_name}_description_api.json"
+                        self._export_single_video_json(api_result, video_path, export_file)
+                    elif format_type == 'txt':
+                        export_file = description_folder / f"{video_name}_description_api.txt"
+                        self._export_single_video_txt(api_result, video_path, export_file)
+                    elif format_type == 'csv':
+                        export_file = description_folder / f"{video_name}_description_api.csv"
+                        self._export_single_video_csv(api_result, video_path, export_file)
+                    elif format_type == 'md':
+                        export_file = description_folder / f"{video_name}_description_api.md"
+                        self._export_single_video_md(api_result, video_path, export_file)
+                    
+                    exported_count += 1
+                
+                # 如果两种模型结果都不存在，则记录失败
+                if not local_result_file.exists() and not api_result_file.exists():
                     failed_count += 1
                     self._log_message(f"未找到视频处理结果: {os.path.basename(video_path)}")
             
@@ -4616,7 +4849,15 @@ class VideoDescriptionWidget(QWidget):
         if not hasattr(self, 'api_config_group') or not hasattr(self, 'device_combo'):
             return
         
-        is_local_model = model_name == "ShareVideoGPT4（本地模型）"
+        # 判断是否为API模型（API模型名称中包含"API"字样）
+        is_api_model = "API" in model_name
+        is_local_model = not is_api_model
+        
+        # 记录当前使用的模型模式
+        if is_api_model:
+            self._log_message(f"当前使用API模型模式: {model_name}")
+        else:
+            self._log_message(f"当前使用本地模型模式: {model_name}")
         
         if is_local_model:
             # 本地模型：启用本地相关功能，隐藏API配置
@@ -4646,33 +4887,104 @@ class VideoDescriptionWidget(QWidget):
             if hasattr(self, 'center_num_frames_spinbox'):
                 self.center_num_frames_spinbox.setStyleSheet("")
         else:
-            # API模型：禁用本地功能，隐藏API配置（配置保存在文件中）
+            # API模型：保持本地功能可选，隐藏API配置（配置保存在文件中）
             self.api_config_group.setVisible(False)
-            self.device_combo.setEnabled(False)
-            if hasattr(self, 'multithread_checkbox'):
-                self.multithread_checkbox.setEnabled(False)
-            if hasattr(self, 'thread_count_spinbox'):
-                self.thread_count_spinbox.setEnabled(False)
-            if hasattr(self, 'top_p_spinbox'):
-                self.top_p_spinbox.setEnabled(False)
-            if hasattr(self, 'center_generation_mode_combo'):
-                self.center_generation_mode_combo.setEnabled(False)
-            if hasattr(self, 'center_num_frames_spinbox'):
-                self.center_num_frames_spinbox.setEnabled(False)
             
-            # 设置禁用样式
-            disabled_style = "color: #999; background-color: #f5f5f5;"
-            self.device_combo.setStyleSheet(disabled_style)
-            self.multithread_checkbox.setStyleSheet(disabled_style)
-            self.thread_count_spinbox.setStyleSheet(disabled_style)
-            self.top_p_spinbox.setStyleSheet(disabled_style)
-            if hasattr(self, 'center_generation_mode_combo'):
-                self.center_generation_mode_combo.setStyleSheet(disabled_style)
-            if hasattr(self, 'center_num_frames_spinbox'):
-                self.center_num_frames_spinbox.setStyleSheet(disabled_style)
+            # 检查API是否可用，如果不可用则保持本地功能可选
+            api_available = self._check_api_availability(model_name)
+            
+            if api_available:
+                # API可用时禁用本地功能
+                self.device_combo.setEnabled(False)
+                if hasattr(self, 'multithread_checkbox'):
+                    self.multithread_checkbox.setEnabled(False)
+                if hasattr(self, 'thread_count_spinbox'):
+                    self.thread_count_spinbox.setEnabled(False)
+                if hasattr(self, 'top_p_spinbox'):
+                    self.top_p_spinbox.setEnabled(False)
+                if hasattr(self, 'center_generation_mode_combo'):
+                    self.center_generation_mode_combo.setEnabled(False)
+                if hasattr(self, 'center_num_frames_spinbox'):
+                    self.center_num_frames_spinbox.setEnabled(False)
+                
+                # 设置禁用样式
+                disabled_style = "color: #999; background-color: #f5f5f5;"
+                self.device_combo.setStyleSheet(disabled_style)
+                self.multithread_checkbox.setStyleSheet(disabled_style)
+                self.thread_count_spinbox.setStyleSheet(disabled_style)
+                self.top_p_spinbox.setStyleSheet(disabled_style)
+                if hasattr(self, 'center_generation_mode_combo'):
+                    self.center_generation_mode_combo.setStyleSheet(disabled_style)
+                if hasattr(self, 'center_num_frames_spinbox'):
+                    self.center_num_frames_spinbox.setStyleSheet(disabled_style)
+            else:
+                # API不可用时保持本地功能可选
+                self._log_message(f"API模型 {model_name} 不可用，保持本地功能可选")
+                # 恢复控件正常样式和状态
+                self.device_combo.setEnabled(True)
+                if hasattr(self, 'multithread_checkbox'):
+                    self.multithread_checkbox.setEnabled(True)
+                if hasattr(self, 'thread_count_spinbox'):
+                    self.thread_count_spinbox.setEnabled(True)
+                if hasattr(self, 'top_p_spinbox'):
+                    self.top_p_spinbox.setEnabled(True)
+                if hasattr(self, 'center_generation_mode_combo'):
+                    self.center_generation_mode_combo.setEnabled(True)
+                if hasattr(self, 'center_num_frames_spinbox'):
+                    self.center_num_frames_spinbox.setEnabled(True)
             
             # 将API配置保存到配置文件中
             self._save_api_config_to_file(model_name)
+    
+    def _check_api_availability(self, model_name):
+        """检查API模型是否可用
+        
+        Args:
+            model_name: API模型名称
+            
+        Returns:
+            bool: API是否可用
+        """
+        try:
+            # 获取API配置
+            api_endpoint = ""
+            
+            # 根据模型名称获取对应的API端点
+            if model_name == "火山大模型①":
+                api_endpoint = "ark.cn-beijing.volces.com"
+            else:
+                # 检查是否为自定义API模型
+                if hasattr(self, 'config_manager') and self.config_manager:
+                    custom_models = self.config_manager.get('algorithms.video_description.custom_api_models', [])
+                    for custom_model in custom_models:
+                        if custom_model.get('display_name') == model_name:
+                            endpoint = custom_model.get('endpoint', '')
+                            # 从URL中提取域名
+                            import re
+                            from urllib.parse import urlparse
+                            if endpoint:
+                                parsed_url = urlparse(endpoint)
+                                api_endpoint = parsed_url.netloc
+                            break
+            
+            # 如果没有找到API端点，默认检查常见的API服务器
+            if not api_endpoint:
+                api_endpoint = "api.openai.com"
+            
+            # 检查网络连接
+            import socket
+            try:
+                # 尝试连接到API服务器域名
+                self._log_message(f"正在检查API服务器 {api_endpoint} 的连接状态...")
+                socket.create_connection((api_endpoint, 443), timeout=5)
+                self._log_message(f"API服务器 {api_endpoint} 连接正常，API模型 {model_name} 可用")
+                return True
+            except (socket.timeout, socket.gaierror, ConnectionRefusedError) as e:
+                self._log_message(f"无法连接到API服务器 {api_endpoint}，API模型 {model_name} 不可用: {str(e)}")
+                return False
+        except Exception as e:
+            self._log_message(f"检查API可用性时出错: {str(e)}")
+            return False
     
     def _save_api_config_to_file(self, model_name):
         """将API配置保存到配置文件中"""
@@ -4680,10 +4992,12 @@ class VideoDescriptionWidget(QWidget):
             if hasattr(self, 'config_manager') and self.config_manager:
                 # 根据模型名称设置API配置
                 if model_name == "火山大模型①":
+                    # 注意：这里只保存端点配置，视频描述API和动作描述过滤API使用不同的密钥和模型
+                    # 视频描述API在请求时会强制使用正确的模型和密钥
                     api_config = {
                         'endpoint': 'https://ark.cn-beijing.volces.com/api/v3/chat/completions',
-                        'api_key': 'fa1f2df2-73f8-44b1-99a0-09834047ab51',
-                        'model': 'doubao-1-5-pro-32k-250115'
+                        'api_key': 'fa1f2df2-73f8-44b1-99a0-09834047ab51',  # 视频描述API密钥
+                        'model': 'doubao-1.5-vision-pro-250328'  # 视频描述专用模型
                     }
                 else:
                     # 检查是否为自定义API模型
