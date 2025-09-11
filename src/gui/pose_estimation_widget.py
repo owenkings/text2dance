@@ -12,7 +12,6 @@ import time
 from pathlib import Path
 from typing import Dict, Any, Optional
 from collections import deque
-from datetime import datetime
 import cv2
 import numpy as np
 
@@ -108,11 +107,13 @@ class PoseEstimationThread(QThread):
             # 第一步：运行 run_demo.py 生成 PKL 文件
             self.log_updated.emit(f"步骤1: 运行姿势估计生成PKL文件...")
             
-            # 构建输出目录 - 使用视频所在目录下的视频名称/pose文件夹
+            # 构建输出目录 - 使用输入视频的同级目录下的pose文件夹
             video_dir = os.path.dirname(video_path)
-            video_folder = os.path.join(video_dir, video_name)
-            output_dir = os.path.join(video_folder, "pose")
+            output_dir = os.path.join(video_dir, video_name, "pose")
             os.makedirs(output_dir, exist_ok=True)
+            
+            # 项目根目录仍需要用于脚本路径
+            project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
             
             # 运行 run_demo.py
             run_demo_script = os.path.join(pose3d_dir, "main", "run_demo.py")
@@ -129,10 +130,11 @@ class PoseEstimationThread(QThread):
             # 设置工作目录为项目根目录，确保输出保存到正确位置
             project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
             
-            # 设置环境变量以确保UTF-8编码
+            # 设置环境变量以确保UTF-8编码和正确的输出路径
             env = os.environ.copy()
             env['PYTHONIOENCODING'] = 'utf-8'
             env['PYTHONLEGACYWINDOWSSTDIO'] = '1'
+            env['POSE_OUTPUT_DIR'] = output_dir  # 设置PKL文件输出目录
             
             result = subprocess.run(
                 demo_cmd,
@@ -155,16 +157,19 @@ class PoseEstimationThread(QThread):
                 # FBX模式：运行 improved_pkl_to_fbx_converter.py
                 self.log_updated.emit(f"步骤2a: 转换PKL文件为FBX格式...")
                 
-                converter_script = os.path.join(pose3d_dir, "main", "improved_pkl_to_fbx_converter.py")
+                converter_script = os.path.join(pose3d_dir, "main", "animated_smpl_fbx_converter.py")
                 
                 # 使用FBX专用的Python环境
                 project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
                 fbx_python = os.path.join(project_root, "fbx_env_py37", "Scripts", "python.exe")
                 
+                pkl_file = os.path.join(output_dir, "pmce_output.pkl")
+                output_fbx_path = os.path.join(output_dir, f"{video_name}_animated.fbx")
+                
                 converter_cmd = [
                     fbx_python, converter_script,
-                    "--video_file", video_path,
-                    "--output_dir", output_dir
+                    "--pkl", pkl_file,
+                    "--output_path", output_fbx_path
                 ]
                 
                 self.log_updated.emit(f"执行命令: {' '.join(converter_cmd)}")
@@ -186,9 +191,8 @@ class PoseEstimationThread(QThread):
                     error_msg = result.stderr or result.stdout or "FBX转换失败"
                     return False, "", f"步骤2a失败: {error_msg}"
                 
-                fbx_output_path = os.path.join(output_dir, f"improved_{video_name}_model.fbx")
-                output_paths.append(fbx_output_path)
-                self.log_updated.emit(f"[SUCCESS] FBX文件生成成功: {fbx_output_path}")
+                output_paths.append(output_fbx_path)
+                self.log_updated.emit(f"[SUCCESS] FBX文件生成成功: {output_fbx_path}")
             
             if self.output_format == "2D和3D对齐视频" or self.output_format == "两者都有":
                 # 视频模式：运行 run_flexible_alignment.py
@@ -223,44 +227,14 @@ class PoseEstimationThread(QThread):
                     error_msg = result.stderr or result.stdout or "视频生成失败"
                     return False, "", f"{step_name}失败: {error_msg}"
                 
-                # 查找实际生成的视频文件
-                # run_flexible_alignment.py 可能生成不同格式的文件名
-                possible_patterns = [
-                    f"{video_name}_PERSON_*_3D_ALIGNMENT.mp4",
-                    f"{video_name}_SINGLE_3D_ALIGNMENT.mp4",
-                    f"{video_name}_MULTI_PERSON_3D_ALIGNMENT.mp4",
-                    f"{video_name}_AUTO_SINGLE_3D_ALIGNMENT.mp4"
-                ]
+                # 直接使用固定的输出文件名，不进行模式匹配
+                video_output_path = os.path.join(output_dir, f"{video_name}_alignment_output.mp4")
                 
-                video_output_path = None
-                import glob
-                
-                # 首先在输出目录中查找
-                for pattern in possible_patterns:
-                    matches = glob.glob(os.path.join(output_dir, pattern))
-                    if matches:
-                        video_output_path = matches[0]
-                        break
-                
-                # 如果在输出目录没找到，在项目根目录查找
-                if not video_output_path:
-                    for pattern in possible_patterns:
-                        matches = glob.glob(os.path.join(project_root, pattern))
-                        if matches:
-                            video_output_path = matches[0]
-                            # 将文件移动到正确的输出目录
-                            import shutil
-                            new_path = os.path.join(output_dir, os.path.basename(video_output_path))
-                            shutil.move(video_output_path, new_path)
-                            video_output_path = new_path
-                            break
-                
-                if not video_output_path:
-                    # 如果还是没找到，使用默认路径但给出警告
-                    video_output_path = os.path.join(output_dir, f"{video_name}_2d_3d_output.mp4")
-                    self.log_updated.emit(f"[WARNING] 未找到生成的视频文件，请检查输出目录")
-                else:
+                # 检查文件是否存在
+                if os.path.exists(video_output_path):
                     self.log_updated.emit(f"[SUCCESS] 2D和3D人体对齐视频生成成功: {video_output_path}")
+                else:
+                    self.log_updated.emit(f"[WARNING] 未找到生成的视频文件: {video_output_path}")
                 
                 output_paths.append(video_output_path)
             
@@ -760,8 +734,6 @@ class PoseEstimationWidget(QWidget):
         video_path = item.data(Qt.UserRole)
         if video_path:
             self._load_video(video_path)
-            # 显示结果（如果有）
-            self._show_video_result(video_path)
     
     def _on_video_check_changed(self, item):
         """视频复选框状态改变"""
@@ -1052,12 +1024,10 @@ class PoseEstimationWidget(QWidget):
         enable_optimization = True
         save_intermediate = False
         
-        # 确定输出目录 - 使用视频所在目录下的视频名称/pose文件夹
-        # 这里传递None，让处理线程根据每个视频的路径动态创建输出目录
-        output_dir = None
-        
-        # 记录当前输出格式
-        self._current_output_format = output_format
+        # 确定输出目录 - 使用项目根目录的绝对路径
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+        output_dir = os.path.join(project_root, "output", "pose_estimation_results")
+        # 注意：不在这里创建目录，而是在实际需要时创建
         
         # 创建处理线程
         self.processing_thread = PoseEstimationThread(
@@ -1097,18 +1067,6 @@ class PoseEstimationWidget(QWidget):
             self._log_message(f"[SUCCESS] {video_name} 处理成功 - 输出: {output_path} - 耗时: {processing_time:.1f}秒")
         else:
             self._log_message(f"[ERROR] {video_name} 处理失败 - 错误: {error_msg} - 耗时: {processing_time:.1f}秒")
-        
-        # 保存处理结果到JSON文件
-        self._save_video_result(video_path, {
-            'video_path': video_path,
-            'success': success,
-            'output_path': output_path,
-            'error_message': error_msg,
-            'processing_time': processing_time,
-            'processed_at': time.strftime('%Y-%m-%d %H:%M:%S'),
-            'output_format': getattr(self, '_current_output_format', 'FBX文件'),
-            'device_info': 'GPU' if hasattr(self, 'processing_thread') else 'CPU'
-        })
     
     def _on_processing_finished(self):
         """处理完成"""
@@ -1116,9 +1074,6 @@ class PoseEstimationWidget(QWidget):
         self.stop_btn.setEnabled(False)
         self.status_label.setText("处理完成")
         self._log_message("所有视频处理完成")
-        
-        # 刷新视频列表状态显示
-        self._refresh_video_list_status()
     
     def _export_results(self, format_type):
         """导出结果"""
@@ -1151,8 +1106,9 @@ class PoseEstimationWidget(QWidget):
         self.log_text.append(formatted_message)
         
         # 自动滚动到底部
-        scrollbar = self.log_text.verticalScrollBar()
-        scrollbar.setValue(scrollbar.maximum())
+        cursor = self.log_text.textCursor()
+        cursor.movePosition(cursor.End)
+        self.log_text.setTextCursor(cursor)
     
     def closeEvent(self, event):
         """关闭事件"""
@@ -1183,9 +1139,6 @@ class PoseEstimationWidget(QWidget):
         self.video_list.itemClicked.connect(self._on_video_selected)
         self.video_list.itemChanged.connect(self._on_video_check_changed)
         
-        # 初始化时刷新视频列表状态
-        QTimer.singleShot(100, self._refresh_video_list_status)
-        
         # 播放控制相关
         self.backward_btn.clicked.connect(self._backward_10s)
         self.play_btn.clicked.connect(self._toggle_playback)
@@ -1212,110 +1165,3 @@ class PoseEstimationWidget(QWidget):
         
         # 播放定时器
         self.play_timer.timeout.connect(self._update_frame)
-    
-    def _get_result_file_path(self, video_path):
-        """获取结果文件路径 - 统一使用视频名+pose_result格式"""
-        from pathlib import Path
-        video_dir = Path(video_path).parent
-        video_name = Path(video_path).stem
-        return video_dir / f"{video_name}_pose_result.json"
-    
-    def _save_video_result(self, video_path, result):
-        """保存视频结果"""
-        try:
-            import json
-            result_file = self._get_result_file_path(video_path)
-            with open(result_file, 'w', encoding='utf-8') as f:
-                json.dump(result, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            self._log_message(f"保存结果失败: {str(e)}")
-    
-    def _load_video_result(self, video_path):
-        """加载视频结果"""
-        try:
-            import json
-            result_file = self._get_result_file_path(video_path)
-            if result_file.exists():
-                with open(result_file, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-        except Exception as e:
-            self._log_message(f"加载结果失败: {str(e)}")
-        return None
-    
-    def _has_video_result(self, video_path):
-        """检查视频是否有处理结果"""
-        result_file = self._get_result_file_path(video_path)
-        return result_file.exists()
-    
-    def _refresh_video_list_status(self):
-        """刷新视频列表状态显示"""
-        for i in range(self.video_list.count()):
-            item = self.video_list.item(i)
-            video_path = item.data(Qt.UserRole)
-            video_name = os.path.basename(video_path)
-            
-            # 保存当前复选框状态
-            current_check_state = item.checkState()
-            
-            # 检查是否有处理结果
-            if self._has_video_result(video_path):
-                try:
-                    result = self._load_video_result(video_path)
-                    if result:
-                        # 根据处理结果更新显示
-                        if result.get('success', False):
-                            item.setText(f"✅ {video_name}")
-                        else:
-                            item.setText(f"❌ {video_name}")
-                except Exception as e:
-                    # 如果读取结果文件失败，保持原状态
-                    self._log_message(f"读取结果文件失败: {str(e)}")
-                    if not item.text().startswith(("✅", "❌")):
-                        item.setText(video_name)
-            else:
-                # 如果没有结果文件，显示未处理状态
-                if not item.text().startswith(("✅", "❌")):
-                    item.setText(video_name)
-            
-            # 恢复复选框状态
-            item.setCheckState(current_check_state)
-    
-    def _show_video_result(self, video_path):
-        """显示视频结果"""
-        result = self._load_video_result(video_path)
-        
-        if result:
-            try:
-                import json
-                result_text = f"视频: {os.path.basename(video_path)}\n"
-                result_text += f"处理状态: {'成功' if result.get('success', False) else '失败'}\n"
-                result_text += f"输出格式: {result.get('output_format', '未知')}\n"
-                result_text += f"处理时间: {result.get('processed_at', '未知')}\n"
-                result_text += f"处理耗时: {result.get('processing_time', 0):.1f}秒\n"
-                result_text += f"设备信息: {result.get('device_info', '未知')}\n"
-                result_text += "-" * 50 + "\n"
-                
-                if result.get('success', False):
-                    output_path = result.get('output_path', '')
-                    if output_path:
-                        result_text += f"输出路径: {output_path}\n"
-                        # 检查输出文件是否存在
-                        if os.path.exists(output_path):
-                            result_text += "状态: 文件存在 ✅\n"
-                        else:
-                            result_text += "状态: 文件不存在 ❌\n"
-                else:
-                    error_msg = result.get('error_message', '无')
-                    result_text += f"错误信息: {error_msg}\n"
-                
-                # 显示在日志区域
-                self._log_message("=== 处理结果详情 ===")
-                for line in result_text.strip().split('\n'):
-                    if line.strip():
-                        self._log_message(line)
-                self._log_message("=" * 50)
-                
-            except Exception as e:
-                self._log_message(f"显示结果失败: {str(e)}")
-        else:
-            self._log_message(f"未找到视频 {os.path.basename(video_path)} 的处理结果")
