@@ -98,6 +98,11 @@ class PoseEstimationThread(QThread):
             self.status_updated.emit(f"处理过程中发生错误: {str(e)}")
             self.log_updated.emit(f"错误: {str(e)}")
     
+    def _get_current_python_path(self):
+        """获取当前Python环境的路径"""
+        # 使用sys.executable获取当前运行的Python解释器路径
+        return sys.executable
+    
     def _process_single_video(self, video_path):
         """处理单个视频"""
         try:
@@ -115,10 +120,14 @@ class PoseEstimationThread(QThread):
             # 项目根目录仍需要用于脚本路径
             project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
             
+            # 获取当前Python环境路径
+            python_path = self._get_current_python_path()
+            self.log_updated.emit(f"使用Python环境: {python_path}")
+            
             # 运行 run_demo.py
             run_demo_script = os.path.join(pose3d_dir, "main", "run_demo.py")
             demo_cmd = [
-                "python", run_demo_script,
+                python_path, run_demo_script,
                 "--vid_file", video_path,
                 "--save_pkl",
                 "--no_render",
@@ -135,6 +144,7 @@ class PoseEstimationThread(QThread):
             env['PYTHONIOENCODING'] = 'utf-8'
             env['PYTHONLEGACYWINDOWSSTDIO'] = '1'
             env['POSE_OUTPUT_DIR'] = output_dir  # 设置PKL文件输出目录
+            env['KMP_DUPLICATE_LIB_OK'] = 'TRUE'  # 解决OpenMP运行时冲突问题
             
             result = subprocess.run(
                 demo_cmd,
@@ -159,7 +169,8 @@ class PoseEstimationThread(QThread):
                 
                 converter_script = os.path.join(pose3d_dir, "main", "animated_smpl_fbx_converter.py")
                 
-                # 使用FBX专用的Python环境
+                # 注意：FBX转换可能需要特定的Python环境，这里保留原来的FBX专用环境
+                # 如果FBX转换也可以使用当前环境，可以替换为self._get_current_python_path()
                 project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
                 fbx_python = os.path.join(project_root, "fbx_env_py37", "Scripts", "python.exe")
                 
@@ -178,6 +189,7 @@ class PoseEstimationThread(QThread):
                 env = os.environ.copy()
                 env['PYTHONIOENCODING'] = 'utf-8'
                 env['PYTHONLEGACYWINDOWSSTDIO'] = '1'
+                env['KMP_DUPLICATE_LIB_OK'] = 'TRUE'  # 解决OpenMP运行时冲突问题
                 
                 result = subprocess.run(
                     converter_cmd,
@@ -202,8 +214,11 @@ class PoseEstimationThread(QThread):
                 alignment_script = os.path.join(pose3d_dir, "test_pose_2d_3d", "run_flexible_alignment.py")
                 pkl_file = os.path.join(output_dir, "pmce_output.pkl")
                 
+                # 获取当前Python环境路径
+                python_path = self._get_current_python_path()
+                
                 alignment_cmd = [
-                    "python", alignment_script,
+                    python_path, alignment_script,
                     "-v", video_path,
                     "-p", pkl_file
                 ]
@@ -1018,7 +1033,7 @@ class PoseEstimationWidget(QWidget):
         else:
             output_format = "FBX文件"  # 默认值
         # 使用默认参数
-        processing_mode = "3D姿势估计"
+        processing_mode = "人体网格重建"
         quality = "标准"
         enable_smoothing = True
         enable_optimization = True
