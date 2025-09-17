@@ -107,7 +107,7 @@ class PoseEstimationThread(QThread):
         """处理单个视频"""
         try:
             video_name = Path(video_path).stem
-            pose3d_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "algorithms", "pose3d")
+            pose3d_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "algorithms", "pose_3d")
             
             # 第一步：运行 run_demo.py 生成 PKL 文件
             self.log_updated.emit(f"步骤1: 运行姿势估计生成PKL文件...")
@@ -190,6 +190,8 @@ class PoseEstimationThread(QThread):
                 env['PYTHONIOENCODING'] = 'utf-8'
                 env['PYTHONLEGACYWINDOWSSTDIO'] = '1'
                 env['KMP_DUPLICATE_LIB_OK'] = 'TRUE'  # 解决OpenMP运行时冲突问题
+
+
                 
                 result = subprocess.run(
                     converter_cmd,
