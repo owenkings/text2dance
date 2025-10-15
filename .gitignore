@@ -177,3 +177,11 @@ config.yaml
 .vscode/
 # Partial download files
 *.part
+# Model files and cache
+model/
+huggingface/
+*.pth
+*.pth.tar
+*.weights
+*.safetensors
+*.bin
