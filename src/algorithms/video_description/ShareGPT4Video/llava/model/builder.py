@@ -55,23 +55,31 @@ if not mirror_success:
         if USER_CACHE_PATH:
             cache_base_path = USER_CACHE_PATH
         else:
-            # 读取配置文件
-            # builder.py -> model -> llava -> ShareGPT4Video -> video_description -> algorithms -> src -> text2dance (7层)
-            project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))))
-            config_file = os.path.join(project_root, "cache_config.txt")
-            
-            if os.path.exists(config_file):
-                try:
-                    with open(config_file, 'r', encoding='utf-8') as f:
-                        for line in f:
-                            line = line.strip()
-                            if line and not line.startswith('#') and '=' in line:
-                                key, value = line.split('=', 1)
-                                if key.strip() == 'cache_path':
-                                    cache_base_path = value.strip()
-                                    break
-                except Exception:
-                    pass
+            # 尝试使用新的UserConfigManager
+            try:
+                # builder.py -> model -> llava -> ShareGPT4Video -> video_description -> algorithms -> src -> text2dance (7层)
+                project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))))
+                sys.path.insert(0, project_root)
+                from src.core.user_config_manager import get_user_config_manager
+                config_manager = get_user_config_manager()
+                cache_base_path = config_manager.config.get('cache_path', '')
+            except Exception:
+                # 回退到直接读取配置文件
+                project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))))
+                config_file = os.path.join(project_root, "cache_config.txt")
+                
+                if os.path.exists(config_file):
+                    try:
+                        with open(config_file, 'r', encoding='utf-8') as f:
+                            for line in f:
+                                line = line.strip()
+                                if line and not line.startswith('#') and '=' in line:
+                                    key, value = line.split('=', 1)
+                                    if key.strip() == 'cache_path':
+                                        cache_base_path = value.strip()
+                                        break
+                    except Exception:
+                        pass
         
         # 如果成功获取到缓存路径，设置环境变量
         if cache_base_path and os.path.exists(cache_base_path):
@@ -116,12 +124,35 @@ def get_cache_path():
             print(f"[WARNING] 用户指定路径无法使用: {USER_CACHE_PATH}, 错误: {e}")
             print("[INFO] 将使用配置文件或默认路径")
 
-    # 2. 定位配置文件 (需要7层dirname从builder.py到达项目根目录)
-    # builder.py -> model -> llava -> ShareGPT4Video -> video_description -> algorithms -> src -> text2dance
+    # 2. 尝试使用新的UserConfigManager
+    try:
+        # 定位项目根目录 (需要7层dirname从builder.py到达项目根目录)
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))))
+        sys.path.insert(0, project_root)
+        from src.core.user_config_manager import get_user_config_manager
+        config_manager = get_user_config_manager()
+        path = config_manager.config.get('cache_path', '')
+        if path:
+            try:
+                # 如果路径不存在，尝试创建
+                os.makedirs(path, exist_ok=True)
+                # 检查写入权限
+                test_file = os.path.join(path, '.write_test')
+                with open(test_file, 'w') as f:
+                    f.write('test')
+                os.remove(test_file)
+                print(f"[OK] 使用配置文件缓存路径: {path}")
+                return path
+            except (OSError, PermissionError) as e:
+                print(f"[WARNING] 配置文件路径无法使用: {path}, 错误: {e}")
+    except Exception as e:
+        print(f"[INFO] UserConfigManager不可用，回退到直接文件读取: {e}")
+
+    # 3. 回退到直接读取配置文件
     project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))))
     config_file = os.path.join(project_root, 'cache_config.txt')
 
-    # 3. 尝试从配置文件读取 cache_path
+    # 4. 尝试从配置文件读取 cache_path
     if os.path.exists(config_file):
         try:
             with open(config_file, 'r', encoding='utf-8') as f:

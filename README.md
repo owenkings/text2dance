@@ -95,6 +95,8 @@ python main.py
 - **`_ARRAY_API not found`**：运行 `pip install "numpy<2.0" --force-reinstall`
 - **其他依赖问题**：运行 `python install_dependencies.py`
 
+
+
 ## 安装指南
 
 ### 1. 克隆项目
@@ -124,7 +126,33 @@ pip install -r requirements.txt
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
 ```
 
-### 4. 配置环境
+### 4. 下载模型文件
+
+**重要**: 3D姿态估计功能需要手动下载以下模型文件到指定目录：
+
+#### models文件
+- **目标路径**: `./text2dance/src/algorithms/pose_3d/smplpytorch/smplpytorch/native/models`
+- **下载链接**: [https://1drv.ms/f/c/90db231f990ef3d1/EqKFavY5YbBKoAbATKTNsfYBAgt_9_lUGK7iyXAVUnxIHA?e=xGKnbF](https://1drv.ms/f/c/90db231f990ef3d1/EqKFavY5YbBKoAbATKTNsfYBAgt_9_lUGK7iyXAVUnxIHA?e=xGKnbF)
+
+#### base_data文件
+- **目标路径**: `./text2dance/src/algorithms/pose_3d/data/base_data`
+- **下载链接**: [https://1drv.ms/f/c/90db231f990ef3d1/EpdNVMLwqopChIOsc7HlpSoBhmF_9tK0PlMd9F3aV5iBpQ?e=TorWXb](https://1drv.ms/f/c/90db231f990ef3d1/EpdNVMLwqopChIOsc7HlpSoBhmF_9tK0PlMd9F3aV5iBpQ?e=TorWXb)
+
+#### pose_detector文件
+- **目标路径**: `./text2dance/src/algorithms/pose_3d/pose_detector`
+- **下载链接**: [https://1drv.ms/f/c/90db231f990ef3d1/Eq4neshGEqZOmePEs0TAgEwBAYh4ZCgeV0cTHAFS-h70yQ?e=5qi4Ce](https://1drv.ms/f/c/90db231f990ef3d1/Eq4neshGEqZOmePEs0TAgEwBAYh4ZCgeV0cTHAFS-h70yQ?e=5qi4Ce)
+
+#### pretrained文件
+- **目标路径**: `./text2dance/src/algorithms/pose_3d/experiment/pretrained`
+- **下载链接**: [https://1drv.ms/f/c/90db231f990ef3d1/ErkdiZ7QL8ZLkhDOLZGy9EgBibbGycwRRdRrVlJcWNK6sw?e=NIWEZr](https://1drv.ms/f/c/90db231f990ef3d1/ErkdiZ7QL8ZLkhDOLZGy9EgBibbGycwRRdRrVlJcWNK6sw?e=NIWEZr)
+
+#### weights文件
+- **目标路径**: `./text2dance/src/algorithms/pose_3d/weights`
+- **下载链接**: [https://1drv.ms/f/c/90db231f990ef3d1/EhIMqzJOr0hEniTyq3rkHMYB_Th7pVwOqdXFQq1PoNt1iw?e=NfIN9W](https://1drv.ms/f/c/90db231f990ef3d1/EhIMqzJOr0hEniTyq3rkHMYB_Th7pVwOqdXFQq1PoNt1iw?e=NfIN9W)
+
+**注意**: 请确保将下载的文件放置在正确的目录中，否则3D姿态估计功能将无法正常工作。
+
+### 5. 配置环境
 ```bash
 # 复制配置文件模板
 cp config/config.example.yaml config/config.yaml
@@ -133,7 +161,7 @@ cp config/config.example.yaml config/config.yaml
 nano config/config.yaml
 ```
 
-### 5. 运行程序
+### 6. 运行程序
 ```bash
 # GUI模式
 python main.py

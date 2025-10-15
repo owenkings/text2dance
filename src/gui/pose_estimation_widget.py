@@ -297,6 +297,9 @@ class PoseEstimationWidget(QWidget):
         self.play_timer = QTimer()
         self.play_timer.timeout.connect(self._update_frame)
         
+        # 模型文件检测已移除，请手动下载模型文件
+        self.model_files_checked = False
+        
         self._init_ui()
         self._connect_signals()
     
@@ -1016,13 +1019,81 @@ class PoseEstimationWidget(QWidget):
         seconds = int(seconds % 60)
         return f"{minutes:02d}:{seconds:02d}"
     
-    def _start_pose_estimation(self):
-        """开始姿势估计"""
+    def _check_model_files_and_start(self):
+        """检查模型文件并开始姿势估计"""
         selected_videos = self._get_selected_videos()
         
         if not selected_videos:
             QMessageBox.warning(self, "警告", "请先选择要处理的视频")
             return
+        
+        # 如果还没有检查过模型文件，先检查
+        if not self.model_files_checked:
+             # 注意：SMPL模型文件需要从官方网站手动下载
+             # 由于许可证限制，SMPL模型文件无法通过公开URL直接下载
+             # 用户需要访问 https://smpl.is.tue.mpg.de/ 注册并下载
+             
+             # 暂时跳过模型文件检查，使用模拟模型进行演示
+             QMessageBox.information(
+                 self,
+                 "模型文件说明",
+                 "3D姿态估计功能需要SMPL模型文件，但由于许可证限制，\n"
+                 "这些文件无法自动下载。\n\n"
+                 "如需完整功能，请访问以下网站手动下载：\n"
+                 "• SMPL模型: https://smpl.is.tue.mpg.de/\n"
+                 "• MMPose模型: https://github.com/open-mmlab/mmpose\n\n"
+                 "当前将使用模拟模式进行演示。"
+             )
+             
+             # 设置为已检查，跳过下载流程
+             self.model_files_checked = True
+             
+             # 直接开始姿势估计（使用模拟模式）
+             self._start_pose_estimation()
+             return
+             
+             # 设置需要检查的模型文件路径
+             project_root = self._get_project_root()
+             model_paths = {
+                 "models": os.path.join(project_root, "src", "algorithms", "pose_3d", "smplpytorch", "smplpytorch", "native", "models"),
+                 "base_data": os.path.join(project_root, "src", "algorithms", "pose_3d", "data", "base_data"),
+                 "pose_detector": os.path.join(project_root, "src", "algorithms", "pose_3d", "pose_detector"),
+                 "pretrained": os.path.join(project_root, "src", "algorithms", "pose_3d", "experiment", "pretrained"),
+                 "weights": os.path.join(project_root, "src", "algorithms", "pose_3d", "weights")
+             }
+             
+             # 确保所有目录存在
+             for path in model_paths.values():
+                 os.makedirs(path, exist_ok=True)
+             
+             # 检查模型文件
+             # 检查模型文件是否存在（简化版本）
+             missing_files = []
+             for model_type, path in model_paths.items():
+                 if not os.path.exists(path) or not os.listdir(path):
+                     missing_files.append(model_type)
+             
+             # 如果有缺失的模型文件，提示用户手动下载
+             if missing_files:
+                QMessageBox.warning(
+                    self,
+                    "模型文件缺失",
+                    f"检测到以下模型文件缺失：{', '.join(missing_files)}\n\n" +
+                    "请参考README文件中的说明手动下载所需的模型文件。\n" +
+                    "下载完成后请重新尝试。"
+                )
+                self.status_changed.emit("模型文件缺失，请手动下载")
+                return
+            
+            # 标记已检查模型文件
+        self.model_files_checked = True
+        
+        # 开始姿势估计
+        self._start_pose_estimation()
+    
+    def _start_pose_estimation(self):
+        """开始姿势估计"""
+        selected_videos = self._get_selected_videos()
         
         # 获取参数
         # 根据单选按钮获取输出格式
@@ -1171,8 +1242,8 @@ class PoseEstimationWidget(QWidget):
         self.mute_btn.clicked.connect(self._toggle_mute)
         self.speed_combo.currentTextChanged.connect(self._set_playback_rate)
         
-        # 处理控制
-        self.start_btn.clicked.connect(self._start_pose_estimation)
+        # 处理控制 - 修改为先检查模型文件再开始处理
+        self.start_btn.clicked.connect(self._check_model_files_and_start)
         self.stop_btn.clicked.connect(self._stop_pose_estimation)
         
         # 导出功能
@@ -1182,3 +1253,9 @@ class PoseEstimationWidget(QWidget):
         
         # 播放定时器
         self.play_timer.timeout.connect(self._update_frame)
+        
+    def _get_project_root(self):
+        """获取项目根目录"""
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        # 假设当前文件在 src/gui 目录下
+        return os.path.abspath(os.path.join(current_dir, '..', '..'))

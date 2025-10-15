@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-配置管理器
-负责统一管理项目的所有配置项，包括缓存路径、API配置、镜像配置等
+用户配置管理器
+专门管理cache_config.txt格式的用户配置文件
+支持程序内设置和文件直接编辑两种方式
 """
 
 import os
@@ -9,12 +10,12 @@ import sys
 from pathlib import Path
 from typing import Optional, Dict, Any
 
-class ConfigManager:
-    """配置管理器类 - 统一管理项目配置"""
+class UserConfigManager:
+    """用户配置管理器类 - 专门管理cache_config.txt格式的配置"""
     
-    def __init__(self):
+    def __init__(self, config_filename: str = "cache_config.txt"):
         self.project_root = Path(__file__).parent.parent.parent
-        self.config_file = self.project_root / "cache_config.txt"
+        self.config_file = self.project_root / config_filename
         self.config = {}
         self._load_config()
         self._setup_environment()
@@ -37,11 +38,13 @@ class ConfigManager:
             self._create_default_config()
     
     def _create_default_config(self):
-        """创建默认配置文件"""
-        # 使用当前配置文件的完整格式作为默认配置
-        default_config_content = """# ==================== 缓存配置 ====================
+        """创建默认配置文件 - 使用完整的标准格式"""
+        # 使用程序根目录下的huggingface文件夹作为默认缓存路径
+        default_cache_path = self.project_root / "huggingface"
+        default_config_content = f"""# ==================== 缓存配置 ====================
 # 模型文件缓存路径，用于存储下载的模型文件
-cache_path=E:\\Tiany\\huggingface
+# 默认为程序目录下的huggingface文件夹，可根据需要修改
+cache_path={default_cache_path}
 # 最小可用空间要求（GB），下载前检查磁盘空间
 min_free_space_gb=20
 
@@ -103,41 +106,48 @@ action_filter_api_model=
                 f.write(default_config_content)
             # 重新加载配置
             self._load_config()
+            print(f"✅ 已创建默认配置文件: {self.config_file}")
         except Exception as e:
             print(f"警告: 保存默认配置文件失败: {e}")
     
     def _setup_environment(self):
         """设置环境变量"""
-        cache_path = self.config.get('cache_path')
-        if cache_path:
-            # 确保缓存目录存在
-            cache_dir = Path(cache_path)
-            try:
-                cache_dir.mkdir(parents=True, exist_ok=True)
-                
-                # 测试目录是否可写
-                test_file = cache_dir / ".test_write"
-                test_file.write_text("test")
-                test_file.unlink()
-                
-                # 设置HuggingFace相关环境变量
-                os.environ['HF_HOME'] = str(cache_dir)
-                os.environ['HUGGINGFACE_HUB_CACHE'] = str(cache_dir / 'hub')
-                os.environ['TRANSFORMERS_CACHE'] = str(cache_dir / 'transformers')
-                
-                # 设置其他常用AI库的缓存路径
-                os.environ['TORCH_HOME'] = str(cache_dir / 'torch')
-                os.environ['TORCH_HUB'] = str(cache_dir / 'torch' / 'hub')
-                
-                print(f"✅ 缓存路径已设置为: {cache_path}")
-                
-            except Exception as e:
-                print(f"⚠️ 缓存目录设置失败: {e}")
-                print(f"将使用系统默认缓存路径")
+        # 使用新的get_cache_path方法，它会自动处理空值情况
+        cache_path = self.get_cache_path()
+        
+        # 确保缓存目录存在
+        cache_dir = Path(cache_path)
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            
+            # 测试目录是否可写
+            test_file = cache_dir / ".test_write"
+            test_file.write_text("test")
+            test_file.unlink()
+            
+            # 设置HuggingFace相关环境变量
+            os.environ['HF_HOME'] = str(cache_dir)
+            os.environ['HUGGINGFACE_HUB_CACHE'] = str(cache_dir / 'hub')
+            os.environ['TRANSFORMERS_CACHE'] = str(cache_dir / 'transformers')
+            
+            # 设置其他常用AI库的缓存路径
+            os.environ['TORCH_HOME'] = str(cache_dir / 'torch')
+            os.environ['TORCH_HUB'] = str(cache_dir / 'torch' / 'hub')
+            
+            print(f"✅ 缓存路径已设置为: {cache_path}")
+            
+        except Exception as e:
+            print(f"⚠️ 缓存目录设置失败: {e}")
+            print(f"将使用系统默认缓存路径")
     
-    def get_cache_path(self) -> Optional[str]:
-        """获取缓存路径"""
-        return self.config.get('cache_path')
+    def get_cache_path(self) -> str:
+        """获取缓存路径，如果配置为空则返回默认路径"""
+        cache_path = self.config.get('cache_path')
+        if not cache_path or cache_path.strip() == '':
+            # 如果配置为空，返回程序目录下的huggingface文件夹作为默认路径
+            default_path = self.project_root / "huggingface"
+            return str(default_path)
+        return cache_path
     
     def get_config(self, key: str, default: Any = None) -> Any:
         """获取配置项"""
@@ -222,79 +232,37 @@ action_filter_api_model=
         
         self._save_config()
     
-    def clear_cache(self, cache_type: str = 'all'):
-        """清理缓存"""
-        cache_path = Path(self.get_cache_path() or '')
-        if not cache_path.exists():
-            print("缓存目录不存在")
-            return
-        
-        try:
-            if cache_type == 'all' or cache_type == 'huggingface':
-                hf_cache = cache_path / 'hub'
-                if hf_cache.exists():
-                    import shutil
-                    shutil.rmtree(hf_cache)
-                    print("✅ HuggingFace缓存已清理")
-            
-            if cache_type == 'all' or cache_type == 'torch':
-                torch_cache = cache_path / 'torch'
-                if torch_cache.exists():
-                    import shutil
-                    shutil.rmtree(torch_cache)
-                    print("✅ PyTorch缓存已清理")
-                    
-        except Exception as e:
-            print(f"清理缓存失败: {e}")
-    
-    def get_cache_info(self) -> Dict[str, Any]:
-        """获取缓存信息"""
-        cache_path = Path(self.get_cache_path() or '')
-        info = {
-            'cache_path': str(cache_path),
-            'exists': cache_path.exists(),
-            'writable': False,
-            'size': 0,
-            'subdirs': []
+    def get_mirror_config(self) -> Dict[str, str]:
+        """获取镜像配置"""
+        return {
+            'official_site': self.config.get('official_site', 'https://huggingface.co'),
+            'mirror_sites': self.config.get('mirror_sites', 'https://hf-mirror.com'),
+            'custom_mirrors': self.config.get('custom_mirrors', ''),
+            'auto_mirror_switch': self.config.get('auto_mirror_switch', 'true')
         }
-        
-        if cache_path.exists():
-            try:
-                # 测试可写性
-                test_file = cache_path / ".test_write"
-                test_file.write_text("test")
-                test_file.unlink()
-                info['writable'] = True
-                
-                # 计算大小
-                total_size = 0
-                for item in cache_path.rglob('*'):
-                    if item.is_file():
-                        total_size += item.stat().st_size
-                info['size'] = total_size
-                
-                # 获取子目录
-                info['subdirs'] = [d.name for d in cache_path.iterdir() if d.is_dir()]
-                
-            except Exception as e:
-                print(f"获取缓存信息失败: {e}")
-        
-        return info
+    
+    def get_network_config(self) -> Dict[str, str]:
+        """获取网络配置"""
+        return {
+            'connection_timeout': self.config.get('connection_timeout', '10'),
+            'download_timeout': self.config.get('download_timeout', '300')
+        }
+    
+    def reload_config(self):
+        """重新加载配置文件（用于检测外部文件修改）"""
+        self._load_config()
+        self._setup_environment()
+        print("✅ 配置文件已重新加载")
 
-# 全局配置管理器实例
-_config_manager = None
+# 全局用户配置管理器实例
+_user_config_manager = None
 
-def get_config_manager() -> ConfigManager:
-    """获取全局配置管理器实例"""
-    global _config_manager
-    if _config_manager is None:
-        _config_manager = ConfigManager()
-    return _config_manager
-
-# 保持向后兼容性的别名
-def get_cache_manager() -> ConfigManager:
-    """获取全局配置管理器实例（向后兼容）"""
-    return get_config_manager()
+def get_user_config_manager() -> UserConfigManager:
+    """获取全局用户配置管理器实例"""
+    global _user_config_manager
+    if _user_config_manager is None:
+        _user_config_manager = UserConfigManager()
+    return _user_config_manager
 
 # 在模块导入时自动初始化
-get_config_manager()
+get_user_config_manager()

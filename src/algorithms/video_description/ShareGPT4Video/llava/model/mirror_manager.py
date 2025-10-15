@@ -46,6 +46,71 @@ class MirrorManager:
         
     def _load_config(self) -> Dict:
         """从 cache_config.txt 文件加载镜像配置"""
+        try:
+            # 尝试使用新的UserConfigManager
+            from ......core.user_config_manager import get_user_config_manager
+            config_manager = get_user_config_manager()
+            user_config = config_manager.config
+            
+            # 从用户配置中提取镜像相关配置
+            config = {
+                # HuggingFace 官方地址
+                "huggingface": {
+                    "name": "HuggingFace官方",
+                    "base_url": "https://huggingface.co",
+                    "model_url": "https://huggingface.co/Lin-Chen/ShareGPT4V-7B",
+                    "priority": 1
+                },
+                
+                # HF-Mirror 镜像
+                "hf_mirror": {
+                    "name": "HF-Mirror镜像",
+                    "base_url": "https://hf-mirror.com",
+                    "model_url": "https://hf-mirror.com/Lin-Chen/sharegpt4video-8b/tree/main",
+                    "priority": 2
+                },
+                
+                # 用户自定义镜像
+                "custom_mirrors": [],
+                
+                # 网络检测配置
+                "network_config": {
+                    "timeout": int(user_config.get('connection_timeout', 10)),
+                    "max_retries": 3,
+                    "ping_count": 3
+                },
+                
+                # 缓存配置
+                "cache_config": {
+                    "enable_verification": True,
+                    "enable_resume": True,
+                    "cache_path": user_config.get('cache_path', ''),
+                    "min_free_space_gb": int(user_config.get('min_free_space_gb', 20))
+                }
+            }
+            
+            # 解析自定义镜像配置
+            custom_mirrors = []
+            for key, value in user_config.items():
+                if key.startswith('custom_mirror_') and key.endswith('_name'):
+                    mirror_id = key.replace('custom_mirror_', '').replace('_name', '')
+                    url_key = f'custom_mirror_{mirror_id}_url'
+                    if url_key in user_config:
+                        custom_mirrors.append({
+                            "name": value,
+                            "base_url": user_config[url_key],
+                            "priority": 3
+                        })
+            config["custom_mirrors"] = custom_mirrors
+            
+            return config
+            
+        except Exception as e:
+            logger.warning(f"使用UserConfigManager加载配置失败，回退到直接文件读取: {e}")
+            # 回退到原有的直接文件读取方式
+            return self._load_config_fallback()
+    
+    def _load_config_fallback(self) -> Dict:
         # 默认配置
         config = {
             # HuggingFace 官方地址

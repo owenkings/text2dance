@@ -19,8 +19,7 @@ class ShareGPT4VideoAlgorithm(VideoDescriptionAlgorithm):
     """ShareGPT4Video视频描述算法"""
     
     def __init__(self, config_manager):
-        super().__init__(config_manager)
-        self.algorithm_name = "sharegpt4video"
+        super().__init__(config_manager, "sharegpt4video")
         self.description = "ShareGPT4Video视频内容描述算法"
         
         # 获取模型路径
@@ -33,6 +32,30 @@ class ShareGPT4VideoAlgorithm(VideoDescriptionAlgorithm):
         self.script_path = Path(__file__).parent / "ShareGPT4Video" / "run.py"
         
         self.logger = logging.getLogger(f"{__name__}.{self.algorithm_name}")
+        
+    def _initialize(self):
+        """初始化算法（实现抽象方法）"""
+        self.logger.info("初始化ShareGPT4Video算法")
+        # 初始化相关资源
+        self.model_path = self.config.get(
+            'algorithms.video_description.sharegpt4video.model_path',
+            'E:/Tiany/huggingface/ShareGPT4Video-8B'
+        )
+        
+    def _load_model(self) -> bool:
+        """加载模型（实现抽象方法）"""
+        try:
+            # 检查模型是否存在
+            model_path = Path(self.model_path)
+            if not model_path.exists():
+                self.logger.warning(f"模型路径不存在: {self.model_path}")
+                return False
+                
+            self.logger.info(f"ShareGPT4Video模型路径: {self.model_path}")
+            return True
+        except Exception as e:
+            self.logger.error(f"加载ShareGPT4Video模型失败: {e}")
+            return False
     
     def _process_impl(self, input_path: str, output_path: str, 
                      progress_callback: Optional[Callable[[float], None]] = None,

@@ -148,6 +148,13 @@ class BatchVideoProcessor:
             return True
             
         try:
+            # 记录系统内存状态（仅用于信息显示，不做限制检查）
+            import psutil
+            memory = psutil.virtual_memory()
+            available_gb = memory.available / (1024**3)
+            total_gb = memory.total / (1024**3)
+            
+            self.logger.info(f"系统内存状态: 总计 {total_gb:.1f}GB, 可用 {available_gb:.1f}GB")
             self.logger.info("开始加载模型...")
             
             # 初始化PyTorch
@@ -160,6 +167,13 @@ class BatchVideoProcessor:
             
             # 配置设备映射
             if self.device.lower() == 'cuda' and torch.cuda.is_available():
+                # 检查GPU内存
+                gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+                self.logger.info(f"GPU内存: {gpu_memory:.1f}GB")
+                
+                if gpu_memory < 8.0:
+                    self.logger.warning("GPU内存较小，可能影响模型加载性能")
+                
                 device_map = {
                     "model.embed_tokens": 0,
                     "model.layers": 0,
@@ -175,6 +189,13 @@ class BatchVideoProcessor:
                 device_map = 'cpu'
                 self.target_device = "cpu"
                 self.logger.info("使用CPU模式")
+                self.logger.info("注意: CPU模式可能需要较多内存，如遇到内存不足将尝试继续运行")
+            
+            # 设置内存优化选项
+            if self.target_device == "cpu":
+                # CPU模式下启用内存映射
+                torch.backends.quantized.engine = 'qnnpack'
+                self.logger.info("启用CPU内存优化")
             
             # 加载预训练模型
             if smart_loading_available and self.enable_smart_loading:
@@ -195,26 +216,55 @@ class BatchVideoProcessor:
                 )
             
             # 确保模型组件在正确设备上
-            if self.target_device != "cpu":
-                # 移动视觉塔
-                if hasattr(self.model, 'get_vision_tower') and self.model.get_vision_tower() is not None:
-                    vision_tower = self.model.get_vision_tower()
-                    vision_tower = vision_tower.to(self.target_device)
-                    self.logger.info(f"视觉塔已移动到设备: {self.target_device}")
+            try:
+                if self.target_device != "cpu":
+                    # 移动视觉塔
+                    if hasattr(self.model, 'get_vision_tower') and self.model.get_vision_tower() is not None:
+                        vision_tower = self.model.get_vision_tower()
+                        vision_tower = vision_tower.to(self.target_device)
+                        self.logger.info(f"视觉塔已移动到设备: {self.target_device}")
+                    
+                    # 移动多模态投影器
+                    if hasattr(self.model, 'get_model') and hasattr(self.model.get_model(), 'mm_projector'):
+                        self.model.get_model().mm_projector = self.model.get_model().mm_projector.to(self.target_device)
+                        self.logger.info(f"多模态投影器已移动到设备: {self.target_device}")
+                    
+                    # 移动image_newline参数
+                    if hasattr(self.model, 'get_model') and hasattr(self.model.get_model(), 'image_newline'):
+                        self.model.get_model().image_newline = self.model.get_model().image_newline.to(self.target_device)
+                        self.logger.info(f"image_newline参数已移动到设备: {self.target_device}")
+                    
+                    # 确保整个模型在正确设备上
+                    self.model = self.model.to(self.target_device)
+                    self.logger.info(f"整个模型已移动到设备: {self.target_device}")
                 
-                # 移动多模态投影器
-                if hasattr(self.model, 'get_model') and hasattr(self.model.get_model(), 'mm_projector'):
-                    self.model.get_model().mm_projector = self.model.get_model().mm_projector.to(self.target_device)
-                    self.logger.info(f"多模态投影器已移动到设备: {self.target_device}")
+                # 设置模型为评估模式
+                self.model.eval()
                 
-                # 移动image_newline参数
-                if hasattr(self.model, 'get_model') and hasattr(self.model.get_model(), 'image_newline'):
-                    self.model.get_model().image_newline = self.model.get_model().image_newline.to(self.target_device)
-                    self.logger.info(f"image_newline参数已移动到设备: {self.target_device}")
+                # 检查加载后的内存使用
+                if self.target_device == "cpu":
+                    memory_after = psutil.virtual_memory()
+                    used_memory = (memory.available - memory_after.available) / (1024**3)
+                    self.logger.info(f"模型加载完成，使用了 {used_memory:.1f}GB 内存")
+                else:
+                    gpu_memory_used = torch.cuda.memory_allocated(0) / (1024**3)
+                    self.logger.info(f"模型加载完成，使用了 {gpu_memory_used:.1f}GB GPU内存")
                 
-                # 确保整个模型在正确设备上
-                self.model = self.model.to(self.target_device)
-                self.logger.info(f"整个模型已移动到设备: {self.target_device}")
+            except Exception as e:
+                self.logger.error(f"模型组件移动到设备时出错: {str(e)}")
+                # 如果是内存错误，记录详细信息但不中断执行
+                if "memory" in str(e).lower() or "out of memory" in str(e).lower() or "allocat" in str(e).lower():
+                    self.logger.warning("检测到内存相关错误，但将尝试继续运行:")
+                    self.logger.warning("1. 可能需要关闭其他占用内存的程序")
+                    self.logger.warning("2. 如果问题持续，可考虑重启系统释放内存")
+                    self.logger.warning("3. 或使用更小的模型/降低批处理大小")
+                    # 尝试清理GPU缓存
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                        self.logger.info("已清理GPU缓存，尝试继续运行")
+                elif "connection" in str(e).lower() or "network" in str(e).lower():
+                    self.logger.warning("网络连接问题，但将尝试继续运行（可能使用缓存的模型）")
+                # 不再返回False，而是尝试继续
             
             # 设置为评估模式
             self.model = self.model.eval()
@@ -224,14 +274,28 @@ class BatchVideoProcessor:
             return True
             
         except Exception as e:
-            # 检查是否为网络连接问题
+            self.logger.error(f"模型加载失败: {str(e)}")
+            
+            # 提供针对性的错误建议
             error_str = str(e).lower()
-            if any(keyword in error_str for keyword in ['connecttimeouterror', 'localentrynotfounderror', 'connection to huggingface.co timed out', 'max retries exceeded', 'cannot find the requested files in the local cache']):
+            if "memory" in error_str or "out of memory" in error_str or "allocat" in error_str:
+                self.logger.error("内存不足错误，建议:")
+                self.logger.error("1. 关闭其他占用内存的程序")
+                self.logger.error("2. 重启系统释放内存")
+                self.logger.error("3. 使用更小的模型")
+                self.logger.error("4. 增加系统内存或虚拟内存")
+            elif "cuda" in error_str or "gpu" in error_str:
+                self.logger.error("GPU相关错误，建议:")
+                self.logger.error("1. 检查CUDA驱动是否正确安装")
+                self.logger.error("2. 尝试使用CPU模式: --device cpu")
+                self.logger.error("3. 检查GPU内存是否足够")
+            elif any(keyword in error_str for keyword in ['connecttimeouterror', 'localentrynotfounderror', 'connection to huggingface.co timed out', 'max retries exceeded', 'cannot find the requested files in the local cache']):
                 self.logger.error("网络连接问题：无法连接到 `https://huggingface.co` 下载模型文件。请检查网络连接或配置离线模式。")
-                self.logger.error(f"详细错误信息: {str(e)}")
             else:
-                self.logger.error(f"模型加载失败: {str(e)}")
-                self.logger.error(traceback.format_exc())
+                self.logger.error("其他错误，请检查模型路径和配置")
+            
+            # 记录详细错误信息用于调试
+            self.logger.debug(f"详细错误信息: {traceback.format_exc()}")
             return False
     
     def process_single_video(self, video_path: str, query: str, 
@@ -1002,16 +1066,27 @@ def main():
     批量处理主函数
     """
     logger = None
+    args = None
+    processor = None
+    
     try:
         # 解析参数
-        args = parse_batch_arguments()
+        try:
+            args = parse_batch_arguments()
+        except Exception as e:
+            print(f"参数解析失败: {e}")
+            return 1
         
         # 设置日志
-        logger = setup_comprehensive_logging(
-            log_level=args.log_level,
-            silent_mode=args.silent,
-            enable_file_log=not args.no_file_log
-        )
+        try:
+            logger = setup_comprehensive_logging(
+                log_level=args.log_level,
+                silent_mode=args.silent,
+                enable_file_log=not args.no_file_log
+            )
+        except Exception as e:
+            print(f"日志设置失败: {e}")
+            return 1
         
         logger.info("="*80)
         logger.info("ShareGPT4Video 批量处理程序开始运行")
@@ -1019,7 +1094,28 @@ def main():
         logger.info("="*80)
         
         # 收集视频配置
-        video_configs = collect_video_configs(args)
+        try:
+            video_configs = collect_video_configs(args)
+        except Exception as e:
+            logger.error(f"收集视频配置失败: {e}")
+            logger.error(traceback.format_exc())
+            if args.output_format == 'json' and not args.output_file:
+                error_output = {
+                    'summary': {
+                        'total_videos': 0,
+                        'successful_videos': 0,
+                        'failed_videos': 0,
+                        'total_time_seconds': 0,
+                        'average_time_per_video': 0,
+                        'timestamp': datetime.now().isoformat(),
+                        'error': f'收集视频配置失败: {e}'
+                    },
+                    'results': []
+                }
+                print(json.dumps(error_output, ensure_ascii=False, separators=(',', ':')))
+            elif not args.silent:
+                print(f"错误: 收集视频配置失败: {e}")
+            return 1
         
         if not video_configs:
             logger.error("没有找到要处理的视频")
@@ -1036,7 +1132,7 @@ def main():
                     },
                     'results': []
                 }
-                print(json.dumps(error_output, ensure_ascii=False, indent=2))
+                print(json.dumps(error_output, ensure_ascii=False, separators=(',', ':')))
             elif not args.silent:
                 print("错误: 没有找到要处理的视频")
                 print("请使用 --videos, --video-dir 或 --config-file 参数指定视频")
@@ -1051,25 +1147,66 @@ def main():
         if args.disable_smart_loading:
             logger.info("智能加载已禁用，将使用传统加载方式获得更快的预加载速度")
         
-        processor = BatchVideoProcessor(
-            model_path=args.model_path,
-            device=args.device,
-            conv_mode=args.conv_mode,
-            enable_smart_loading=enable_smart_loading
-        )
+        try:
+            processor = BatchVideoProcessor(
+                model_path=args.model_path,
+                device=args.device,
+                conv_mode=args.conv_mode,
+                enable_smart_loading=enable_smart_loading
+            )
+        except Exception as e:
+            logger.error(f"创建批量处理器失败: {e}")
+            logger.error(traceback.format_exc())
+            if args.output_format == 'json' and not args.output_file:
+                error_output = {
+                    'summary': {
+                        'total_videos': len(video_configs) if 'video_configs' in locals() else 0,
+                        'successful_videos': 0,
+                        'failed_videos': len(video_configs) if 'video_configs' in locals() else 0,
+                        'total_time_seconds': 0,
+                        'average_time_per_video': 0,
+                        'timestamp': datetime.now().isoformat(),
+                        'error': f'创建批量处理器失败: {e}'
+                    },
+                    'results': []
+                }
+                print(json.dumps(error_output, ensure_ascii=False, separators=(',', ':')))
+            elif not args.silent:
+                print(f"错误: 创建批量处理器失败: {e}")
+            return 1
         
         # 加载模型（只加载一次）
         logger.info("加载模型...")
         if not args.silent:
             print("正在加载模型...")
         
-        if not processor.load_model():
+        try:
+            model_loaded = processor.load_model()
+        except Exception as e:
+            logger.error(f"模型加载过程中发生异常: {e}")
+            logger.error(traceback.format_exc())
+            model_loaded = False
+        
+        if not model_loaded:
             # 在处理结果前再次记录网络连接错误信息，方便用户查看
             logger.error("批量处理失败")
             logger.error("批量处理脚本执行失败")
-            logger.error("网络连接问题：无法连接到 https://huggingface.co 下载模型文件。请检查网络连接或配置离线模式")
+            logger.error("模型加载失败：可能是内存不足、GPU资源不足或网络连接问题")
             
-            if args.output_format == 'json' and not args.output_file:
+            # 创建失败结果列表
+            failed_results = []
+            for config in video_configs:
+                failed_results.append({
+                    'video_path': config['video_path'],
+                    'query': config['query'],
+                    'success': False,
+                    'description': None,
+                    'error': '模型加载失败：可能是内存不足、GPU资源不足或网络连接问题',
+                    'processing_time': 0.0
+                })
+            
+            # 输出JSON格式结果（即使失败也要输出正确的JSON格式）
+            if args.output_format == 'json':
                 error_output = {
                     'summary': {
                         'total_videos': len(video_configs),
@@ -1078,13 +1215,30 @@ def main():
                         'total_time_seconds': 0,
                         'average_time_per_video': 0,
                         'timestamp': datetime.now().isoformat(),
-                        'error': '网络连接问题：无法连接到 https://huggingface.co 下载模型文件'
+                        'error': '模型加载失败：可能是内存不足、GPU资源不足或网络连接问题'
                     },
-                    'results': []
+                    'results': failed_results
                 }
-                print(json.dumps(error_output, ensure_ascii=False, indent=2))
+                
+                output_json = json.dumps(error_output, ensure_ascii=False, separators=(',', ':'))
+                
+                if args.output_file:
+                    try:
+                        with open(args.output_file, 'w', encoding='utf-8') as f:
+                            f.write(output_json)
+                        logger.info(f"错误结果已保存到: {args.output_file}")
+                        if not args.silent:
+                            print(f"错误结果已保存到: {args.output_file}")
+                    except Exception as e:
+                        logger.error(f"保存错误结果文件失败: {e}")
+                        if not args.silent:
+                            print(f"保存错误结果文件失败: {e}")
+                        # 如果保存失败，仍然输出到控制台
+                        print(output_json)
+                else:
+                    print(output_json)
             elif not args.silent:
-                print("错误: 网络连接问题，无法连接到 https://huggingface.co 下载模型文件")
+                print("错误: 模型加载失败，可能是内存不足、GPU资源不足或网络连接问题")
             return 1
         
         logger.info("模型加载成功")
@@ -1138,14 +1292,88 @@ def main():
                     'results': results
                 }
                 
-                output_json = json.dumps(output_data, ensure_ascii=False, indent=2)
+                output_json = json.dumps(output_data, ensure_ascii=False, separators=(',', ':'))
                 
                 if args.output_file:
-                    with open(args.output_file, 'w', encoding='utf-8') as f:
-                        f.write(output_json)
-                    logger.info(f"结果已保存到: {args.output_file}")
-                    if not args.silent:
-                        print(f"结果已保存到: {args.output_file}")
+                    try:
+                        with open(args.output_file, 'w', encoding='utf-8') as f:
+                            f.write(output_json)
+                        logger.info(f"结果已保存到: {args.output_file}")
+                        if not args.silent:
+                            print(f"结果已保存到: {args.output_file}")
+                    except Exception as e:
+                        logger.error(f"保存结果文件失败: {e}")
+                        if not args.silent:
+                            print(f"保存结果文件失败: {e}")
+                        # 如果保存失败，仍然输出到控制台
+                        print(output_json)
+                else:
+                    print(output_json)
+            
+            else:  # plain format
+                for i, result in enumerate(results, 1):
+                    print(f"\n=== 视频 {i}/{len(results)} ===")
+                    print(f"路径: {result['video_path']}")
+                    print(f"查询: {result['query']}")
+                    print(f"成功: {'是' if result['success'] else '否'}")
+                    print(f"处理时间: {result['processing_time']:.2f}秒")
+                    if result['description']:
+                        print(f"描述: {result['description']}")
+                    else:
+                        print("描述: 处理失败")
+                
+        except Exception as e:
+            logger.error(f"批量处理过程中发生异常: {e}")
+            logger.error(traceback.format_exc())
+            
+            # 创建错误结果
+            results = []
+            for config in video_configs:
+                results.append({
+                    'video_path': config['video_path'],
+                    'query': config['query'],
+                    'success': False,
+                    'description': None,
+                    'error': f"批量处理异常: {e}",
+                    'processing_time': 0.0
+                })
+            
+            end_time = datetime.now()
+            total_time = 0.0
+            successful_count = 0
+            
+            if not args.silent:
+                print(f"\n批量处理失败: {e}")
+            
+            # 输出结果
+            if args.output_format == 'json':
+                output_data = {
+                    'summary': {
+                        'total_videos': len(video_configs),
+                        'successful_videos': successful_count,
+                        'failed_videos': len(video_configs) - successful_count,
+                        'total_time_seconds': total_time,
+                        'average_time_per_video': total_time / len(video_configs) if video_configs else 0,
+                        'timestamp': end_time.isoformat()
+                    },
+                    'results': results
+                }
+                
+                output_json = json.dumps(output_data, ensure_ascii=False, separators=(',', ':'))
+                
+                if args.output_file:
+                    try:
+                        with open(args.output_file, 'w', encoding='utf-8') as f:
+                            f.write(output_json)
+                        logger.info(f"结果已保存到: {args.output_file}")
+                        if not args.silent:
+                            print(f"结果已保存到: {args.output_file}")
+                    except Exception as e:
+                        logger.error(f"保存结果文件失败: {e}")
+                        if not args.silent:
+                            print(f"保存结果文件失败: {e}")
+                        # 如果保存失败，仍然输出到控制台
+                        print(output_json)
                 else:
                     print(output_json)
             
@@ -1165,12 +1393,19 @@ def main():
             
         finally:
             # 清理资源
-            processor.cleanup()
+            if processor:
+                try:
+                    processor.cleanup()
+                except Exception as e:
+                    if logger:
+                        logger.error(f"清理资源时发生错误: {e}")
+                    elif not args.silent:
+                        print(f"清理资源时发生错误: {e}")
     
     except KeyboardInterrupt:
         if logger:
             logger.warning("用户中断执行")
-        if not args.silent:
+        if args and not args.silent:
             print("\n执行被用户中断")
         return 1
     
@@ -1180,7 +1415,7 @@ def main():
             logger.error(traceback.format_exc())
         
         # 如果是JSON输出模式且没有指定输出文件，输出错误的JSON格式
-        if args.output_format == 'json' and not args.output_file:
+        if args and args.output_format == 'json' and not args.output_file:
             error_output = {
                 'summary': {
                     'total_videos': 0,
@@ -1193,8 +1428,10 @@ def main():
                 },
                 'results': []
             }
-            print(json.dumps(error_output, ensure_ascii=False, indent=2))
-        elif not args.silent:
+            print(json.dumps(error_output, ensure_ascii=False, separators=(',', ':')))
+        elif args and not args.silent:
+            print(f"错误: {e}")
+        elif not args:
             print(f"错误: {e}")
         return 1
     

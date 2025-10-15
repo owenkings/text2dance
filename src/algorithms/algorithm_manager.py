@@ -113,11 +113,10 @@ class AlgorithmManager:
     def _register_pose_3d_algorithms(self):
         """注册3D姿态估计算法"""
         try:
-            from .pose_3d.rtmpose3d_algorithm import RTMPose3DAlgorithm
+            # 只导入videopose3d算法，因为rtmpose3d算法文件不存在
             from .pose_3d.videopose3d_algorithm import VideoPose3DAlgorithm
             
             self.algorithms[AlgorithmType.POSE_3D] = {
-                "rtmpose3d": RTMPose3DAlgorithm(self.config_manager),
                 "videopose3d": VideoPose3DAlgorithm(self.config_manager)
             }
             
@@ -127,12 +126,14 @@ class AlgorithmManager:
     def _register_video_description_algorithms(self):
         """注册视频描述算法"""
         try:
-            from .video_description.describe_anything_algorithm import DescribeAnythingAlgorithm
+            from .video_description.describeanything_algorithm import DescribeAnythingAlgorithm
             from .video_description.vid2seq_algorithm import Vid2SeqAlgorithm
+            from .video_description.sharegpt4video_algorithm import ShareGPT4VideoAlgorithm
             
             self.algorithms[AlgorithmType.VIDEO_DESCRIPTION] = {
-                "describe_anything": DescribeAnythingAlgorithm(self.config_manager),
-                "vid2seq": Vid2SeqAlgorithm(self.config_manager)
+                "describeanything": DescribeAnythingAlgorithm(self.config_manager),
+                "vid2seq": Vid2SeqAlgorithm(self.config_manager),
+                "sharegpt4video": ShareGPT4VideoAlgorithm(self.config_manager)
             }
             
         except ImportError as e:

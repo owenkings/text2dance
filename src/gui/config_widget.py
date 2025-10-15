@@ -1120,52 +1120,46 @@ class ConfigWidget(QWidget):
         self._refresh_plugins()
     
     def _on_cache_path_changed(self):
-        """缓存路径变更时同步到cache_config.txt文件"""
+        """缓存路径变更时同步到配置文件"""
         try:
-            import os
-            cache_config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'cache_config.txt')
+            from ..core.user_config_manager import get_user_config_manager
+            config_manager = get_user_config_manager()
             
-            # 读取现有配置
-            config_data = {}
-            if os.path.exists(cache_config_path):
-                with open(cache_config_path, 'r', encoding='utf-8') as f:
-                    for line in f:
-                        if '=' in line:
-                            key, value = line.strip().split('=', 1)
-                            config_data[key] = value
-            
-            # 更新配置
-            config_data['api_endpoint'] = self.api_endpoint_input.text()
-            config_data['api_key'] = self.api_key_input.text()
-            config_data['api_model'] = self.api_model_input.text()
-            
-            # 写入文件
-            with open(cache_config_path, 'w', encoding='utf-8') as f:
-                for key, value in config_data.items():
-                    f.write(f"{key}={value}\n")
+            # 更新API配置
+            api_config = {
+                'endpoint': self.api_endpoint_input.text(),
+                'key': self.api_key_input.text(),
+                'model': self.api_model_input.text()
+            }
+            config_manager.set_api_config('custom', api_config)
                     
         except Exception as e:
-            print(f"更新cache_config.txt失败: {e}")
+            print(f"更新配置文件失败: {e}")
         
         self._mark_modified("algorithms")
     
     def _load_cache_config(self):
-        """从cache_config.txt文件加载配置"""
+        """从配置文件加载配置"""
         try:
-            import os
-            cache_config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'cache_config.txt')
+            from ..core.user_config_manager import get_user_config_manager
+            config_manager = get_user_config_manager()
             
-            config_data = {}
-            if os.path.exists(cache_config_path):
-                with open(cache_config_path, 'r', encoding='utf-8') as f:
-                    for line in f:
-                        if '=' in line:
-                            key, value = line.strip().split('=', 1)
-                            config_data[key] = value
+            # 获取API配置
+            api_config = config_manager.get_api_config('custom')
+            
+            # 转换为旧格式以保持兼容性
+            config_data = {
+                'api_endpoint': api_config.get('endpoint', ''),
+                'api_key': api_config.get('key', ''),
+                'api_model': api_config.get('model', ''),
+                'custom_api_model_name': api_config.get('name', ''),
+                'cache_path': config_manager.get_cache_path() or '',
+                'sharegpt4video_model_path': config_manager.get_config('sharegpt4video_model_path', '')
+            }
             
             return config_data
         except Exception as e:
-            print(f"读取cache_config.txt失败: {e}")
+            print(f"读取配置文件失败: {e}")
             return {}
     
     # 槽函数实现

@@ -493,11 +493,12 @@ class VideoDescriptionThread(QThread):
             cmd.extend(['--videos'] + video_chunk)
             
             # 根据描述长度要求更新提示词（但不限制max_new_tokens）
-            if self.description_length > 0:
-                # 在提示词中添加长度建议，但不强制限制输出长度
-                enhanced_query = f"{self.description_requirement} The total length of the description should be approximately {self.description_length} characters."
-                cmd[cmd.index('--query') + 1] = enhanced_query
-            # 如果是无限制模式，保持原始提示词不变
+            # 注意：描述长度等级现在只用于API模型的动作过滤功能，本地模型不再使用长度建议
+            # if self.description_length > 0:
+            #     # 在提示词中添加长度建议，但不强制限制输出长度
+            #     enhanced_query = f"{self.description_requirement} The total length of the description should be approximately {self.description_length} characters."
+            #     cmd[cmd.index('--query') + 1] = enhanced_query
+            # # 如果是无限制模式，保持原始提示词不变
             
             # 注意：不再设置max_new_tokens限制，让模型自由生成完整描述
             # 描述长度要求仅作为提示词中的建议，不应强制截断输出
@@ -552,6 +553,30 @@ class VideoDescriptionThread(QThread):
                         if 'results' in json_output:
                             results = json_output['results']
                             self.log_updated.emit(f"线程 {chunk_id} 成功解析 {len(results)} 个结果")
+                            
+                            # 为每个结果发送video_completed信号，确保结果被正确保存
+                            for result in results:
+                                video_path = result.get('video_path', '')
+                                success = result.get('success', False)
+                                description = result.get('description', '')
+                                error_msg = result.get('error_message', '')
+                                processing_time = result.get('processing_time', 0)
+                                
+                                # 获取时间戳，如果不存在则使用当前时间
+                                actual_timestamp = result.get('timestamp')
+                                if not actual_timestamp:
+                                    actual_timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                                
+                                # 发送video_completed信号，触发结果保存
+                                self.video_completed.emit(
+                                    video_path, 
+                                    success, 
+                                    description, 
+                                    error_msg, 
+                                    processing_time, 
+                                    actual_timestamp
+                                )
+                            
                             return True, results
                         else:
                             self.log_updated.emit(f"线程 {chunk_id} JSON中未找到results字段")
@@ -562,17 +587,29 @@ class VideoDescriptionThread(QThread):
                         
                 except json.JSONDecodeError as e:
                     self.log_updated.emit(f"线程 {chunk_id} JSON解析失败: {str(e)}")
-                    # 创建备用结果
+                    # 创建备用结果并发送video_completed信号
                     fallback_results = []
                     for video_path in video_chunk:
-                        fallback_results.append({
+                        actual_timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        fallback_result = {
                             'video_path': video_path,
                             'success': True,
                             'description': '处理完成，但无法获取详细描述内容（JSON解析失败）',
                             'error_message': '',
                             'processing_time': 0,
-                            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                        })
+                            'timestamp': actual_timestamp
+                        }
+                        fallback_results.append(fallback_result)
+                        
+                        # 发送video_completed信号，确保备用结果也被保存
+                        self.video_completed.emit(
+                            video_path, 
+                            True, 
+                            '处理完成，但无法获取详细描述内容（JSON解析失败）', 
+                            '', 
+                            0, 
+                            actual_timestamp
+                        )
                     return True, fallback_results
             else:
                 self.log_updated.emit(f"线程 {chunk_id} 处理失败，返回码: {process.returncode}")
@@ -830,14 +867,15 @@ class VideoDescriptionThread(QThread):
             cmd.extend(['--videos'] + self.videos)
             
             # 根据描述长度要求更新提示词（但不限制max_new_tokens）
-            if self.description_length > 0:
-                # 在提示词中添加长度建议，但不强制限制输出长度
-                enhanced_query = f"{self.description_requirement} The total length of the description should be approximately {self.description_length} characters."
-                cmd[cmd.index('--query') + 1] = enhanced_query
-                self.log_updated.emit(f"已在提示词中添加长度建议: {self.description_length}字符（不限制实际输出长度）")
-            else:
-                # 无限制生成模式
-                self.log_updated.emit("设置为无限制生成模式，不限制输出长度")
+            # 注意：描述长度等级现在只用于API模型的动作过滤功能，本地模型不再使用长度建议
+            # if self.description_length > 0:
+            #     # 在提示词中添加长度建议，但不强制限制输出长度
+            #     enhanced_query = f"{self.description_requirement} The total length of the description should be approximately {self.description_length} characters."
+            #     cmd[cmd.index('--query') + 1] = enhanced_query
+            #     self.log_updated.emit(f"已在提示词中添加长度建议: {self.description_length}字符（不限制实际输出长度）")
+            # else:
+            #     # 无限制生成模式
+            #     self.log_updated.emit("设置为无限制生成模式，不限制输出长度")
             
             # 注意：不再设置max_new_tokens限制，让模型自由生成完整描述
             # 描述长度要求仅作为提示词中的建议，模型可以根据视频内容生成更完整的描述
@@ -931,17 +969,78 @@ class VideoDescriptionThread(QThread):
                 # 尝试从输出中提取JSON结果
                 json_output = None
                 json_start = -1
+                json_end = -1
                 
-                # 查找JSON输出的开始位置
+                # 改进的JSON查找逻辑：查找包含完整JSON结构的行
+                self.log_updated.emit(f"开始解析输出，共 {len(output_lines)} 行")
+                
+                # 查找包含完整JSON的单行
+                json_line = None
+                json_line_index = -1
+                
                 for i, line in enumerate(output_lines):
-                    if line.strip().startswith('{'):
+                    line = line.strip()
+                    if (line.startswith('{') and line.endswith('}') and 
+                        'summary' in line and 'results' in line):
+                        json_line = line
+                        json_line_index = i
+                        break
+                
+                if json_line:
+                    self.log_updated.emit(f"找到JSON输出，在第 {json_line_index+1} 行")
+                    
+                    try:
+                        import json
+                        # 直接解析单行JSON
+                        json_output = json.loads(json_line)
+                        self.log_updated.emit("成功解析批量处理结果")
+                        
+                        # 提取结果列表
+                        if 'results' in json_output:
+                            results = json_output['results']
+                            self.log_updated.emit(f"批量处理完成，共处理 {len(results)} 个视频")
+                            return True, results
+                        else:
+                            self.log_updated.emit("JSON输出中未找到results字段")
+                            return False, []
+                            
+                    except json.JSONDecodeError as e:
+                        self.log_updated.emit(f"JSON解析失败: {str(e)}")
+                        self.log_updated.emit(f"尝试解析的JSON前200字符: {json_line[:200]}")
+                        return False, []
+                
+                # 如果没找到单行JSON，尝试多行JSON解析（向后兼容）
+                json_start = -1
+                json_end = -1
+                
+                # 从后往前查找完整的JSON块
+                for i in range(len(output_lines) - 1, -1, -1):
+                    line = output_lines[i].strip()
+                    if line == '}' and json_end == -1:
+                        json_end = i
+                    elif line.startswith('{') and json_end != -1:
                         json_start = i
                         break
                 
+                # 如果没找到完整的JSON块，尝试查找包含"summary"和"results"的JSON
+                if json_start == -1:
+                    for i, line in enumerate(output_lines):
+                        if (line.strip().startswith('{') and 
+                            ('summary' in line or 'results' in line or 
+                             any('summary' in output_lines[j] or 'results' in output_lines[j] 
+                                 for j in range(i, min(i+10, len(output_lines)))))):
+                            json_start = i
+                            break
+                
                 if json_start != -1:
                     # 提取JSON部分
-                    json_lines = output_lines[json_start:]
+                    if json_end != -1:
+                        json_lines = output_lines[json_start:json_end+1]
+                    else:
+                        json_lines = output_lines[json_start:]
+                    
                     json_text = '\n'.join(json_lines)
+                    self.log_updated.emit(f"找到多行JSON输出，从第 {json_start+1} 行开始，共 {len(json_lines)} 行")
                     
                     try:
                         import json
@@ -960,6 +1059,8 @@ class VideoDescriptionThread(QThread):
                             
                     except json.JSONDecodeError as e:
                         self.log_updated.emit(f"JSON解析失败: {str(e)}")
+                        self.log_updated.emit(f"尝试解析的JSON前200字符: {json_text[:200]}")
+                        
                         # 尝试使用递归下降解析器解析截断的JSON
                         try:
                             decoder = json.JSONDecoder()
@@ -975,7 +1076,19 @@ class VideoDescriptionThread(QThread):
                                 return False, []
                         except Exception as e2:
                             self.log_updated.emit(f"备用JSON解析也失败: {str(e2)}")
-                            self.log_updated.emit(f"原始输出: {json_text[:500]}...")
+                            
+                            # 尝试逐行查找JSON对象
+                            self.log_updated.emit("尝试逐行查找JSON对象...")
+                            for i, line in enumerate(output_lines):
+                                if line.strip().startswith('{') and ('summary' in line or 'results' in line):
+                                    try:
+                                        single_line_json = json.loads(line.strip())
+                                        if 'results' in single_line_json:
+                                            results = single_line_json['results']
+                                            self.log_updated.emit(f"在第 {i+1} 行找到有效JSON，共处理 {len(results)} 个视频")
+                                            return True, results
+                                    except:
+                                        continue
                             
                             # 如果JSON解析完全失败，但批量处理返回码为0，说明处理成功
                             # 尝试为每个视频创建成功的结果记录
@@ -994,6 +1107,10 @@ class VideoDescriptionThread(QThread):
                             return True, fallback_results
                 else:
                     self.log_updated.emit("未找到JSON输出")
+                    # 输出最后几行用于调试
+                    self.log_updated.emit("输出的最后10行:")
+                    for i, line in enumerate(output_lines[-10:], len(output_lines)-9):
+                        self.log_updated.emit(f"第{i}行: {line}")
                     return False, []
             else:
                 error_msg = '\n'.join(output_lines) if output_lines else "未知错误"
@@ -1008,24 +1125,62 @@ class VideoDescriptionThread(QThread):
     def _filter_action_description(self, description):
         """使用API过滤动作描述"""
         try:
-            if not self.api_config or not self.api_config.get('api_endpoint'):
+            # 获取动作过滤API配置
+            filter_api_config = self._get_action_filter_api_config()
+            if not filter_api_config or not filter_api_config.get('api_endpoint'):
                 self.log_updated.emit("API配置不完整，跳过动作描述过滤")
                 return description
             
             import requests
             import json
             
-            # 构建API请求 - 使用动作描述过滤专用API密钥
+            # 构建API请求 - 使用配置的API密钥
             headers = {
                 'Content-Type': 'application/json',
-                'Authorization': f'Bearer 739f6f05-586f-4386-a120-646b5dc02370'  # 动作描述过滤API密钥
+                'Authorization': f'Bearer {filter_api_config["api_key"]}'
             }
             
-            # 构建请求数据
-            prompt = f"帮我处理这段话，只保留动作描述，去除环境、人物衣着相关内容，并且不润色，保证原文：\n\n{description}"
+            # 获取当前描述长度等级设置
+            description_length_level = "中"  # 默认值
+            try:
+                if hasattr(self, 'center_description_length_combo'):
+                    description_length_level = self.center_description_length_combo.currentText()
+            except:
+                pass
+            
+            # 根据长度等级设置相应的处理要求
+            length_instruction = ""
+            if description_length_level == "极短":
+                length_instruction = "输出应该非常简洁，只保留最核心的动作描述，去除所有修饰词和细节。"
+            elif description_length_level == "短":
+                length_instruction = "输出应该简要，保留主要动作信息，适当简化描述。"
+            elif description_length_level == "中":
+                length_instruction = "输出应该保持适中长度，平衡详细度和简洁性。"
+            elif description_length_level == "长":
+                length_instruction = "输出应该详细，包含更多动作细节和描述。"
+            elif description_length_level == "极长":
+                length_instruction = "输出应该非常详细，全面分析所有动作，包含丰富的动作描述。"
+            
+            # 构建请求数据 - 先翻译再过滤动作描述，根据长度等级调整详细程度
+            prompt = f"""请帮我处理这段话，严格按照以下要求：
+
+1. 如果原文是英文，请先将其翻译为中文
+2. 只保留与身体动作、姿态、运动相关的描述
+3. 去除环境、背景、人物衣着、外貌、物品等与动作描述无关内容
+4. 输出必须是完整的句子，包含明确的主语（如"男子"、"女子"、"运动员"、"舞者"等）
+5. 保持自然的语言表达，按照{description_length_level}等级对动作描述进行缩写或者扩写，输出相应详细程度的内容
+6. 不要添加任何原文中没有出现的动作的相关描述，除非原文中明确提到某个动作
+7. 如果某句话包含动作和非动作内容，只需保留动作部分
+
+当前描述长度等级：{description_length_level}
+
+原文：
+{description}
+
+请直接输出过滤后的内容，不要添加任何解释或说明。"""
             
             data = {
-                'model': 'doubao-1-5-pro-32k-250115',  # 动作描述过滤专用模型
+                'model': filter_api_config['api_model'],
                 'messages': [
                     {
                         'role': 'user',
@@ -1038,12 +1193,12 @@ class VideoDescriptionThread(QThread):
             
             self.log_updated.emit("正在调用API进行动作描述过滤...")
             
-            # 发送API请求 - 使用动作描述过滤专用API端点
+            # 发送API请求 - 使用配置的API端点，增加超时时间到120秒
             response = requests.post(
-                'https://ark.cn-beijing.volces.com/api/v3/chat/completions',
+                filter_api_config['api_endpoint'],
                 headers=headers,
                 json=data,
-                timeout=30
+                timeout=120
             )
             
             if response.status_code == 200:
@@ -1161,6 +1316,9 @@ class VideoDescriptionWidget(QWidget):
         self._init_ui()
         self._load_cache_config()
         self._connect_signals()
+        
+        # 确保模型选择与配置文件同步
+        self._sync_model_selection_with_config()
         
         # 根据配置更新UI状态
         self._update_ui_based_on_algorithm_type()
@@ -1990,29 +2148,29 @@ class VideoDescriptionWidget(QWidget):
         tokens_label = QLabel("描述长度建议:")
         tokens_label.setStyleSheet("font-weight: bold; color: #2c3e50;")
         self.center_description_length_combo = QComboBox()
-        self.center_description_length_combo.addItems(["简要描述(150字符)", "标准描述(300字符)", "详细描述(500字符)", "非常详细(800字符)", "无限制生成", "自定义长度"])
-        self.center_description_length_combo.setCurrentText("标准描述(300字符)")
+        self.center_description_length_combo.addItems(["极短", "短", "中", "长", "极长"])
+        self.center_description_length_combo.setCurrentText("中")
         self.center_description_length_combo.setToolTip(
-            "选择描述的建议长度（仅作为提示，不强制限制输出）:\n"
-            "• 简要描述: 建议约150字符，AI会尽量简洁\n"
-            "• 标准描述: 建议约300字符，平衡详细度\n"
-            "• 详细描述: 建议约500字符，全面分析\n"
-            "• 非常详细: 建议约800字符，深度描述\n"
-            "• 无限制生成: 不给出长度建议，让AI自由发挥\n"
-            "• 自定义长度: 手动设置建议字符数量\n\n"
-            "注意：这些设置只是给AI的建议，AI仍可根据视频内容\n"
-            "生成更完整的描述，不会被强制截断。"
+            "选择描述的长度等级（用于模型生成和动作过滤）:\n"
+            "• 极短: 非常简洁的描述，突出核心动作\n"
+            "• 短: 简要描述，包含主要动作信息\n"
+            "• 中: 标准长度，平衡详细度和简洁性\n"
+            "• 长: 详细描述，包含更多动作细节\n"
+            "• 极长: 非常详细的描述，全面分析所有动作\n\n"
+            "注意：此设置既用于模型生成时的长度建议，\n"
+            "也用于动作过滤时的长度调整。"
         )
         self.center_description_length_combo.currentTextChanged.connect(self._on_description_length_changed)
         
         # 自定义长度输入框（初始隐藏）
-        self.center_custom_length_spinbox = QSpinBox()
-        self.center_custom_length_spinbox.setRange(0, 2000)
-        self.center_custom_length_spinbox.setValue(300)
-        self.center_custom_length_spinbox.setSuffix(" 字符")
-        self.center_custom_length_spinbox.setSpecialValueText("无限制")
-        self.center_custom_length_spinbox.setVisible(False)
-        self.center_custom_length_spinbox.setToolTip("自定义描述建议长度（字符数）\n0: 无限制生成，不给出长度建议\n100-2000: 建议字符数（AI可能生成更多内容）\n\n注意：这只是给AI的建议，不会强制截断输出")
+        # 自定义长度输入框（已移除，使用新的五等级系统）
+        # self.center_custom_length_spinbox = QSpinBox()
+        # self.center_custom_length_spinbox.setRange(0, 2000)
+        # self.center_custom_length_spinbox.setValue(300)
+        # self.center_custom_length_spinbox.setSuffix(" 字符")
+        # self.center_custom_length_spinbox.setSpecialValueText("无限制")
+        # self.center_custom_length_spinbox.setVisible(False)
+        # self.center_custom_length_spinbox.setToolTip("自定义描述建议长度（字符数）\n0: 无限制生成，不给出长度建议\n100-2000: 建议字符数（AI可能生成更多内容）\n\n注意：这只是给AI的建议，不会强制截断输出")
         
         # 第二行：采样帧数和自动保存选项
         frames_label = QLabel("采样帧数:")
@@ -2038,7 +2196,8 @@ class VideoDescriptionWidget(QWidget):
         grid_layout.addWidget(self.center_generation_mode_combo, 0, 1)
         grid_layout.addWidget(tokens_label, 0, 3)
         grid_layout.addWidget(self.center_description_length_combo, 0, 4)
-        grid_layout.addWidget(self.center_custom_length_spinbox, 0, 5)
+        # 自定义长度输入框已移除
+        # grid_layout.addWidget(self.center_custom_length_spinbox, 0, 5)
         
         grid_layout.addWidget(frames_label, 1, 0)
         grid_layout.addWidget(self.center_num_frames_spinbox, 1, 1)
@@ -2278,16 +2437,13 @@ class VideoDescriptionWidget(QWidget):
     def _load_cache_config(self):
         """加载缓存配置"""
         try:
-            cache_config_path = Path("cache_config.txt")
-            if cache_config_path.exists():
-                with open(cache_config_path, 'r', encoding='utf-8') as f:
-                    for line in f:
-                        line = line.strip()
-                        if line and not line.startswith('#') and '=' in line:
-                            key, value = line.split('=', 1)
-                            if key.strip() == 'sharegpt4video_model_path':
-                                self.model_path = value.strip()
-                                break
+            from ..core.user_config_manager import get_user_config_manager
+            config_manager = get_user_config_manager()
+            
+            # 获取模型路径配置
+            model_path = config_manager.config.get('sharegpt4video_model_path', '')
+            if model_path:
+                self.model_path = model_path
             else:
                 self.model_path = "Lin-Chen/sharegpt4video-8b"
         except Exception as e:
@@ -2963,10 +3119,8 @@ class VideoDescriptionWidget(QWidget):
     
     def _on_description_length_changed(self, text):
         """描述长度要求改变时的回调"""
-        if text == "自定义长度":
-            self.center_custom_length_spinbox.setVisible(True)
-        else:
-            self.center_custom_length_spinbox.setVisible(False)
+        # 新的五等级系统不需要自定义长度输入框
+        pass
     
     def _toggle_select_all(self):
         """切换全选/取消全选"""
@@ -3238,13 +3392,23 @@ class VideoDescriptionWidget(QWidget):
         # 获取视频文件名（不含扩展名）
         video_name = Path(video_path).stem
         
-        # 根据模型类型生成不同的文件名
+        # 获取当前的描述要求，用于生成唯一的文件名
+        description_requirement = getattr(self, 'description_requirement', '默认描述')
+        
+        # 清理描述要求中的特殊字符，用于文件名
+        safe_desc = "".join(c for c in description_requirement if c.isalnum() or c in (' ', '-', '_')).strip()
+        if len(safe_desc) > 20:  # 限制长度
+            safe_desc = safe_desc[:20]
+        if not safe_desc:
+            safe_desc = "默认描述"
+        
+        # 根据模型类型生成不同的文件名，格式与实际保存的文件名一致
         if model_type == 'api':
-            # API模型结果文件格式：隐藏缓存目录/视频名称_api_description.json
-            return cache_dir / f"{video_name}_api_description.json"
+            # API模型结果文件格式：隐藏缓存目录/视频名称-描述要求_description_api.json
+            return cache_dir / f"{video_name}-{safe_desc}_description_api.json"
         else:
-            # 本地模型结果文件格式：隐藏缓存目录/视频名称_local_description.json
-            return cache_dir / f"{video_name}_local_description.json"
+            # 本地模型结果文件格式：隐藏缓存目录/视频名称-描述要求_description_local.json
+            return cache_dir / f"{video_name}-{safe_desc}_description_local.json"
     
     def _on_video_selected(self, item):
         """视频选中事件"""
@@ -3812,19 +3976,18 @@ class VideoDescriptionWidget(QWidget):
             generation_mode = "random"  # 默认值
         
         # 获取描述长度要求并转换为字符数
+        # 获取描述长度等级
         description_length_text = self.center_description_length_combo.currentText()
-        if description_length_text == "简要描述(150字符)":
-            description_length = 150
-        elif description_length_text == "标准描述(300字符)":
+        if description_length_text == "极短":
+            description_length = 100
+        elif description_length_text == "短":
+            description_length = 200
+        elif description_length_text == "中":
             description_length = 300
-        elif description_length_text == "详细描述(500字符)":
+        elif description_length_text == "长":
             description_length = 500
-        elif description_length_text == "非常详细(800字符)":
+        elif description_length_text == "极长":
             description_length = 800
-        elif description_length_text == "无限制生成":
-            description_length = 0  # 0表示无限制
-        elif description_length_text == "自定义长度":
-            description_length = self.center_custom_length_spinbox.value()
         else:
             description_length = 300  # 默认值
         
@@ -4167,43 +4330,35 @@ class VideoDescriptionWidget(QWidget):
     def _get_api_config(self):
         """获取动作过滤API配置"""
         try:
-            import os
-            cache_config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'cache_config.txt')
+            from ..core.user_config_manager import get_user_config_manager
+            config_manager = get_user_config_manager()
             
-            config_data = {}
-            if os.path.exists(cache_config_path):
-                with open(cache_config_path, 'r', encoding='utf-8') as f:
-                    for line in f:
-                        if '=' in line and not line.strip().startswith('#'):
-                            key, value = line.strip().split('=', 1)
-                            config_data[key] = value.strip()
-            
-            # 读取动作过滤API配置，如果用户配置为空则使用内置配置
-            user_endpoint = config_data.get('action_filter_api_endpoint', '').strip()
-            user_key = config_data.get('action_filter_api_key', '').strip()
-            user_model = config_data.get('action_filter_api_model', '').strip()
+            # 获取动作过滤API配置
+            action_filter_config = config_manager.get_api_config('action_filter')
             
             # 如果用户配置了完整的API信息，则使用用户配置
-            if user_endpoint and user_key and user_model:
+            if (action_filter_config.get('endpoint') and 
+                action_filter_config.get('key') and 
+                action_filter_config.get('model')):
                 return {
-                    'api_endpoint': user_endpoint,
-                    'api_key': user_key,
-                    'api_model': user_model
+                    'api_endpoint': action_filter_config['endpoint'],
+                    'api_key': action_filter_config['key'],
+                    'api_model': action_filter_config['model']
                 }
             else:
                 # 否则使用内置配置
                 return {
                     'api_endpoint': 'https://ark.cn-beijing.volces.com/api/v3/chat/completions',
-                    'api_key': 'fa1f2df2-73f8-44b1-99a0-09834047ab51',
-                    'api_model': 'doubao-1.5-pro-32k-250115'
+                    'api_key': 'c01779ea-7f03-49c9-be26-1d93dd3a1f24',
+                    'api_model': 'doubao-seed-1-6-250615'
                 }
         except Exception as e:
             self._log_message(f"获取动作过滤API配置失败: {e}")
             # 发生异常时返回内置配置
             return {
                 'api_endpoint': 'https://ark.cn-beijing.volces.com/api/v3/chat/completions',
-                'api_key': 'fa1f2df2-73f8-44b1-99a0-09834047ab51',
-                'api_model': 'doubao-1.5-pro-32k-250115'
+                'api_key': 'c01779ea-7f03-49c9-be26-1d93dd3a1f24',
+                'api_model': 'doubao-seed-1-6-250615'
             }
     
     def _log_message(self, message):
@@ -4437,18 +4592,22 @@ class VideoDescriptionWidget(QWidget):
                     with open(local_result_file, 'r', encoding='utf-8') as f:
                         local_result = json.load(f)
                     
+                    # 获取描述长度等级用于文件命名（本地模型不使用长度等级，但为了一致性保留）
+                    description_length_text = self.center_description_length_combo.currentText()
+                    length_suffix = f"-{description_length_text}长度描述" if description_length_text else ""
+                    
                     # 生成导出文件路径（保存到description文件夹中，添加本地模型标识）
                     if format_type == 'json':
-                        export_file = description_folder / f"{video_name}_description_local.json"
+                        export_file = description_folder / f"{video_name}{length_suffix}_description_local.json"
                         self._export_single_video_json(local_result, video_path, export_file)
                     elif format_type == 'txt':
-                        export_file = description_folder / f"{video_name}_description_local.txt"
+                        export_file = description_folder / f"{video_name}{length_suffix}_description_local.txt"
                         self._export_single_video_txt(local_result, video_path, export_file)
                     elif format_type == 'csv':
-                        export_file = description_folder / f"{video_name}_description_local.csv"
+                        export_file = description_folder / f"{video_name}{length_suffix}_description_local.csv"
                         self._export_single_video_csv(local_result, video_path, export_file)
                     elif format_type == 'md':
-                        export_file = description_folder / f"{video_name}_description_local.md"
+                        export_file = description_folder / f"{video_name}{length_suffix}_description_local.md"
                         self._export_single_video_md(local_result, video_path, export_file)
                     
                     exported_count += 1
@@ -4458,18 +4617,22 @@ class VideoDescriptionWidget(QWidget):
                     with open(api_result_file, 'r', encoding='utf-8') as f:
                         api_result = json.load(f)
                     
+                    # 获取描述长度等级用于文件命名
+                    description_length_text = self.center_description_length_combo.currentText()
+                    length_suffix = f"-{description_length_text}长度描述" if description_length_text else ""
+                    
                     # 生成导出文件路径（保存到description文件夹中，添加API模型标识）
                     if format_type == 'json':
-                        export_file = description_folder / f"{video_name}_description_api.json"
+                        export_file = description_folder / f"{video_name}{length_suffix}_description_api.json"
                         self._export_single_video_json(api_result, video_path, export_file)
                     elif format_type == 'txt':
-                        export_file = description_folder / f"{video_name}_description_api.txt"
+                        export_file = description_folder / f"{video_name}{length_suffix}_description_api.txt"
                         self._export_single_video_txt(api_result, video_path, export_file)
                     elif format_type == 'csv':
-                        export_file = description_folder / f"{video_name}_description_api.csv"
+                        export_file = description_folder / f"{video_name}{length_suffix}_description_api.csv"
                         self._export_single_video_csv(api_result, video_path, export_file)
                     elif format_type == 'md':
-                        export_file = description_folder / f"{video_name}_description_api.md"
+                        export_file = description_folder / f"{video_name}{length_suffix}_description_api.md"
                         self._export_single_video_md(api_result, video_path, export_file)
                     
                     exported_count += 1
@@ -4700,20 +4863,24 @@ class VideoDescriptionWidget(QWidget):
                     description_folder = video_dir / "description"
                     description_folder.mkdir(exist_ok=True)
                     
+                    # 获取描述长度等级用于文件命名
+                    description_length_text = self.center_description_length_combo.currentText()
+                    length_suffix = f"-{description_length_text}长度描述" if description_length_text else ""
+                    
                     video_saved_count = 0
                     for format_type in formats:
                         try:
                             if format_type == 'json':
-                                save_file = description_folder / f"{video_name}_description.json"
+                                save_file = description_folder / f"{video_name}{length_suffix}_description.json"
                                 self._export_single_video_json(result, video_path, save_file)
                             elif format_type == 'txt':
-                                save_file = description_folder / f"{video_name}_description.txt"
+                                save_file = description_folder / f"{video_name}{length_suffix}_description.txt"
                                 self._export_single_video_txt(result, video_path, save_file)
                             elif format_type == 'csv':
-                                save_file = description_folder / f"{video_name}_description.csv"
+                                save_file = description_folder / f"{video_name}{length_suffix}_description.csv"
                                 self._export_single_video_csv(result, video_path, save_file)
                             elif format_type == 'md':
-                                save_file = description_folder / f"{video_name}_description.md"
+                                save_file = description_folder / f"{video_name}{length_suffix}_description.md"
                                 self._export_single_video_md(result, video_path, save_file)
                             
                             video_saved_count += 1
@@ -4773,18 +4940,22 @@ class VideoDescriptionWidget(QWidget):
                     description_folder.mkdir(parents=True, exist_ok=True)
                     pose_folder.mkdir(parents=True, exist_ok=True)
                     
+                    # 获取描述长度等级用于文件命名
+                    description_length_text = self.center_description_length_combo.currentText()
+                    length_suffix = f"-{description_length_text}长度描述" if description_length_text else ""
+                    
                     # 生成保存文件路径（保存到description文件夹中）
                     if format_type == 'json':
-                        save_file = description_folder / f"{video_name}_description.json"
+                        save_file = description_folder / f"{video_name}{length_suffix}_description.json"
                         self._export_single_video_json(result, video_path, save_file)
                     elif format_type == 'txt':
-                        save_file = description_folder / f"{video_name}_description.txt"
+                        save_file = description_folder / f"{video_name}{length_suffix}_description.txt"
                         self._export_single_video_txt(result, video_path, save_file)
                     elif format_type == 'csv':
-                        save_file = description_folder / f"{video_name}_description.csv"
+                        save_file = description_folder / f"{video_name}{length_suffix}_description.csv"
                         self._export_single_video_csv(result, video_path, save_file)
                     elif format_type == 'md':
-                        save_file = description_folder / f"{video_name}_description.md"
+                        save_file = description_folder / f"{video_name}{length_suffix}_description.md"
                         self._export_single_video_md(result, video_path, save_file)
                     
                     saved_count += 1
@@ -5083,60 +5254,51 @@ class VideoDescriptionWidget(QWidget):
         except Exception as e:
             self._log_message(f"加载自定义API模型失败: {str(e)}")
     
-    def _save_api_config_to_cache_file(self, api_config):
-        """将API配置保存到cache_config.txt文件"""
+    def _sync_model_selection_with_config(self):
+        """确保模型选择组合框与配置文件中的模型预设保持同步"""
         try:
-            import os
-            cache_config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'cache_config.txt')
-            
-            # 读取现有配置
-            config_data = {}
-            if os.path.exists(cache_config_path):
-                with open(cache_config_path, 'r', encoding='utf-8') as f:
-                    lines = f.readlines()
-            else:
-                lines = []
-            
-            # 更新配置数据
-            updated_lines = []
-            config_keys = {
-                'custom_api_endpoint': api_config['endpoint'],
-                'custom_api_key': api_config['api_key'],
-                'custom_api_model': api_config['model']
-            }
-            
-            # 标记哪些配置已经更新
-            updated_keys = set()
-            
-            # 处理现有行
-            for line in lines:
-                stripped_line = line.strip()
-                if '=' in stripped_line and not stripped_line.startswith('#'):
-                    key, _ = stripped_line.split('=', 1)
-                    if key in config_keys:
-                        # 更新现有配置
-                        updated_lines.append(f"{key}={config_keys[key]}\n")
-                        updated_keys.add(key)
-                    else:
-                        # 保留其他配置
-                        updated_lines.append(line)
+            if hasattr(self, 'config_manager') and self.config_manager and hasattr(self, 'model_selection_combo'):
+                # 从配置中读取模型预设
+                algorithm_config = self.config_manager.get('algorithms', {})
+                video_desc_config = algorithm_config.get('video_description', {})
+                config_model = video_desc_config.get('model_preset', 'ShareVideoGPT4（本地模型）')
+                
+                # 检查配置中的模型是否在组合框中存在
+                if self.model_selection_combo.findText(config_model) != -1:
+                    # 如果存在且与当前选择不同，则更新组合框选择
+                    current_model = self.model_selection_combo.currentText()
+                    if current_model != config_model:
+                        self.model_selection_combo.blockSignals(True)  # 阻止信号触发
+                        self.model_selection_combo.setCurrentText(config_model)
+                        self.model_selection_combo.blockSignals(False)  # 恢复信号
+                        self._log_message(f"已同步模型选择: {config_model}")
                 else:
-                    # 保留注释和空行
-                    updated_lines.append(line)
+                    # 如果配置中的模型不存在，则更新配置为当前选择的模型
+                    current_model = self.model_selection_combo.currentText()
+                    self.config_manager.set('algorithms.video_description.model_preset', current_model)
+                    self.config_manager.save_config()
+                    self._log_message(f"已更新配置中的模型预设: {current_model}")
+                    
+        except Exception as e:
+            self._log_message(f"同步模型选择失败: {str(e)}")
+    
+    def _save_api_config_to_cache_file(self, api_config):
+        """将API配置保存到配置文件"""
+        try:
+            from ..core.user_config_manager import get_user_config_manager
+            config_manager = get_user_config_manager()
             
-            # 添加未更新的配置项
-            for key, value in config_keys.items():
-                if key not in updated_keys:
-                    updated_lines.append(f"{key}={value}\n")
+            # 保存API配置
+            config_manager.set_api_config('custom', {
+                'endpoint': api_config['endpoint'],
+                'key': api_config['api_key'],
+                'model': api_config['model']
+            })
             
-            # 写回文件
-            with open(cache_config_path, 'w', encoding='utf-8') as f:
-                f.writelines(updated_lines)
-            
-            self._log_message("已将API配置保存到cache_config.txt文件")
+            self._log_message("已将API配置保存到配置文件")
             
         except Exception as e:
-            self._log_message(f"保存API配置到cache_config.txt失败: {str(e)}")
+            self._log_message(f"保存API配置到配置文件失败: {str(e)}")
     
     def _on_config_changed(self, config: Dict[str, Any]):
         """处理配置变化"""

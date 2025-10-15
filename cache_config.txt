@@ -1,5 +1,7 @@
 # ==================== 缓存配置 ====================
 # 模型文件缓存路径，用于存储下载的模型文件
+# 默认为程序目录下的huggingface文件夹，可根据需要修改
+# 如果此项为空，将自动使用程序目录下的huggingface文件夹
 cache_path=E:\Tiany\huggingface
 # 最小可用空间要求（GB），下载前检查磁盘空间
 min_free_space_gb=20
@@ -29,11 +31,11 @@ custom_mirrors=
 # 自定义API模型名称（将在界面中显示，如：我的GPT模型）
 custom_api_model_name=
 # 自定义API端点
-custom_api_endpoint=https://ark.cn-beijing.volces.com/api/v3/chat/completions
+custom_api_endpoint=https://test.example.com/api
 # 自定义API密钥
-custom_api_key=fa1f2df2-73f8-44b1-99a0-09834047ab51
+custom_api_key=test-key-123
 # 自定义API模型标识
-custom_api_model=doubao-1.5-vision-pro-250328
+custom_api_model=test-model
 
 # 动作过滤API配置（程序内置默认配置，用户填写后覆盖内置配置）
 # 动作过滤API端点
