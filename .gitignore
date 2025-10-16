@@ -185,3 +185,6 @@ huggingface/
 *.weights
 *.safetensors
 *.bin
+# Independent Git repositories
+src/algorithms/pose_3d/ViTPose/
+src/algorithms/pose_3d/multi-person-tracker/
