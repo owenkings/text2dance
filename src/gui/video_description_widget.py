@@ -275,12 +275,35 @@ class VideoDescriptionThread(QThread):
         self.gpu_device = gpu_device  # GPU设备选择
         self.is_running = True
         self.results = []
+        self.current_process = None  # 初始化当前进程引用
     
     def stop(self):
         """停止处理线程"""
         self.is_running = False
+        
+        # 如果有正在运行的子进程，强制终止
+        if hasattr(self, 'current_process') and self.current_process:
+            try:
+                self.current_process.terminate()
+                # 等待进程终止，最多等待3秒
+                try:
+                    self.current_process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    # 如果3秒后还没终止，强制杀死进程
+                    self.current_process.kill()
+                    self.current_process.wait()
+            except Exception as e:
+                import traceback
+                print(f"强制终止子进程时出错: {e}")
+                # 添加日志记录
+                if hasattr(self, 'logger'):
+                    self.logger.error(f"强制终止子进程失败: {e}")
+                    self.logger.debug(f"强制终止子进程失败详细信息: {traceback.format_exc()}")
+        
         self.quit()
-        self.wait()
+        # 设置超时等待，避免无限等待
+        if not self.wait(5000):  # 等待5秒
+            self.terminate()  # 强制终止线程
     
     def run(self):
         try:
@@ -288,8 +311,11 @@ class VideoDescriptionThread(QThread):
             
             # 根据算法类型选择处理方式
             if self.algorithm_type == "API调用":
-                self.status_updated.emit(f"开始API处理 {total_videos} 个视频...")
+                self.status_updated.emit(f"🚀 开始API处理 {total_videos} 个视频...")
                 self.log_updated.emit("使用API调用模式进行视频描述")
+                
+                # 初始化进度条
+                self.progress_updated.emit(0)
                 
                 # 输出API信息
                 api_info = f"使用API模型: {self.api_config.get('api_model', 'gpt-3.5-turbo')}"
@@ -304,11 +330,13 @@ class VideoDescriptionThread(QThread):
             else:  # 本地模型模式
                 # 检查是否启用多线程处理
                 if self.enable_multithread and self.device in ["CUDA", "Auto"] and total_videos > 1:
-                    self.status_updated.emit(f"开始多线程处理 {total_videos} 个视频，使用 {self.thread_count} 个线程...")
+                    self.status_updated.emit(f"🚀 开始多线程处理 {total_videos} 个视频，使用 {self.thread_count} 个线程...")
+                    self.progress_updated.emit(0)
                     self.log_updated.emit(f"使用多线程处理模式 ({self.thread_count} 个线程并行处理)")
                 else:
-                    self.status_updated.emit(f"开始批量处理 {total_videos} 个视频...")
+                    self.status_updated.emit(f"🚀 开始批量处理 {total_videos} 个视频...")
                     self.log_updated.emit("使用优化的批量处理模式 (1次模型加载 + N次推理)")
+                    self.progress_updated.emit(0)
                 
                 # 输出设备信息
                 device_info = f"此次运行使用的计算设备: {self.device}"
@@ -342,22 +370,32 @@ class VideoDescriptionThread(QThread):
                     processing_time = result.get('processing_time', 0)
                     
                     # 如果需要动作过滤
-                    if is_success and self.use_action_filter and description:
-                        description = self._filter_action_description(description)
+                    filter_success = False
+                    action_description = ""
+                    if is_success and hasattr(self, 'use_action_filter') and self.use_action_filter and description:
+                        filter_result = self._filter_action_description(description)
+                        action_description = filter_result['description']
+                        filter_success = filter_result['filter_success']
                     
                     # 记录结果
                     processed_result = {
                         'video_path': video_path,
                         'success': is_success,
-                        'description': description,
+                        'description': description,  # 保留原始描述
+                        'action_description': action_description,  # 添加过滤后的动作描述
                         'error_message': error_msg,
                         'start_time': result.get('timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S')),
                         'end_time': result.get('timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S')),
                         'total_processing_time': round(processing_time, 2),
                         'processed_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                        'duration': self._get_video_duration(video_path)
+                        'duration': self._get_video_duration(video_path),
+                        'action_filter_applied': filter_success  # 添加动作过滤成功标记
                     }
                     self.results.append(processed_result)
+                    
+                    # 如果成功应用了动作过滤，创建标记文件
+                    if filter_success:
+                        self._mark_action_filter_applied(video_path)
                     
                     # 发送完成信号，包含实际生成描述的时间戳
                     actual_timestamp = result.get('timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
@@ -366,11 +404,13 @@ class VideoDescriptionThread(QThread):
                     # 不在线程中直接保存结果，而是通过信号传递给主线程处理
                     # API模型结果将由主线程中的_on_video_completed方法保存
                     
-                    # 更新进度
+                    # 更新进度和状态
                     progress = int(((i + 1) / total_videos) * 100)
                     self.progress_updated.emit(progress)
                     
-                    self.status_updated.emit(f"已完成 {i+1}/{total_videos}: {os.path.basename(video_path)}")
+                    completed_status = f"✅ 已完成 {i+1}/{total_videos}: {os.path.basename(video_path)}"
+                    self.status_updated.emit(completed_status)
+                    self.log_updated.emit(completed_status)
             else:
                 self.status_updated.emit("批量处理失败")
                 self.log_updated.emit("批量处理脚本执行失败")
@@ -380,8 +420,11 @@ class VideoDescriptionThread(QThread):
             total_time = overall_end_time - overall_start_time
             
             if self.is_running:
-                self.log_updated.emit(f"批量处理完成，总耗时: {total_time:.2f}秒")
-                self.log_updated.emit(f"平均每个视频: {total_time/total_videos:.2f}秒")
+                # 完成时设置进度条为100%
+                self.progress_updated.emit(100)
+                self.status_updated.emit("✅ 批量处理完成")
+                self.log_updated.emit(f"✅ 批量处理完成，总耗时: {total_time:.2f}秒")
+                self.log_updated.emit(f"📊 平均每个视频: {total_time/total_videos:.2f}秒")
                 self.all_completed.emit()
                 
         except Exception as e:
@@ -439,11 +482,13 @@ class VideoDescriptionThread(QThread):
                             all_results.extend(results)
                             completed_count += len(chunk)
                             
-                            # 更新进度
+                            # 更新进度和状态
                             progress = int((completed_count / total_videos) * 100)
                             self.progress_updated.emit(progress)
                             
-                            self.log_updated.emit(f"线程 {chunk_id} 完成，处理了 {len(chunk)} 个视频")
+                            status_msg = f"🔄 多线程处理中 - 已完成 {completed_count}/{total_videos} 个视频"
+                            self.status_updated.emit(status_msg)
+                            self.log_updated.emit(f"✅ 线程 {chunk_id} 完成，处理了 {len(chunk)} 个视频")
                             
                             # 发送每个视频的完成信号
                             for result in results:
@@ -463,10 +508,14 @@ class VideoDescriptionThread(QThread):
                         self.log_updated.emit(f"线程 {chunk_id} 发生异常: {str(e)}")
             
             if all_results:
-                self.log_updated.emit(f"多线程处理完成，共处理 {len(all_results)} 个视频")
+                # 多线程处理完成时设置进度条为100%
+                self.progress_updated.emit(100)
+                self.status_updated.emit("✅ 多线程处理完成")
+                self.log_updated.emit(f"✅ 多线程处理完成，共处理 {len(all_results)} 个视频")
                 return True, all_results
             else:
-                self.log_updated.emit("多线程处理失败，没有获得任何结果")
+                self.status_updated.emit("❌ 多线程处理失败")
+                self.log_updated.emit("❌ 多线程处理失败，没有获得任何结果")
                 return False, []
                 
         except Exception as e:
@@ -489,8 +538,41 @@ class VideoDescriptionThread(QThread):
                 '--output-format', 'json'
             ]
             
-            # 添加这组视频的路径
-            cmd.extend(['--videos'] + video_chunk)
+            # 创建临时配置文件传递视频列表，避免Windows命令行长度限制
+            import tempfile
+            import json
+            import os
+            
+            # 生成视频配置
+            video_configs = []
+            for video_path in video_chunk:
+                video_config = {
+                    "video_path": video_path,
+                    "query": self.description_requirement,
+                    "num_frames": self.num_frames if self.num_frames > 0 else 16,
+                    "do_sample": self.generation_mode != "deterministic",
+                    "top_p": self.top_p if self.generation_mode in ["random", "hybrid"] else 0.9,
+                    "temperature": 0.8 if self.generation_mode == "hybrid" else 1.0,
+                    "num_beams": 2 if self.generation_mode == "hybrid" else 1,
+                    "max_new_tokens": None  # 不限制输出长度
+                }
+                video_configs.append(video_config)
+            
+            # 创建临时配置文件
+            config_fd, config_path = tempfile.mkstemp(suffix='.json', prefix='chunk_config_')
+            config_file_created = False
+            try:
+                with os.fdopen(config_fd, 'w', encoding='utf-8') as f:
+                    json.dump(video_configs, f, ensure_ascii=False, indent=2)
+                config_file_created = True
+                
+                self.log_updated.emit(f"线程 {chunk_id} 创建临时配置文件: {config_path}")
+                
+                # 使用配置文件而不是直接传递视频列表
+                cmd.extend(['--config-file', config_path])
+            except Exception as e:
+                self.log_updated.emit(f"线程 {chunk_id} 创建临时配置文件失败: {str(e)}")
+                return False, []
             
             # 根据描述长度要求更新提示词（但不限制max_new_tokens）
             # 注意：描述长度等级现在只用于API模型的动作过滤功能，本地模型不再使用长度建议
@@ -615,10 +697,18 @@ class VideoDescriptionThread(QThread):
                 self.log_updated.emit(f"线程 {chunk_id} 处理失败，返回码: {process.returncode}")
                 self.log_updated.emit(f"线程 {chunk_id} 错误输出: {output}")
                 return False, []
-                
+        
         except Exception as e:
             self.log_updated.emit(f"线程 {chunk_id} 发生异常: {str(e)}")
             return False, []
+        finally:
+            # 清理临时配置文件
+            try:
+                if config_file_created and os.path.exists(config_path):
+                    os.unlink(config_path)
+                    self.log_updated.emit(f"线程 {chunk_id} 清理临时配置文件: {config_path}")
+            except Exception as e:
+                self.log_updated.emit(f"线程 {chunk_id} 清理临时配置文件失败: {str(e)}")
     
     def _process_videos_api(self):
         """使用API处理所有视频"""
@@ -655,6 +745,10 @@ class VideoDescriptionThread(QThread):
                 video_name = os.path.basename(video_path)
                 self.status_updated.emit(f"正在处理 {i+1}/{total_videos}: {video_name}")
                 self.log_updated.emit(f"开始处理视频: {video_name}")
+                
+                # 实时更新进度条
+                progress = int((i / total_videos) * 100)
+                self.progress_updated.emit(progress)
                 
                 start_time = time.time()
                 
@@ -713,6 +807,7 @@ class VideoDescriptionThread(QThread):
                     
                     # 发送API请求
                     self.log_updated.emit(f"{video_name}: 发送API请求...")
+                    self.status_updated.emit(f"正在调用API处理 {i+1}/{total_videos}: {video_name}")
                     response = requests.post(api_endpoint, headers=headers, json=payload, timeout=60)
                     
                     if response.status_code == 200:
@@ -740,13 +835,14 @@ class VideoDescriptionThread(QThread):
                             self.log_updated.emit(f"{video_name}: API处理成功，耗时 {processing_time:.2f}秒")
                             self.log_updated.emit(f"{video_name}: {token_info}")
                             
+                            actual_timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                             results.append({
                                 'video_path': video_path,
                                 'success': True,
                                 'description': description,
                                 'error_message': '',
                                 'processing_time': processing_time,
-                                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                'timestamp': actual_timestamp,
                                 'token_usage': {
                                     'prompt_tokens': prompt_tokens,
                                     'completion_tokens': completion_tokens,
@@ -754,17 +850,38 @@ class VideoDescriptionThread(QThread):
                                 },
                                 'account_balance': remaining_balance
                             })
+                            
+                            # 发送video_completed信号，确保实时更新单个视频结果
+                            self.video_completed.emit(
+                                video_path, 
+                                True, 
+                                description, 
+                                '', 
+                                processing_time, 
+                                actual_timestamp
+                            )
                         else:
                             error_msg = "API返回空描述"
                             self.log_updated.emit(f"{video_name}: {error_msg}")
+                            actual_timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                             results.append({
                                 'video_path': video_path,
                                 'success': False,
                                 'description': '',
                                 'error_message': error_msg,
                                 'processing_time': 0,
-                                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                                'timestamp': actual_timestamp
                             })
+                            
+                            # 发送video_completed信号，确保实时更新单个视频结果
+                            self.video_completed.emit(
+                                video_path, 
+                                False, 
+                                '', 
+                                error_msg, 
+                                0, 
+                                actual_timestamp
+                            )
                     else:
                         error_msg = f"API请求失败: {response.status_code} - {response.text}"
                         self.log_updated.emit(f"{video_name}: {error_msg}")
@@ -774,32 +891,57 @@ class VideoDescriptionThread(QThread):
                             self.log_updated.emit(f"错误原因: 当前模型不支持多模态输入，请确保使用 doubao-1.5-vision-pro-250328 模型进行视频描述")
                             self.log_updated.emit(f"系统已自动修正API配置，请重新运行视频描述功能")
                         
+                        actual_timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                         results.append({
                             'video_path': video_path,
                             'success': False,
                             'description': '',
                             'error_message': error_msg,
                             'processing_time': 0,
-                            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                            'timestamp': actual_timestamp
                         })
+                        
+                        # 发送video_completed信号，确保实时更新单个视频结果
+                        self.video_completed.emit(
+                            video_path, 
+                            False, 
+                            '', 
+                            error_msg, 
+                            0, 
+                            actual_timestamp
+                        )
                 
                 except Exception as e:
                     error_msg = f"处理异常: {str(e)}"
                     self.log_updated.emit(f"{video_name}: {error_msg}")
+                    actual_timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                     results.append({
                         'video_path': video_path,
                         'success': False,
                         'description': '',
                         'error_message': error_msg,
                         'processing_time': 0,
-                        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        'timestamp': actual_timestamp
                     })
+                    
+                    # 发送video_completed信号，确保实时更新单个视频结果
+                    self.video_completed.emit(
+                        video_path, 
+                        False, 
+                        '', 
+                        error_msg, 
+                        0, 
+                        actual_timestamp
+                    )
                 
                 # 更新进度
                 progress = int(((i + 1) / total_videos) * 100)
                 self.progress_updated.emit(progress)
             
-            self.log_updated.emit(f"API处理完成，共处理 {len(results)} 个视频")
+            # API处理完成
+            self.progress_updated.emit(100)
+            self.status_updated.emit("✅ API处理完成")
+            self.log_updated.emit(f"✅ API处理完成，共处理 {len(results)} 个视频")
             return True, results
             
         except Exception as e:
@@ -863,8 +1005,41 @@ class VideoDescriptionThread(QThread):
                 '--output-format', 'json'
             ]
             
-            # 添加所有视频路径
-            cmd.extend(['--videos'] + self.videos)
+            # 创建临时配置文件传递视频列表，避免Windows命令行长度限制
+            import tempfile
+            import json
+            import os
+            
+            # 生成视频配置
+            video_configs = []
+            for video_path in self.videos:
+                video_config = {
+                    "video_path": video_path,
+                    "query": self.description_requirement,
+                    "num_frames": self.num_frames if self.num_frames > 0 else 16,
+                    "do_sample": self.generation_mode != "deterministic",
+                    "top_p": self.top_p if self.generation_mode in ["random", "hybrid"] else 0.9,
+                    "temperature": 0.8 if self.generation_mode == "hybrid" else 1.0,
+                    "num_beams": 2 if self.generation_mode == "hybrid" else 1,
+                    "max_new_tokens": None  # 不限制输出长度
+                }
+                video_configs.append(video_config)
+            
+            # 创建临时配置文件
+            config_fd, config_path = tempfile.mkstemp(suffix='.json', prefix='batch_config_')
+            config_file_created = False
+            try:
+                with os.fdopen(config_fd, 'w', encoding='utf-8') as f:
+                    json.dump(video_configs, f, ensure_ascii=False, indent=2)
+                config_file_created = True
+                
+                self.log_updated.emit(f"创建临时配置文件: {config_path}")
+                
+                # 使用配置文件而不是直接传递视频列表
+                cmd.extend(['--config-file', config_path])
+            except Exception as e:
+                self.log_updated.emit(f"创建临时配置文件失败: {str(e)}")
+                return False, []
             
             # 根据描述长度要求更新提示词（但不限制max_new_tokens）
             # 注意：描述长度等级现在只用于API模型的动作过滤功能，本地模型不再使用长度建议
@@ -930,14 +1105,29 @@ class VideoDescriptionThread(QThread):
                 cwd=project_root
             )
             
+            # 保存当前进程引用，以便停止时能够终止
+            self.current_process = process
+            
             output_lines = []
             self.log_updated.emit("开始读取批量处理输出...")
             
             # 实时读取输出
             while True:
                 if not self.is_running:
-                    process.terminate()
-                    self.log_updated.emit("用户取消批量处理")
+                    try:
+                        process.terminate()
+                        # 等待进程终止，最多等待2秒
+                        try:
+                            process.wait(timeout=2)
+                        except subprocess.TimeoutExpired:
+                            # 如果2秒后还没终止，强制杀死进程
+                            process.kill()
+                            process.wait()
+                        self.log_updated.emit("用户取消批量处理，进程已终止")
+                    except Exception as e:
+                        self.log_updated.emit(f"终止进程时出错: {e}")
+                    finally:
+                        self.current_process = None
                     return False, []
                 
                 line = process.stdout.readline()
@@ -963,6 +1153,21 @@ class VideoDescriptionThread(QThread):
                 time.sleep(0.01)
             
             self.log_updated.emit(f"批量处理命令执行完成，返回码: {process.returncode}")
+            
+        except Exception as e:
+            self.log_updated.emit(f"批量处理发生异常: {str(e)}")
+            return False, []
+        finally:
+            # 清理进程引用
+            self.current_process = None
+            
+            # 清理临时配置文件
+            try:
+                if config_file_created and os.path.exists(config_path):
+                    os.unlink(config_path)
+                    self.log_updated.emit(f"清理临时配置文件: {config_path}")
+            except Exception as e:
+                self.log_updated.emit(f"清理临时配置文件失败: {str(e)}")
             
             # 检查进程返回码
             if process.returncode == 0:
@@ -1116,20 +1321,22 @@ class VideoDescriptionThread(QThread):
                 error_msg = '\n'.join(output_lines) if output_lines else "未知错误"
                 self.log_updated.emit(f"批量处理命令执行失败: {error_msg}")
                 return False, []
-                
-        except Exception as e:
-            error_msg = f"批量处理时发生异常: {str(e)}"
-            self.log_updated.emit(error_msg)
-            return False, []
     
     def _filter_action_description(self, description):
-        """使用API过滤动作描述"""
+        """使用API过滤动作描述
+        
+        返回:
+            dict: {
+                'description': str,  # 过滤后的描述
+                'filter_success': bool  # 是否成功应用了动作过滤
+            }
+        """
         try:
             # 获取动作过滤API配置
             filter_api_config = self._get_action_filter_api_config()
             if not filter_api_config or not filter_api_config.get('api_endpoint'):
                 self.log_updated.emit("API配置不完整，跳过动作描述过滤")
-                return description
+                return {'description': description, 'filter_success': False}
             
             import requests
             import json
@@ -1206,17 +1413,99 @@ class VideoDescriptionThread(QThread):
                 if 'choices' in result and len(result['choices']) > 0:
                     filtered_description = result['choices'][0]['message']['content'].strip()
                     self.log_updated.emit("动作描述过滤完成")
-                    return filtered_description
+                    return {'description': filtered_description, 'filter_success': True}
                 else:
                     self.log_updated.emit("API响应格式异常，使用原始描述")
-                    return description
+                    return {'description': description, 'filter_success': False}
             else:
                 self.log_updated.emit(f"API调用失败 (状态码: {response.status_code})，使用原始描述")
-                return description
+                return {'description': description, 'filter_success': False}
                 
         except Exception as e:
             self.log_updated.emit(f"动作描述过滤失败: {str(e)}，使用原始描述")
-            return description
+            return {'description': description, 'filter_success': False}
+    
+    def _mark_action_filter_applied(self, video_path):
+        """标记视频已成功应用动作过滤"""
+        try:
+            video_name = os.path.basename(video_path)
+            video_base_name = os.path.splitext(video_name)[0]
+            
+            description_dir = os.path.join(video_base_name, 'description')
+            if not os.path.exists(description_dir):
+                os.makedirs(description_dir, exist_ok=True)
+            
+            # 创建或更新标记文件
+            marker_file = os.path.join(description_dir, '.action_filter_applied')
+            
+            # 读取现有内容（如果文件存在）
+            existing_videos = set()
+            if os.path.exists(marker_file):
+                try:
+                    with open(marker_file, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    # 解析已有的视频名称
+                    for line in content.split('\n'):
+                        if line.strip() and 'Video:' in line:
+                            existing_video = line.split('Video:')[1].split(',')[0].strip()
+                            existing_videos.add(existing_video)
+                except:
+                    pass
+            
+            # 检查视频是否已在标记文件中
+            if video_name not in existing_videos:
+                # 添加新的视频记录
+                timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+                new_entry = f"Video: {video_name}, Action filter applied at: {timestamp}\n"
+                
+                with open(marker_file, 'a', encoding='utf-8') as f:
+                    f.write(new_entry)
+                    
+                self._log_message(f"已将视频 {video_name} 添加到标记文件")
+            else:
+                self._log_message(f"视频 {video_name} 已在标记文件中，跳过添加")
+                
+        except Exception as e:
+            self._log_message(f"创建标记文件失败: {str(e)}")
+    
+    def _check_action_filter_applied(self, video_path):
+        """检查视频是否已成功应用动作过滤"""
+        try:
+            video_name = os.path.basename(video_path)
+            video_base_name = os.path.splitext(video_name)[0]
+            video_dir = os.path.dirname(video_path)
+            
+            # 优先检查标记文件
+            marker_file = os.path.join(video_dir, video_base_name, 'description', '.action_filter_applied')
+            if os.path.exists(marker_file):
+                try:
+                    with open(marker_file, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    # 检查标记文件中是否包含该视频名称
+                    if video_name in content:
+                        return True
+                except:
+                    pass
+            
+            # 如果标记文件不存在或没有记录该视频，则检查结果文件
+            user_result_file = self._get_user_result_file_path(video_path)
+            if user_result_file.exists():
+                try:
+                    with open(user_result_file, 'r', encoding='utf-8') as f:
+                        result = json.load(f)
+                    # 如果文件中明确标记已过滤，则返回True
+                    if result.get('action_filter_applied', False):
+                        return True
+                except:
+                    pass
+            
+            return False
+        except:
+            return False
+    
+    def check_action_filter_applied(self, video_path):
+        """检查视频是否已成功应用动作过滤（公共方法）"""
+        return self._check_action_filter_applied(video_path)
     
     def _get_video_duration(self, video_path):
         """获取视频时长"""
@@ -1256,6 +1545,84 @@ class VideoDescriptionThread(QThread):
             self.log_updated.emit(f"获取视频时长失败，使用默认帧数16: {str(e)}")
             return 16
     
+    def _get_action_filter_api_config(self):
+        """获取动作过滤API配置"""
+        try:
+            # 使用绝对导入避免相对导入问题
+            import sys
+            import os
+            
+            # 添加项目根目录到路径
+            project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            if project_root not in sys.path:
+                sys.path.insert(0, project_root)
+            
+            from src.core.user_config_manager import get_user_config_manager
+            config_manager = get_user_config_manager()
+            
+            # 获取动作过滤API配置
+            action_filter_config = config_manager.get_api_config('action_filter')
+            
+            # 如果用户配置了完整的API信息，则使用用户配置
+            if (action_filter_config.get('endpoint') and 
+                action_filter_config.get('key') and 
+                action_filter_config.get('model')):
+                return {
+                    'api_endpoint': action_filter_config['endpoint'],
+                    'api_key': action_filter_config['key'],
+                    'api_model': action_filter_config['model']
+                }
+            else:
+                # 否则使用内置配置
+                return {
+                    'api_endpoint': 'https://ark.cn-beijing.volces.com/api/v3/chat/completions',
+                    'api_key': 'c01779ea-7f03-49c9-be26-1d93dd3a1f24',
+                    'api_model': 'doubao-seed-1-6-250615'
+                }
+        except Exception as e:
+            self.log_updated.emit(f"使用UserConfigManager加载配置失败，回退到直接文件读取: {e}")
+            
+            # 回退方案：直接读取配置文件
+            try:
+                project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                config_file = os.path.join(project_root, 'cache_config.txt')
+                
+                if os.path.exists(config_file):
+                    # cache_config.txt是简单的key=value格式，不是INI格式
+                    config_dict = {}
+                    with open(config_file, 'r', encoding='utf-8') as f:
+                        for line in f:
+                            line = line.strip()
+                            if line and not line.startswith('#') and '=' in line:
+                                key, value = line.split('=', 1)
+                                config_dict[key.strip()] = value.strip()
+                    
+                    # 检查是否有action filter相关配置
+                    if ('action_filter_api_endpoint' in config_dict and 
+                        'action_filter_api_key' in config_dict and 
+                        'action_filter_api_model' in config_dict):
+                        return {
+                            'api_endpoint': config_dict['action_filter_api_endpoint'],
+                            'api_key': config_dict['action_filter_api_key'],
+                            'api_model': config_dict['action_filter_api_model']
+                        }
+                
+                # 如果配置文件读取失败或配置不完整，返回内置配置
+                return {
+                    'api_endpoint': 'https://ark.cn-beijing.volces.com/api/v3/chat/completions',
+                    'api_key': 'c01779ea-7f03-49c9-be26-1d93dd3a1f24',
+                    'api_model': 'doubao-seed-1-6-250615'
+                }
+                
+            except Exception as fallback_error:
+                self.log_updated.emit(f"配置文件读取也失败，使用默认配置: {fallback_error}")
+                # 最终回退：返回内置配置
+                return {
+                    'api_endpoint': 'https://ark.cn-beijing.volces.com/api/v3/chat/completions',
+                    'api_key': 'c01779ea-7f03-49c9-be26-1d93dd3a1f24',
+                    'api_model': 'doubao-seed-1-6-250615'
+                }
+
     def stop(self):
         self.is_running = False
         self.quit()
@@ -1275,6 +1642,9 @@ class VideoDescriptionWidget(QWidget):
         self.video_results = {}  # 存储视频处理结果
         self.processing_thread = None
         self.is_all_selected = False  # 全选状态标记
+        
+        # 初始化use_action_filter属性，避免AttributeError
+        self.use_action_filter = False
         
         # 日志文件管理
         self.log_file_path = None
@@ -2265,6 +2635,33 @@ class VideoDescriptionWidget(QWidget):
         
         control_layout.addWidget(self.center_start_btn)
         control_layout.addWidget(self.center_stop_btn)
+        
+        # 添加重新过滤按钮
+        self.refilter_btn = QPushButton("🔄 重新过滤")
+        self.refilter_btn.setStyleSheet(
+            "QPushButton {"
+            "    background-color: #f39c12;"
+            "    color: white;"
+            "    border: none;"
+            "    padding: 12px 24px;"
+            "    font-size: 14px;"
+            "    font-weight: bold;"
+            "    border-radius: 6px;"
+            "}"
+            "QPushButton:hover {"
+            "    background-color: #e67e22;"
+            "}"
+            "QPushButton:pressed {"
+            "    background-color: #d35400;"
+            "}"
+            "QPushButton:disabled {"
+            "    background-color: #bdc3c7;"
+            "    color: #7f8c8d;"
+            "}"
+        )
+        self.refilter_btn.setToolTip("对已生成的结果重新应用动作描述过滤")
+        self.refilter_btn.clicked.connect(self._show_refilter_dialog)
+        control_layout.addWidget(self.refilter_btn)
         
         options_layout.addLayout(control_layout)
         
@@ -3379,6 +3776,51 @@ class VideoDescriptionWidget(QWidget):
             temp_dir.mkdir(parents=True, exist_ok=True)
             return temp_dir
     
+    def _get_length_text_english(self, chinese_text):
+        """将中文描述长度转换为英文"""
+        length_mapping = {
+            "极短": "Extra Short",
+            "短": "Short", 
+            "中": "Medium",
+            "长": "Long",
+            "极长": "Extra Long"
+        }
+        return length_mapping.get(chinese_text, "Medium")
+    
+    def _get_user_result_file_path(self, video_path, model_type=None):
+        """获取用户目录下的结果文件路径 - 保存到视频同名文件夹/description目录
+        
+        参数:
+            video_path: 视频路径
+            model_type: 模型类型，'api' 表示API模型，None或其他值表示本地模型
+        """
+        try:
+            # 获取视频所在目录和视频名称
+            video_dir = Path(video_path).parent
+            video_name = Path(video_path).stem
+            
+            # 创建视频同名文件夹和description子文件夹
+            video_folder = video_dir / video_name
+            description_folder = video_folder / "description"
+            description_folder.mkdir(parents=True, exist_ok=True)
+            
+            # 获取当前的描述长度等级，用于生成统一的文件名
+            description_length_text = getattr(self, 'center_description_length_combo', None)
+            if description_length_text and hasattr(description_length_text, 'currentText'):
+                length_text = description_length_text.currentText()
+            else:
+                length_text = "中"  # 默认值
+            
+            # 转换为英文
+            length_text_english = self._get_length_text_english(length_text)
+            
+            # 新的文件名格式：视频名称_描述长度.json
+            return description_folder / f"{video_name}_{length_text_english}.json"
+        except Exception as e:
+            self._log_message(f"创建用户结果文件路径失败: {str(e)}")
+            # 失败时返回缓存路径作为备用
+            return self._get_result_file_path(video_path, model_type)
+
     def _get_result_file_path(self, video_path, model_type=None):
         """获取结果文件路径 - 使用视频目录下的隐藏缓存文件夹保存，避免污染视频目录
         
@@ -3392,23 +3834,18 @@ class VideoDescriptionWidget(QWidget):
         # 获取视频文件名（不含扩展名）
         video_name = Path(video_path).stem
         
-        # 获取当前的描述要求，用于生成唯一的文件名
-        description_requirement = getattr(self, 'description_requirement', '默认描述')
-        
-        # 清理描述要求中的特殊字符，用于文件名
-        safe_desc = "".join(c for c in description_requirement if c.isalnum() or c in (' ', '-', '_')).strip()
-        if len(safe_desc) > 20:  # 限制长度
-            safe_desc = safe_desc[:20]
-        if not safe_desc:
-            safe_desc = "默认描述"
-        
-        # 根据模型类型生成不同的文件名，格式与实际保存的文件名一致
-        if model_type == 'api':
-            # API模型结果文件格式：隐藏缓存目录/视频名称-描述要求_description_api.json
-            return cache_dir / f"{video_name}-{safe_desc}_description_api.json"
+        # 获取当前的描述长度等级，用于生成统一的文件名
+        description_length_text = getattr(self, 'center_description_length_combo', None)
+        if description_length_text and hasattr(description_length_text, 'currentText'):
+            length_text = description_length_text.currentText()
         else:
-            # 本地模型结果文件格式：隐藏缓存目录/视频名称-描述要求_description_local.json
-            return cache_dir / f"{video_name}-{safe_desc}_description_local.json"
+            length_text = "中"  # 默认值
+        
+        # 转换为英文
+        length_text_english = self._get_length_text_english(length_text)
+        
+        # 新的文件名格式：视频名称_描述长度.json
+        return cache_dir / f"{video_name}_{length_text_english}.json"
     
     def _on_video_selected(self, item):
         """视频选中事件"""
@@ -3584,6 +4021,20 @@ class VideoDescriptionWidget(QWidget):
                 
                 if result.get('success', False):
                     result_text += f"\n描述内容:\n{result.get('description', '无')}"
+                    
+                    # 显示动作描述内容（如果存在）
+                    action_description = result.get('action_description', '')
+                    if action_description:
+                        result_text += f"\n\n动作描述内容:\n{action_description}"
+                    
+                    # 显示是否过滤字段
+                    action_filter_applied = result.get('action_filter_applied', False)
+                    result_text += f"\n\n是否过滤处理: {'是' if action_filter_applied else '否'}"
+                    
+                    # 显示过滤更新时间（如果存在）
+                    filter_updated_at = result.get('filter_updated_at', '')
+                    if filter_updated_at:
+                        result_text += f"\n过滤更新时间: {filter_updated_at}"
                 else:
                     error_msg = result.get('error_message') or '无'
                     result_text += f"\n错误信息:\n{error_msg}"
@@ -3599,12 +4050,18 @@ class VideoDescriptionWidget(QWidget):
                     if other_result_file.exists():
                         result_text += f"\n提示: 该视频同时存在{'API模型' if other_model_type == 'api' else '本地模型'}的结果，可点击下方按钮切换查看"
             except Exception as e:
+                import traceback
                 result_text = f"读取结果文件失败: {str(e)}"
+                self.logger.error(f"读取结果文件失败: {e}")
+                self.logger.debug(f"读取结果文件失败详细信息: {traceback.format_exc()}")
                 
             try:
                 self.result_text.setPlainText(result_text)
             except Exception as e:
+                import traceback
                 self.result_text.setPlainText(f"读取结果文件失败: {str(e)}")
+                self.logger.error(f"设置结果文本失败: {e}")
+                self.logger.debug(f"设置结果文本失败详细信息: {traceback.format_exc()}")
         else:
             self.result_text.setPlainText("该视频尚未处理")
     
@@ -4065,6 +4522,11 @@ class VideoDescriptionWidget(QWidget):
         if self.processing_thread and self.processing_thread.isRunning():
             self.processing_thread.stop()
             self._log_message("用户取消处理")
+            
+            # 等待线程完全停止，最多等待10秒
+            if not self.processing_thread.wait(10000):
+                self._log_message("警告：线程未能正常停止，强制终止")
+                self.processing_thread.terminate()
         
         # 关闭日志文件
         self._close_log_file()
@@ -4076,7 +4538,7 @@ class VideoDescriptionWidget(QWidget):
             self.center_stop_btn.setEnabled(False)
     
     def _on_video_completed(self, video_path, success, description, error_msg, total_processing_time, actual_timestamp):
-        """视频处理完成"""
+        """视频处理完成 - 实时处理和保存"""
         video_name = os.path.basename(video_path)
         
         if success:
@@ -4088,22 +4550,74 @@ class VideoDescriptionWidget(QWidget):
             # 确定模型类型（本地或API）
             model_type = 'api' if hasattr(self.processing_thread, 'algorithm_type') and self.processing_thread.algorithm_type == "API调用" else 'local'
             
-            # 保存结果 - 根据实际模型类型保存
+            # 保存原始结果 - 根据实际模型类型保存
             self._log_message(f"保存{model_type}模型结果")
-            self._save_video_result(video_path, {
+            original_result = {
                 'success': True,
                 'description': description,
+                'action_description': '',  # 初始化为空，稍后可能会被填充
                 'error_message': '',
                 'processed_at': actual_timestamp,  # 使用实际生成描述的时间
                 'total_processing_time': total_processing_time,
                 'duration': self._get_video_duration(video_path),
                 'model_name': current_model,  # 添加使用的模型名称
                 'generated_at': actual_timestamp,  # 添加生成时间（与processed_at相同，但语义更明确）
-                'model_type': model_type  # 明确标记模型类型
-            }, model_type)
+                'model_type': model_type,  # 明确标记模型类型
+                'action_filter_applied': False  # 初始化为未应用过滤
+            }
+            self._save_video_result(video_path, original_result, model_type)
+            
+            # 实时API过滤（如果启用）
+            filter_success = False
+            if hasattr(self, 'use_action_filter') and self.use_action_filter and description:
+                self._log_message(f"开始对 {video_name} 进行实时API过滤...")
+                try:
+                    filter_result = self._filter_action_description(description)
+                    filtered_description = filter_result['description']
+                    filter_success = filter_result['filter_success']
+                    
+                    # 保存过滤后的结果（使用api模型类型标识）
+                    filtered_result = {
+                        'success': True,
+                        'description': description,  # 保留原始描述
+                        'action_description': filtered_description,  # 保存过滤后的动作描述
+                        'original_description': description,  # 保留原始描述（向后兼容）
+                        'error_message': '',
+                        'processed_at': actual_timestamp,
+                        'total_processing_time': total_processing_time,
+                        'duration': self._get_video_duration(video_path),
+                        'model_name': current_model,
+                        'generated_at': actual_timestamp,
+                        'model_type': 'api',  # 标记为API过滤结果
+                        'filter_applied': True,  # 标记已应用过滤
+                        'action_filter_applied': filter_success  # 添加动作过滤成功标记
+                    }
+                    self._save_video_result(video_path, filtered_result, 'api')
+                    if filter_success:
+                        self._log_message(f"✅ {video_name} API过滤完成")
+                        # 创建动作过滤成功标记文件
+                        self._mark_action_filter_applied(video_path)
+                    else:
+                        self._log_message(f"⚠️ {video_name} API过滤未成功，使用原始描述")
+                except Exception as e:
+                    self._log_message(f"❌ {video_name} API过滤失败: {str(e)}")
+            
+            # 实时自动保存（如果启用）
+            if self.auto_save_format_combo.currentText() != "关闭":
+                self._log_message(f"开始对 {video_name} 进行实时自动保存...")
+                try:
+                    self._handle_auto_save_single_video(video_path)
+                    self._log_message(f"✅ {video_name} 自动保存完成")
+                except Exception as e:
+                    self._log_message(f"❌ {video_name} 自动保存失败: {str(e)}")
             
             # 更新列表显示
             self._update_video_list_item(video_path, True)
+            
+            # 如果当前选中的视频就是刚处理完的视频，立即刷新结果显示
+            current_item = self.video_list.currentItem()
+            if current_item and current_item.data(Qt.UserRole) == video_path:
+                self._show_video_result(video_path)
         else:
             self._log_message(f"❌ {video_name} 处理失败: {error_msg}")
             
@@ -4129,11 +4643,11 @@ class VideoDescriptionWidget(QWidget):
             
             # 更新列表显示
             self._update_video_list_item(video_path, False)
-        
-        # 如果当前选中的是刚处理完的视频，立即更新结果显示
-        current_item = self.video_list.currentItem()
-        if current_item and current_item.data(Qt.UserRole) == video_path:
-            self._show_video_result(video_path)
+            
+            # 如果当前选中的视频就是刚处理完的视频，立即刷新结果显示
+            current_item = self.video_list.currentItem()
+            if current_item and current_item.data(Qt.UserRole) == video_path:
+                self._show_video_result(video_path)
     
     def _on_all_completed(self):
         """所有视频处理完成"""
@@ -4155,9 +4669,9 @@ class VideoDescriptionWidget(QWidget):
         if hasattr(self, 'center_stop_btn'):
             self.center_stop_btn.setEnabled(False)
         
-        # 检查是否启用自动保存
-        if self.auto_save_format_combo.currentText() != "关闭":
-            self._handle_auto_save()
+        # 检查是否启用自动保存（注意：自动保存已在每个视频完成时实时执行，此处不再重复执行）
+        # if self.auto_save_format_combo.currentText() != "关闭":
+        #     self._handle_auto_save()
     
     def _show_total_token_usage_and_balance(self):
         """显示总token消耗和账户余额（蓝色字体）"""
@@ -4195,10 +4709,13 @@ class VideoDescriptionWidget(QWidget):
                     self._log_message(balance_msg)
             
         except Exception as e:
+            import traceback
             self._log_message(f"统计token使用量时发生错误: {str(e)}")
+            self.logger.error(f"统计token使用量失败: {e}")
+            self.logger.debug(f"统计token使用量失败详细信息: {traceback.format_exc()}")
     
     def _save_video_result(self, video_path, result, model_type=None):
-        """保存视频结果
+        """保存视频结果 - 双重保存机制：同时保存到缓存目录和用户目录
         
         参数:
             video_path: 视频路径
@@ -4206,9 +4723,6 @@ class VideoDescriptionWidget(QWidget):
             model_type: 模型类型，'api' 表示API模型，None或其他值表示本地模型
         """
         try:
-            # 根据模型类型获取结果文件路径
-            result_file = self._get_result_file_path(video_path, model_type)
-            
             # 处理描述内容中的换行符
             if 'description' in result and isinstance(result['description'], str):
                 # 将描述文本中的 \n 转换为实际的换行符
@@ -4217,10 +4731,43 @@ class VideoDescriptionWidget(QWidget):
             # 添加模型类型信息到结果中
             result['model_type'] = 'api' if model_type == 'api' else 'local'
             
-            with open(result_file, 'w', encoding='utf-8') as f:
+            # 1. 保存到缓存目录（保持原有逻辑）
+            cache_result_file = self._get_result_file_path(video_path, model_type)
+            with open(cache_result_file, 'w', encoding='utf-8') as f:
                 json.dump(result, f, ensure_ascii=False, indent=2)
+            
+            # 2. 统一保存到用户目录（视频同名文件夹/description），不再区分模型类型
+            user_result_file = self._get_user_result_file_path(video_path)
+            
+            # 如果文件已存在，合并模型信息到现有文件中
+            if user_result_file.exists():
+                try:
+                    with open(user_result_file, 'r', encoding='utf-8') as f:
+                        existing_result = json.load(f)
+                    
+                    # 合并模型结果，保留所有模型的信息
+                    if model_type == 'api':
+                        existing_result['api_model_result'] = result
+                    else:
+                        existing_result['local_model_result'] = result
+                    
+                    # 更新主要显示内容为当前模型结果
+                    existing_result.update(result)
+                    
+                    with open(user_result_file, 'w', encoding='utf-8') as f:
+                        json.dump(existing_result, f, ensure_ascii=False, indent=2)
+                except Exception as e:
+                    # 如果合并失败，直接覆盖
+                    with open(user_result_file, 'w', encoding='utf-8') as f:
+                        json.dump(result, f, ensure_ascii=False, indent=2)
+            else:
+                # 新文件，直接保存
+                with open(user_result_file, 'w', encoding='utf-8') as f:
+                    json.dump(result, f, ensure_ascii=False, indent=2)
                 
-            self._log_message(f"已保存{'API' if model_type == 'api' else '本地'}模型结果到: {result_file}")
+            self._log_message(f"已保存{'API' if model_type == 'api' else '本地'}模型结果到统一文件")
+            self._log_message(f"  缓存位置: {cache_result_file}")
+            self._log_message(f"  用户位置: {user_result_file}")
         except Exception as e:
             self._log_message(f"保存结果失败: {str(e)}")
     
@@ -4233,10 +4780,21 @@ class VideoDescriptionWidget(QWidget):
                 current_check_state = item.checkState()
                 
                 video_name = os.path.basename(video_path)
+                display_text = ""
                 if success:
-                    item.setText(f"✅ {video_name}")
+                    display_text = f"✅ {video_name}"
                 else:
-                    item.setText(f"❌ {video_name}")
+                    display_text = f"❌ {video_name}"
+                
+                # 检查是否已应用动作过滤
+                try:
+                    if hasattr(self, '_check_action_filter_applied') and self._check_action_filter_applied(video_path):
+                        display_text += " 🎯"
+                except Exception as e:
+                    self.logger.warning(f"检查动作过滤状态时出错: {e}")
+                    # 继续执行，不影响主要功能
+                
+                item.setText(display_text)
                 
                 # 恢复复选框状态
                 item.setCheckState(current_check_state)
@@ -4292,24 +4850,41 @@ class VideoDescriptionWidget(QWidget):
                 except Exception as e:
                     self._log_message(f"读取旧版本结果文件失败: {str(e)}")
             
+            # 检查是否已应用动作过滤
+            action_filter_applied = False
+            try:
+                if hasattr(self, '_check_action_filter_applied'):
+                    action_filter_applied = self._check_action_filter_applied(video_path)
+            except Exception as e:
+                self.logger.warning(f"检查动作过滤状态时出错: {e}")
+                # 继续执行，不影响主要功能
+            
             # 根据处理结果更新显示
             if local_success and api_success:
-                item.setText(f"✅✅ {video_name} [本地+API]")
+                display_text = f"✅✅ {video_name} [本地+API]"
             elif local_success:
-                item.setText(f"✅ {video_name} [本地]")
+                display_text = f"✅ {video_name} [本地]"
             elif api_success:
-                item.setText(f"✅ {video_name} [API]")
+                display_text = f"✅ {video_name} [API]"
             elif legacy_success:
-                item.setText(f"✅ {video_name} [旧版]")
+                display_text = f"✅ {video_name} [旧版]"
             else:
                 # 检查是否有失败的结果
                 has_result = local_result_file.exists() or api_result_file.exists() or legacy_result_file.exists()
                 if has_result:
-                    item.setText(f"❌ {video_name}")
+                    display_text = f"❌ {video_name}"
                 else:
                     # 如果没有结果文件，显示未处理状态
                     if not item.text().startswith(("✅", "❌")):
-                        item.setText(video_name)
+                        display_text = video_name
+                    else:
+                        display_text = item.text()
+            
+            # 如果已应用动作过滤，添加特殊标记
+            if action_filter_applied:
+                display_text += " 🎯"
+            
+            item.setText(display_text)
             
             # 恢复复选框状态
             item.setCheckState(current_check_state)
@@ -4400,6 +4975,187 @@ class VideoDescriptionWidget(QWidget):
         import re
         plain_text = re.sub(r'<[^>]+>', '', html_message)
         self.status_changed.emit(plain_text)
+    
+    def _filter_action_description(self, description):
+        """使用API过滤动作描述
+        
+        返回:
+            dict: {
+                'description': str,  # 过滤后的描述
+                'filter_success': bool  # 是否成功应用了动作过滤
+            }
+        """
+        try:
+            # 获取动作过滤API配置
+            filter_api_config = self._get_action_filter_api_config()
+            if not filter_api_config or not filter_api_config.get('api_endpoint'):
+                self._log_message("API配置不完整，跳过动作描述过滤")
+                return {'description': description, 'filter_success': False}
+            
+            import requests
+            import json
+            
+            # 构建API请求 - 使用配置的API密钥
+            headers = {
+                'Content-Type': 'application/json',
+                'Authorization': f'Bearer {filter_api_config["api_key"]}'
+            }
+            
+            # 获取当前描述长度等级设置
+            description_length_level = "中"  # 默认值
+            try:
+                if hasattr(self, 'center_description_length_combo'):
+                    description_length_level = self.center_description_length_combo.currentText()
+            except:
+                pass
+            
+            # 根据长度等级设置相应的处理要求
+            length_instruction = ""
+            if description_length_level == "极短":
+                length_instruction = "输出应该非常简洁，只保留最核心的动作描述，去除所有修饰词和细节。"
+            elif description_length_level == "短":
+                length_instruction = "输出应该简要，保留主要动作信息，适当简化描述。"
+            elif description_length_level == "中":
+                length_instruction = "输出应该保持适中长度，平衡详细度和简洁性。"
+            elif description_length_level == "长":
+                length_instruction = "输出应该详细，包含更多动作细节和描述。"
+            elif description_length_level == "极长":
+                length_instruction = "输出应该非常详细，全面分析所有动作，包含丰富的动作描述。"
+            
+            # 构建请求数据 - 先翻译再过滤动作描述，根据长度等级调整详细程度
+            prompt = f"""请帮我处理这段话，严格按照以下要求：
+
+1. 如果原文是英文，请先将其翻译为中文
+2. 只保留与身体动作、姿态、运动相关的描述
+3. 去除环境、背景、人物衣着、外貌、物品等与动作描述无关内容
+4. 输出必须是完整的句子，包含明确的主语（如"男子"、"女子"、"运动员"、"舞者"等）
+5. 保持自然的语言表达，按照{description_length_level}等级对动作描述进行缩写或者扩写，输出相应详细程度的内容
+6. 不要添加任何原文中没有出现的动作的相关描述，除非原文中明确提到某个动作
+7. 如果某句话包含动作和非动作内容，只需保留动作部分
+
+当前描述长度等级：{description_length_level}
+
+原文：
+{description}
+
+请直接输出过滤后的内容，不要添加任何解释或说明。"""
+            
+            data = {
+                'model': filter_api_config['api_model'],
+                'messages': [
+                    {
+                        'role': 'user',
+                        'content': prompt
+                    }
+                ],
+                'max_tokens': 16384,
+                'temperature': 0.1
+            }
+            
+            self._log_message("正在调用API进行动作描述过滤...")
+            
+            # 发送API请求 - 使用配置的API端点，增加超时时间到120秒
+            response = requests.post(
+                filter_api_config['api_endpoint'],
+                headers=headers,
+                json=data,
+                timeout=120
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                if 'choices' in result and len(result['choices']) > 0:
+                    filtered_description = result['choices'][0]['message']['content'].strip()
+                    self._log_message("动作描述过滤完成")
+                    return {'description': filtered_description, 'filter_success': True}
+                else:
+                    self._log_message("API响应格式异常，使用原始描述")
+                    return {'description': description, 'filter_success': False}
+            else:
+                self._log_message(f"API调用失败 (状态码: {response.status_code})，使用原始描述")
+                return {'description': description, 'filter_success': False}
+                
+        except Exception as e:
+            self._log_message(f"动作描述过滤失败: {str(e)}，使用原始描述")
+            return {'description': description, 'filter_success': False}
+    
+    def _get_action_filter_api_config(self):
+        """获取动作过滤API配置"""
+        try:
+            # 使用绝对导入避免相对导入问题
+            import sys
+            import os
+            
+            # 添加项目根目录到路径
+            project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            if project_root not in sys.path:
+                sys.path.insert(0, project_root)
+            
+            from src.core.user_config_manager import get_user_config_manager
+            config_manager = get_user_config_manager()
+            
+            # 获取动作过滤API配置
+            action_filter_config = config_manager.get_api_config('action_filter')
+            
+            # 如果用户配置了完整的API信息，则使用用户配置
+            if (action_filter_config.get('endpoint') and 
+                action_filter_config.get('key') and 
+                action_filter_config.get('model')):
+                return {
+                    'api_endpoint': action_filter_config['endpoint'],
+                    'api_key': action_filter_config['key'],
+                    'api_model': action_filter_config['model']
+                }
+            else:
+                # 否则使用内置配置
+                return {
+                    'api_endpoint': 'https://ark.cn-beijing.volces.com/api/v3/chat/completions',
+                    'api_key': 'c01779ea-7f03-49c9-be26-1d93dd3a1f24',
+                    'api_model': 'doubao-seed-1-6-250615'
+                }
+        except Exception as e:
+            self._log_message(f"使用UserConfigManager加载配置失败，回退到直接文件读取: {e}")
+            
+            # 回退方案：直接读取配置文件
+            try:
+                project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                config_file = os.path.join(project_root, 'cache_config.txt')
+                
+                if os.path.exists(config_file):
+                    # cache_config.txt是简单的key=value格式，不是INI格式
+                    config_dict = {}
+                    with open(config_file, 'r', encoding='utf-8') as f:
+                        for line in f:
+                            line = line.strip()
+                            if line and not line.startswith('#') and '=' in line:
+                                key, value = line.split('=', 1)
+                                config_dict[key.strip()] = value.strip()
+                    
+                    # 检查是否有action filter相关配置
+                    if ('action_filter_api_endpoint' in config_dict and 
+                        'action_filter_api_key' in config_dict and 
+                        'action_filter_api_model' in config_dict):
+                        return {
+                            'api_endpoint': config_dict['action_filter_api_endpoint'],
+                            'api_key': config_dict['action_filter_api_key'],
+                            'api_model': config_dict['action_filter_api_model']
+                        }
+                
+                # 如果配置文件读取失败或配置不完整，返回内置配置
+                return {
+                    'api_endpoint': 'https://ark.cn-beijing.volces.com/api/v3/chat/completions',
+                    'api_key': 'c01779ea-7f03-49c9-be26-1d93dd3a1f24',
+                    'api_model': 'doubao-seed-1-6-250615'
+                }
+                
+            except Exception as fallback_error:
+                self._log_message(f"配置文件读取也失败，使用默认配置: {fallback_error}")
+                # 最终回退：返回内置配置
+                return {
+                    'api_endpoint': 'https://ark.cn-beijing.volces.com/api/v3/chat/completions',
+                    'api_key': 'c01779ea-7f03-49c9-be26-1d93dd3a1f24',
+                    'api_model': 'doubao-seed-1-6-250615'
+                }
     
     def _create_log_file(self):
         """创建新的日志文件"""
@@ -4583,62 +5339,33 @@ class VideoDescriptionWidget(QWidget):
                 description_folder.mkdir(parents=True, exist_ok=True)
                 pose_folder.mkdir(parents=True, exist_ok=True)
                 
-                # 检查本地模型和API模型的结果文件
-                local_result_file = self._get_result_file_path(video_path, model_type='local')
-                api_result_file = self._get_result_file_path(video_path, model_type='api')
+                # 检查统一的描述文件
+                user_result_file = self._get_user_result_file_path(video_path)
                 
-                # 导出本地模型结果
-                if local_result_file.exists():
-                    with open(local_result_file, 'r', encoding='utf-8') as f:
-                        local_result = json.load(f)
-                    
-                    # 获取描述长度等级用于文件命名（本地模型不使用长度等级，但为了一致性保留）
-                    description_length_text = self.center_description_length_combo.currentText()
-                    length_suffix = f"-{description_length_text}长度描述" if description_length_text else ""
-                    
-                    # 生成导出文件路径（保存到description文件夹中，添加本地模型标识）
-                    if format_type == 'json':
-                        export_file = description_folder / f"{video_name}{length_suffix}_description_local.json"
-                        self._export_single_video_json(local_result, video_path, export_file)
-                    elif format_type == 'txt':
-                        export_file = description_folder / f"{video_name}{length_suffix}_description_local.txt"
-                        self._export_single_video_txt(local_result, video_path, export_file)
-                    elif format_type == 'csv':
-                        export_file = description_folder / f"{video_name}{length_suffix}_description_local.csv"
-                        self._export_single_video_csv(local_result, video_path, export_file)
-                    elif format_type == 'md':
-                        export_file = description_folder / f"{video_name}{length_suffix}_description_local.md"
-                        self._export_single_video_md(local_result, video_path, export_file)
-                    
-                    exported_count += 1
-                
-                # 导出API模型结果
-                if api_result_file.exists():
-                    with open(api_result_file, 'r', encoding='utf-8') as f:
-                        api_result = json.load(f)
+                # 导出统一的描述文件
+                if user_result_file.exists():
+                    with open(user_result_file, 'r', encoding='utf-8') as f:
+                        result = json.load(f)
                     
                     # 获取描述长度等级用于文件命名
                     description_length_text = self.center_description_length_combo.currentText()
-                    length_suffix = f"-{description_length_text}长度描述" if description_length_text else ""
                     
-                    # 生成导出文件路径（保存到description文件夹中，添加API模型标识）
+                    # 生成导出文件路径（统一格式，不再区分模型类型）
                     if format_type == 'json':
-                        export_file = description_folder / f"{video_name}{length_suffix}_description_api.json"
-                        self._export_single_video_json(api_result, video_path, export_file)
+                        export_file = description_folder / f"{video_name}-{description_length_text}_description.json"
+                        self._export_single_video_json(result, video_path, export_file)
                     elif format_type == 'txt':
-                        export_file = description_folder / f"{video_name}{length_suffix}_description_api.txt"
-                        self._export_single_video_txt(api_result, video_path, export_file)
+                        export_file = description_folder / f"{video_name}-{description_length_text}_description.txt"
+                        self._export_single_video_txt(result, video_path, export_file)
                     elif format_type == 'csv':
-                        export_file = description_folder / f"{video_name}{length_suffix}_description_api.csv"
-                        self._export_single_video_csv(api_result, video_path, export_file)
+                        export_file = description_folder / f"{video_name}-{description_length_text}_description.csv"
+                        self._export_single_video_csv(result, video_path, export_file)
                     elif format_type == 'md':
-                        export_file = description_folder / f"{video_name}{length_suffix}_description_api.md"
-                        self._export_single_video_md(api_result, video_path, export_file)
+                        export_file = description_folder / f"{video_name}-{description_length_text}_description.md"
+                        self._export_single_video_md(result, video_path, export_file)
                     
                     exported_count += 1
-                
-                # 如果两种模型结果都不存在，则记录失败
-                if not local_result_file.exists() and not api_result_file.exists():
+                else:
                     failed_count += 1
                     self._log_message(f"未找到视频处理结果: {os.path.basename(video_path)}")
             
@@ -4808,6 +5535,115 @@ class VideoDescriptionWidget(QWidget):
             
 
     
+    def _handle_auto_save_single_video(self, video_path):
+        """处理单个视频的实时自动保存"""
+        # 检查是否有处理结果
+        result_file = self._get_result_file_path(video_path)
+        if not result_file.exists():
+            self._log_message(f"未找到视频处理结果: {os.path.basename(video_path)}")
+            return
+        
+        # 读取处理结果
+        with open(result_file, 'r', encoding='utf-8') as f:
+            result = json.load(f)
+        
+        # 获取自动保存格式
+        format_text = self.auto_save_format_combo.currentText()
+        
+        if format_text == "全部格式":
+            # 保存所有格式
+            formats = ["json", "txt", "csv", "md"]
+            self._auto_save_single_video_all_formats(video_path, result, formats)
+        else:
+            # 保存指定格式
+            format_map = {
+                "JSON格式": "json",
+                "TXT格式": "txt", 
+                "CSV格式": "csv",
+                "MD格式": "md"
+            }
+            selected_format = format_map.get(format_text, "json")
+            self._auto_save_single_video_format(video_path, result, selected_format)
+    
+    def _auto_save_single_video_all_formats(self, video_path, result, formats):
+        """为单个视频保存所有格式"""
+        video_name = Path(video_path).stem
+        video_dir = Path(video_path).parent
+        
+        # 创建视频同名文件夹和description子文件夹
+        video_folder = video_dir / video_name
+        description_folder = video_folder / "description"
+        pose_folder = video_folder / "pose"  # 为未来功能预留
+        
+        # 确保目录存在
+        description_folder.mkdir(parents=True, exist_ok=True)
+        pose_folder.mkdir(parents=True, exist_ok=True)
+        
+        # 获取描述长度等级用于文件命名
+        description_length_text = self.center_description_length_combo.currentText()
+        length_suffix = f"-{description_length_text}长度描述" if description_length_text else ""
+        
+        saved_count = 0
+        format_names = {"json": "JSON", "txt": "TXT", "csv": "CSV", "md": "MD"}
+        
+        for format_type in formats:
+            try:
+                if format_type == 'json':
+                    save_file = description_folder / f"{video_name}{length_suffix}_description.json"
+                    self._export_single_video_json(result, video_path, save_file)
+                elif format_type == 'txt':
+                    save_file = description_folder / f"{video_name}{length_suffix}_description.txt"
+                    self._export_single_video_txt(result, video_path, save_file)
+                elif format_type == 'csv':
+                    save_file = description_folder / f"{video_name}{length_suffix}_description.csv"
+                    self._export_single_video_csv(result, video_path, save_file)
+                elif format_type == 'md':
+                    save_file = description_folder / f"{video_name}{length_suffix}_description.md"
+                    self._export_single_video_md(result, video_path, save_file)
+                
+                saved_count += 1
+            except Exception as e:
+                self._log_message(f"保存{format_names[format_type]}格式失败 ({os.path.basename(video_path)}): {str(e)}")
+        
+        if saved_count > 0:
+            self._log_message(f"视频 {os.path.basename(video_path)} 成功保存 {saved_count} 种格式到description文件夹")
+    
+    def _auto_save_single_video_format(self, video_path, result, format_type):
+        """为单个视频保存指定格式"""
+        video_name = Path(video_path).stem
+        video_dir = Path(video_path).parent
+        
+        # 创建视频同名文件夹和description子文件夹
+        video_folder = video_dir / video_name
+        description_folder = video_folder / "description"
+        pose_folder = video_folder / "pose"  # 为未来功能预留
+        
+        # 确保目录存在
+        description_folder.mkdir(parents=True, exist_ok=True)
+        pose_folder.mkdir(parents=True, exist_ok=True)
+        
+        # 获取描述长度等级用于文件命名
+        description_length_text = self.center_description_length_combo.currentText()
+        length_suffix = f"-{description_length_text}长度描述" if description_length_text else ""
+        
+        try:
+            if format_type == 'json':
+                save_file = description_folder / f"{video_name}{length_suffix}_description.json"
+                self._export_single_video_json(result, video_path, save_file)
+            elif format_type == 'txt':
+                save_file = description_folder / f"{video_name}{length_suffix}_description.txt"
+                self._export_single_video_txt(result, video_path, save_file)
+            elif format_type == 'csv':
+                save_file = description_folder / f"{video_name}{length_suffix}_description.csv"
+                self._export_single_video_csv(result, video_path, save_file)
+            elif format_type == 'md':
+                save_file = description_folder / f"{video_name}{length_suffix}_description.md"
+                self._export_single_video_md(result, video_path, save_file)
+            
+            self._log_message(f"视频 {os.path.basename(video_path)} 成功保存{format_type.upper()}格式到description文件夹")
+        except Exception as e:
+            self._log_message(f"保存{format_type.upper()}格式失败 ({os.path.basename(video_path)}): {str(e)}")
+
     def _handle_auto_save(self):
         """处理自动保存功能 - 每个视频单独保存到视频所在目录"""
         if not self.current_videos:
@@ -5310,3 +6146,111 @@ class VideoDescriptionWidget(QWidget):
                 self.refresh_ui_state()
         except Exception as e:
             self._log_message(f"处理配置变化失败: {str(e)}")
+    
+    def _show_refilter_dialog(self):
+        """显示重新过滤对话框"""
+        try:
+            # 检查是否有选中的视频
+            selected_videos = self._get_selected_videos()
+            
+            if not selected_videos:
+                QMessageBox.warning(self, "提示", "请先选择要重新过滤的视频文件")
+                return
+            
+            # 检查API配置
+            if not self._validate_api_config():
+                QMessageBox.warning(self, "配置错误", "请先配置API相关设置")
+                return
+            
+            # 确认重新过滤
+            reply = QMessageBox.question(
+                self, 
+                "确认重新过滤", 
+                f"确定要对选中的 {len(selected_videos)} 个视频文件进行重新过滤吗？\n\n"
+                f"这将读取视频同名文件夹中的描述文件，应用动作描述过滤，并更新描述文件。",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            
+            if reply == QMessageBox.Yes:
+                # 开始重新过滤处理
+                self._start_refilter_process(selected_videos)
+            
+        except Exception as e:
+            self._log_message(f"启动重新过滤失败: {str(e)}")
+            QMessageBox.critical(self, "错误", f"启动重新过滤失败: {str(e)}")
+    
+    def _start_refilter_process(self, selected_videos):
+        """开始重新过滤处理"""
+        try:
+            # 检查API配置
+            if not self._validate_api_config():
+                QMessageBox.warning(self, "配置错误", "请先配置API相关设置")
+                return
+            
+            # 创建重新过滤线程
+            from .refilter_thread import RefilterThread
+            self.refilter_thread = RefilterThread(selected_videos, self)
+            self.refilter_thread.progress_updated.connect(self._update_refilter_progress)
+            self.refilter_thread.file_processed.connect(self._on_refilter_file_processed)
+            self.refilter_thread.finished.connect(self._on_refilter_finished)
+            self.refilter_thread.error_occurred.connect(self._on_refilter_error)
+            
+            # 更新UI状态
+            self.refilter_btn.setEnabled(False)
+            self.center_start_btn.setEnabled(False)
+            self.center_progress_bar.setValue(0)
+            self.center_progress_bar.setMaximum(len(selected_videos))
+            
+            # 开始处理
+            self.refilter_thread.start()
+            self._log_message(f"开始重新过滤 {len(selected_videos)} 个视频的描述")
+            
+        except Exception as e:
+            self._log_message(f"启动重新过滤失败: {str(e)}")
+            QMessageBox.critical(self, "错误", f"启动重新过滤失败: {str(e)}")
+    
+    def _update_refilter_progress(self, current, total):
+        """更新重新过滤进度"""
+        self.center_progress_bar.setValue(current)
+        self.center_progress_bar.setFormat(f"重新过滤进度: {current}/{total}")
+    
+    def _on_refilter_file_processed(self, file_path, success, message):
+        """处理单个文件重新过滤完成"""
+        if success:
+            self._log_message(f"✅ 重新过滤完成: {file_path}")
+        else:
+            self._log_message(f"❌ 重新过滤失败: {file_path} - {message}")
+    
+    def _on_refilter_finished(self):
+        """重新过滤全部完成"""
+        self.refilter_btn.setEnabled(True)
+        self.center_start_btn.setEnabled(True)
+        self.center_progress_bar.setValue(0)
+        self.center_progress_bar.setFormat("")
+        self._log_message("🎉 重新过滤处理完成")
+        QMessageBox.information(self, "完成", "重新过滤处理已完成")
+    
+    def _on_refilter_error(self, error_message):
+        """处理重新过滤错误"""
+        self.refilter_btn.setEnabled(True)
+        self.center_start_btn.setEnabled(True)
+        self.center_progress_bar.setValue(0)
+        self.center_progress_bar.setFormat("")
+        self._log_message(f"❌ 重新过滤出错: {error_message}")
+        QMessageBox.critical(self, "错误", f"重新过滤出错: {error_message}")
+    
+    def _validate_api_config(self):
+        """验证API配置"""
+        try:
+            api_endpoint = self.api_endpoint_edit.text().strip()
+            api_key = self.api_key_edit.text().strip()
+            
+            if not api_endpoint:
+                return False
+            if not api_key:
+                return False
+                
+            return True
+        except:
+            return False

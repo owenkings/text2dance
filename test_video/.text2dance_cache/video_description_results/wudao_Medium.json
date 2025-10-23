@@ -1,0 +1,14 @@
+{
+  "success": true,
+  "description": "The video shows an individual standing in a room with minimal decorations. The person is dressed in a bright yellow jacket and white shorts. Initially, they are standing still with their arms at their sides. As the video progresses, they begin to move, bringing their right arm upwards with their hand open, indicating the initiation of an action or movement. Soon after, the left arm also comes up in a similar position to the right, both arms now raised, suggesting an ongoing movement. Finally, the person transitions into a dynamic dance pose, with their arms extended outward from the body and their feet slightly apart. Throughout the video, the environment and the camera angle remain unchanged, with the person's movements as the central focus.",
+  "action_description": "人起初静止站立，双臂垂在身体两侧；随后开始移动，右臂向上抬起，手张开；不久后左臂以与右臂相似的姿势抬起，双臂都举了起来；最后过渡到动态的舞蹈姿势，双臂从身体向外伸展，双脚略微分开。",
+  "error_message": "",
+  "processed_at": "2025-10-20T20:23:39.594055",
+  "total_processing_time": 52.462685,
+  "duration": "15.50秒",
+  "model_name": "ShareVideoGPT4（本地模型）",
+  "generated_at": "2025-10-20T20:23:39.594055",
+  "model_type": "local",
+  "action_filter_applied": true,
+  "filter_updated_at": "2025-10-20 20:24:12"
+}

@@ -616,7 +616,7 @@ class Application(QApplication):
             
             # 卸载所有插件
             if self.plugin_manager:
-                self.plugin_manager.unload_all_plugins()
+                self.plugin_manager.cleanup()
             
             # 隐藏系统托盘
             if self.system_tray:
@@ -641,7 +641,35 @@ class Application(QApplication):
         
         error_msg = ''.join(traceback.format_exception(exc_type, exc_value, exc_traceback))
         
-        print(f"未处理的异常: {error_msg}")
+        # 添加更详细的错误信息记录
+        detailed_error = f"""
+=== 异常详细信息 ===
+异常类型: {exc_type.__name__}
+异常值: {exc_value}
+异常模块: {exc_type.__module__ if hasattr(exc_type, '__module__') else 'Unknown'}
+
+=== 完整堆栈跟踪 ===
+{error_msg}
+
+=== 异常对象属性 ===
+"""
+        
+        # 记录异常对象的所有属性
+        if hasattr(exc_value, '__dict__'):
+            for attr, value in exc_value.__dict__.items():
+                detailed_error += f"{attr}: {value}\n"
+        
+        # 如果是AttributeError，记录更多信息
+        if isinstance(exc_value, AttributeError):
+            detailed_error += f"\n=== AttributeError 特殊信息 ===\n"
+            detailed_error += f"错误消息: {str(exc_value)}\n"
+            if hasattr(exc_value, 'obj'):
+                detailed_error += f"对象类型: {type(exc_value.obj)}\n"
+                detailed_error += f"对象: {exc_value.obj}\n"
+            if hasattr(exc_value, 'name'):
+                detailed_error += f"属性名: {exc_value.name}\n"
+        
+        print(f"未处理的异常详细信息: {detailed_error}")
         
         # 显示错误对话框
         if hasattr(self, 'main_window') and self.main_window:

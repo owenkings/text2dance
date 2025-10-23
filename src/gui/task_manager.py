@@ -704,23 +704,78 @@ class TaskManagerWidget(QWidget):
     def _update_running_tasks(self):
         """更新运行中的任务"""
         try:
-            # 获取运行中的任务并更新进度
-            for task in self.task_model.tasks:
-                if task.status == TaskStatus.RUNNING:
-                    # 从任务管理器获取最新状态
-                    updated_task = self.task_manager.get_task(task.task_id)
-                    if updated_task:
-                        self.task_model.update_task(updated_task)
-                        
-                        # 如果当前选中的是这个任务，更新详情
-                        selected_task = self._get_selected_task()
-                        if selected_task and selected_task.task_id == task.task_id:
-                            self.task_detail.set_task(updated_task)
+            # 检查必要的对象是否存在
+            if not hasattr(self, 'task_model') or self.task_model is None:
+                self.logger.warning("task_model未初始化，跳过任务更新")
+                return
+                
+            if not hasattr(self, 'task_manager') or self.task_manager is None:
+                self.logger.warning("task_manager未初始化，跳过任务更新")
+                return
             
-            self._update_task_counts()
+            # 获取运行中的任务并更新进度
+            tasks_to_update = []
+            try:
+                tasks_to_update = list(self.task_model.tasks)
+            except (AttributeError, TypeError) as e:
+                import traceback
+                self.logger.warning(f"获取任务列表失败: {e}")
+                self.logger.debug(f"获取任务列表失败详细信息: {traceback.format_exc()}")
+                return
+            
+            for task in tasks_to_update:
+                try:
+                    if hasattr(task, 'status') and task.status == TaskStatus.RUNNING:
+                        # 从任务管理器获取最新状态
+                        updated_task = None
+                        try:
+                            updated_task = self.task_manager.get_task(task.task_id)
+                        except Exception as e:
+                            import traceback
+                            self.logger.warning(f"获取任务状态失败 {task.task_id}: {e}")
+                            self.logger.debug(f"获取任务状态失败详细信息 {task.task_id}: {traceback.format_exc()}")
+                            continue
+                            
+                        if updated_task:
+                            try:
+                                self.task_model.update_task(updated_task)
+                            except Exception as e:
+                                import traceback
+                                self.logger.warning(f"更新任务模型失败 {task.task_id}: {e}")
+                                self.logger.debug(f"更新任务模型失败详细信息 {task.task_id}: {traceback.format_exc()}")
+                                continue
+                            
+                            # 如果当前选中的是这个任务，更新详情
+                            try:
+                                selected_task = self._get_selected_task()
+                                if (selected_task and hasattr(selected_task, 'task_id') and 
+                                    hasattr(updated_task, 'task_id') and 
+                                    selected_task.task_id == updated_task.task_id):
+                                    if hasattr(self, 'task_detail') and self.task_detail is not None:
+                                        self.task_detail.set_task(updated_task)
+                            except Exception as e:
+                                import traceback
+                                self.logger.warning(f"更新任务详情失败 {task.task_id}: {e}")
+                                self.logger.debug(f"更新任务详情失败详细信息 {task.task_id}: {traceback.format_exc()}")
+                                
+                except Exception as e:
+                    import traceback
+                    self.logger.warning(f"处理单个任务时出错: {e}")
+                    self.logger.debug(f"处理单个任务时出错详细信息: {traceback.format_exc()}")
+                    continue
+            
+            # 更新任务计数
+            try:
+                self._update_task_counts()
+            except Exception as e:
+                import traceback
+                self.logger.warning(f"更新任务计数失败: {e}")
+                self.logger.debug(f"更新任务计数失败详细信息: {traceback.format_exc()}")
             
         except Exception as e:
+            import traceback
             self.logger.error(f"更新运行中任务失败: {e}")
+            self.logger.debug(f"更新运行中任务失败详细信息: {traceback.format_exc()}")
     
     def _on_task_added(self, task: Task):
         """处理任务添加"""
