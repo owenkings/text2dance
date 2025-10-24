@@ -34,6 +34,169 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize, QMutex, QUrl
 from PyQt5.QtGui import QFont, QPixmap, QKeySequence, QImage, QIcon, QMovie
 
+class MultiFolderSelectionDialog(QDialog):
+    """支持多选的文件夹选择对话框"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("选择多个文件夹")
+        self.setModal(True)
+        self.resize(800, 600)
+        
+        # 存储选中的文件夹
+        self.selected_folders = []
+        
+        # 创建布局
+        layout = QVBoxLayout(self)
+        
+        # 说明文字
+        info_label = QLabel("请选择要处理的文件夹（支持Ctrl+点击多选，Shift+点击范围选择）：")
+        info_label.setStyleSheet("font-weight: bold; color: #2c3e50; margin-bottom: 10px;")
+        layout.addWidget(info_label)
+        
+        # 文件夹树形视图
+        self.folder_tree = QTreeWidget()
+        self.folder_tree.setHeaderLabel("文件夹")
+        self.folder_tree.setSelectionMode(QAbstractItemView.ExtendedSelection)  # 支持多选
+        self.folder_tree.setRootIsDecorated(True)
+        layout.addWidget(self.folder_tree)
+        
+        # 当前路径显示
+        path_layout = QHBoxLayout()
+        path_layout.addWidget(QLabel("当前路径:"))
+        self.current_path_label = QLabel("")
+        self.current_path_label.setStyleSheet("color: #666; font-family: monospace;")
+        path_layout.addWidget(self.current_path_label)
+        path_layout.addStretch()
+        layout.addLayout(path_layout)
+        
+        # 按钮布局
+        button_layout = QHBoxLayout()
+        
+        # 浏览按钮
+        self.browse_btn = QPushButton("浏览...")
+        self.browse_btn.clicked.connect(self._browse_root_folder)
+        button_layout.addWidget(self.browse_btn)
+        
+        # 全选/取消全选按钮
+        self.select_all_btn = QPushButton("全选")
+        self.select_all_btn.clicked.connect(self._select_all_folders)
+        button_layout.addWidget(self.select_all_btn)
+        
+        self.deselect_all_btn = QPushButton("取消全选")
+        self.deselect_all_btn.clicked.connect(self._deselect_all_folders)
+        button_layout.addWidget(self.deselect_all_btn)
+        
+        button_layout.addStretch()
+        
+        # 确认和取消按钮
+        self.cancel_btn = QPushButton("取消")
+        self.cancel_btn.clicked.connect(self.reject)
+        button_layout.addWidget(self.cancel_btn)
+        
+        self.ok_btn = QPushButton("确认")
+        self.ok_btn.setStyleSheet(
+            "QPushButton {"
+            "    background-color: #3498db;"
+            "    color: white;"
+            "    border: none;"
+            "    padding: 8px 16px;"
+            "    border-radius: 4px;"
+            "    font-weight: bold;"
+            "}"
+            "QPushButton:hover {"
+            "    background-color: #2980b9;"
+            "}"
+        )
+        self.ok_btn.clicked.connect(self._accept_selection)
+        button_layout.addWidget(self.ok_btn)
+        
+        layout.addLayout(button_layout)
+        
+        # 初始化显示当前工作目录
+        self._load_folder_tree(os.getcwd())
+    
+    def _browse_root_folder(self):
+        """浏览选择根文件夹"""
+        folder = QFileDialog.getExistingDirectory(self, "选择根文件夹")
+        if folder:
+            self._load_folder_tree(folder)
+    
+    def _load_folder_tree(self, root_path):
+        """加载文件夹树"""
+        self.folder_tree.clear()
+        self.current_path_label.setText(root_path)
+        
+        try:
+            # 创建根节点
+            root_item = QTreeWidgetItem(self.folder_tree)
+            root_item.setText(0, os.path.basename(root_path) or root_path)
+            root_item.setData(0, Qt.UserRole, root_path)
+            root_item.setExpanded(True)
+            
+            # 递归加载子文件夹
+            self._load_subfolders(root_item, root_path, max_depth=3)
+            
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"加载文件夹失败: {str(e)}")
+    
+    def _load_subfolders(self, parent_item, folder_path, max_depth=3, current_depth=0):
+        """递归加载子文件夹"""
+        if current_depth >= max_depth:
+            return
+        
+        try:
+            for item in os.listdir(folder_path):
+                item_path = os.path.join(folder_path, item)
+                if os.path.isdir(item_path) and not item.startswith('.'):
+                    # 创建子节点
+                    child_item = QTreeWidgetItem(parent_item)
+                    child_item.setText(0, item)
+                    child_item.setData(0, Qt.UserRole, item_path)
+                    
+                    # 递归加载更深层的文件夹
+                    self._load_subfolders(child_item, item_path, max_depth, current_depth + 1)
+                    
+        except PermissionError:
+            # 忽略权限错误
+            pass
+        except Exception:
+            # 忽略其他错误
+            pass
+    
+    def _select_all_folders(self):
+        """全选所有文件夹"""
+        self.folder_tree.selectAll()
+    
+    def _deselect_all_folders(self):
+        """取消全选所有文件夹"""
+        self.folder_tree.clearSelection()
+    
+    def _accept_selection(self):
+        """确认选择"""
+        selected_items = self.folder_tree.selectedItems()
+        
+        if not selected_items:
+            QMessageBox.warning(self, "提示", "请至少选择一个文件夹")
+            return
+        
+        # 获取选中的文件夹路径
+        self.selected_folders = []
+        for item in selected_items:
+            folder_path = item.data(0, Qt.UserRole)
+            if folder_path and os.path.isdir(folder_path):
+                self.selected_folders.append(folder_path)
+        
+        if not self.selected_folders:
+            QMessageBox.warning(self, "提示", "没有找到有效的文件夹")
+            return
+        
+        self.accept()
+    
+    def get_selected_folders(self):
+        """获取选中的文件夹列表"""
+        return self.selected_folders
+
 class CustomAPIDialog(QDialog):
     """自定义API模型配置对话框"""
     
@@ -3423,22 +3586,43 @@ class VideoDescriptionWidget(QWidget):
                 self._apply_duration_sorting()
     
     def _upload_video_folder(self):
-        """上传视频文件夹（支持累积式添加）"""
-        folder = QFileDialog.getExistingDirectory(self, "选择视频文件夹")
+        """上传视频文件夹（支持多选文件夹）"""
+        # 使用自定义的多选文件夹对话框
+        folders = self._select_multiple_folders()
         
-        if folder:
-            self._add_videos_from_folder(folder)
+        if folders:
+            total_added = 0
+            total_processed = 0
             
-            # 询问是否继续添加更多文件夹
-            reply = QMessageBox.question(
-                self, "继续添加", 
-                f"已添加文件夹: {folder}\n\n是否继续添加其他文件夹？",
-                QMessageBox.Yes | QMessageBox.No
-            )
+            # 处理所有选中的文件夹
+            for folder in folders:
+                added_count, processed_count = self._add_videos_from_folder(folder)
+                total_added += added_count
+                total_processed += processed_count
             
-            # 如果用户选择继续，递归调用自己
-            if reply == QMessageBox.Yes:
-                self._upload_video_folder()
+            # 显示总结信息
+            if total_added > 0:
+                message = f"从 {len(folders)} 个文件夹中添加了 {total_added} 个视频文件"
+                if total_processed > 0:
+                    message += f"，其中 {total_processed} 个已有处理结果"
+                self._log_message(message)
+                
+                # 显示成功消息
+                QMessageBox.information(
+                    self, "添加完成", 
+                    f"成功处理了 {len(folders)} 个文件夹\n"
+                    f"添加视频: {total_added} 个\n"
+                    f"已有结果: {total_processed} 个"
+                )
+            else:
+                QMessageBox.information(self, "提示", "所选文件夹中没有找到新的视频文件")
+    
+    def _select_multiple_folders(self):
+        """显示支持多选的文件夹选择对话框"""
+        dialog = MultiFolderSelectionDialog(self)
+        if dialog.exec_() == QDialog.Accepted:
+            return dialog.get_selected_folders()
+        return []
     
     def _add_videos_from_folder(self, folder):
         """从文件夹添加视频文件并读取已有描述文件"""
@@ -3472,16 +3656,12 @@ class VideoDescriptionWidget(QWidget):
                     if self._is_video_processed(file_str):
                         processed_count += 1
         
-        # 记录添加结果
-        if added_count > 0:
-            message = f"从文件夹添加了 {added_count} 个视频文件"
-            if processed_count > 0:
-                message += f"，其中 {processed_count} 个已有处理结果"
-            self._log_message(message)
-        
         # 应用排序/分桶
         if hasattr(self, 'duration_sort_mode_combo'):
             self._apply_duration_sorting()
+        
+        # 返回添加和处理的数量
+        return added_count, processed_count
     
     def _select_all_videos(self):
         """全选所有视频（忽略分组头）"""
