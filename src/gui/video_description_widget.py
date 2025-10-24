@@ -3799,10 +3799,14 @@ class VideoDescriptionWidget(QWidget):
             video_dir = Path(video_path).parent
             video_name = Path(video_path).stem
             
-            # 创建视频同名文件夹和description子文件夹
+            # 创建视频同名文件夹和description、pose子文件夹
             video_folder = video_dir / video_name
             description_folder = video_folder / "description"
+            pose_folder = video_folder / "pose"  # 为未来功能预留
+            
+            # 确保目录存在
             description_folder.mkdir(parents=True, exist_ok=True)
+            pose_folder.mkdir(parents=True, exist_ok=True)
             
             # 获取当前的描述长度等级，用于生成统一的文件名
             description_length_text = getattr(self, 'center_description_length_combo', None)
@@ -5339,29 +5343,37 @@ class VideoDescriptionWidget(QWidget):
                 description_folder.mkdir(parents=True, exist_ok=True)
                 pose_folder.mkdir(parents=True, exist_ok=True)
                 
-                # 检查统一的描述文件
+                # 检查处理结果文件（优先查找缓存文件，确保数据完整性）
+                cache_result_file = self._get_result_file_path(video_path)
                 user_result_file = self._get_user_result_file_path(video_path)
                 
+                result_file = None
+                if cache_result_file.exists():
+                    result_file = cache_result_file
+                elif user_result_file.exists():
+                    result_file = user_result_file
+                
                 # 导出统一的描述文件
-                if user_result_file.exists():
-                    with open(user_result_file, 'r', encoding='utf-8') as f:
+                if result_file and result_file.exists():
+                    with open(result_file, 'r', encoding='utf-8') as f:
                         result = json.load(f)
                     
-                    # 获取描述长度等级用于文件命名
+                    # 获取描述长度等级用于文件命名（转换为英文格式，与自动保存保持一致）
                     description_length_text = self.center_description_length_combo.currentText()
+                    description_length_english = self._get_length_text_english(description_length_text)
                     
-                    # 生成导出文件路径（统一格式，不再区分模型类型）
+                    # 生成导出文件路径（统一格式，与自动保存命名一致）
                     if format_type == 'json':
-                        export_file = description_folder / f"{video_name}-{description_length_text}_description.json"
+                        export_file = description_folder / f"{video_name}_{description_length_english}.json"
                         self._export_single_video_json(result, video_path, export_file)
                     elif format_type == 'txt':
-                        export_file = description_folder / f"{video_name}-{description_length_text}_description.txt"
+                        export_file = description_folder / f"{video_name}_{description_length_english}.txt"
                         self._export_single_video_txt(result, video_path, export_file)
                     elif format_type == 'csv':
-                        export_file = description_folder / f"{video_name}-{description_length_text}_description.csv"
+                        export_file = description_folder / f"{video_name}_{description_length_english}.csv"
                         self._export_single_video_csv(result, video_path, export_file)
                     elif format_type == 'md':
-                        export_file = description_folder / f"{video_name}-{description_length_text}_description.md"
+                        export_file = description_folder / f"{video_name}_{description_length_english}.md"
                         self._export_single_video_md(result, video_path, export_file)
                     
                     exported_count += 1
@@ -5579,9 +5591,9 @@ class VideoDescriptionWidget(QWidget):
         description_folder.mkdir(parents=True, exist_ok=True)
         pose_folder.mkdir(parents=True, exist_ok=True)
         
-        # 获取描述长度等级用于文件命名
+        # 获取描述长度等级用于文件命名（转换为英文格式，与手动导出保持一致）
         description_length_text = self.center_description_length_combo.currentText()
-        length_suffix = f"-{description_length_text}长度描述" if description_length_text else ""
+        description_length_english = self._get_length_text_english(description_length_text)
         
         saved_count = 0
         format_names = {"json": "JSON", "txt": "TXT", "csv": "CSV", "md": "MD"}
@@ -5589,16 +5601,16 @@ class VideoDescriptionWidget(QWidget):
         for format_type in formats:
             try:
                 if format_type == 'json':
-                    save_file = description_folder / f"{video_name}{length_suffix}_description.json"
+                    save_file = description_folder / f"{video_name}_{description_length_english}.json"
                     self._export_single_video_json(result, video_path, save_file)
                 elif format_type == 'txt':
-                    save_file = description_folder / f"{video_name}{length_suffix}_description.txt"
+                    save_file = description_folder / f"{video_name}_{description_length_english}.txt"
                     self._export_single_video_txt(result, video_path, save_file)
                 elif format_type == 'csv':
-                    save_file = description_folder / f"{video_name}{length_suffix}_description.csv"
+                    save_file = description_folder / f"{video_name}_{description_length_english}.csv"
                     self._export_single_video_csv(result, video_path, save_file)
                 elif format_type == 'md':
-                    save_file = description_folder / f"{video_name}{length_suffix}_description.md"
+                    save_file = description_folder / f"{video_name}_{description_length_english}.md"
                     self._export_single_video_md(result, video_path, save_file)
                 
                 saved_count += 1
@@ -5622,22 +5634,22 @@ class VideoDescriptionWidget(QWidget):
         description_folder.mkdir(parents=True, exist_ok=True)
         pose_folder.mkdir(parents=True, exist_ok=True)
         
-        # 获取描述长度等级用于文件命名
+        # 获取描述长度等级用于文件命名（转换为英文格式，与手动导出保持一致）
         description_length_text = self.center_description_length_combo.currentText()
-        length_suffix = f"-{description_length_text}长度描述" if description_length_text else ""
+        description_length_english = self._get_length_text_english(description_length_text)
         
         try:
             if format_type == 'json':
-                save_file = description_folder / f"{video_name}{length_suffix}_description.json"
+                save_file = description_folder / f"{video_name}_{description_length_english}.json"
                 self._export_single_video_json(result, video_path, save_file)
             elif format_type == 'txt':
-                save_file = description_folder / f"{video_name}{length_suffix}_description.txt"
+                save_file = description_folder / f"{video_name}_{description_length_english}.txt"
                 self._export_single_video_txt(result, video_path, save_file)
             elif format_type == 'csv':
-                save_file = description_folder / f"{video_name}{length_suffix}_description.csv"
+                save_file = description_folder / f"{video_name}_{description_length_english}.csv"
                 self._export_single_video_csv(result, video_path, save_file)
             elif format_type == 'md':
-                save_file = description_folder / f"{video_name}{length_suffix}_description.md"
+                save_file = description_folder / f"{video_name}_{description_length_english}.md"
                 self._export_single_video_md(result, video_path, save_file)
             
             self._log_message(f"视频 {os.path.basename(video_path)} 成功保存{format_type.upper()}格式到description文件夹")
@@ -5776,22 +5788,22 @@ class VideoDescriptionWidget(QWidget):
                     description_folder.mkdir(parents=True, exist_ok=True)
                     pose_folder.mkdir(parents=True, exist_ok=True)
                     
-                    # 获取描述长度等级用于文件命名
+                    # 获取描述长度等级用于文件命名（转换为英文格式，与手动导出保持一致）
                     description_length_text = self.center_description_length_combo.currentText()
-                    length_suffix = f"-{description_length_text}长度描述" if description_length_text else ""
+                    description_length_english = self._get_length_text_english(description_length_text)
                     
                     # 生成保存文件路径（保存到description文件夹中）
                     if format_type == 'json':
-                        save_file = description_folder / f"{video_name}{length_suffix}_description.json"
+                        save_file = description_folder / f"{video_name}_{description_length_english}.json"
                         self._export_single_video_json(result, video_path, save_file)
                     elif format_type == 'txt':
-                        save_file = description_folder / f"{video_name}{length_suffix}_description.txt"
+                        save_file = description_folder / f"{video_name}_{description_length_english}.txt"
                         self._export_single_video_txt(result, video_path, save_file)
                     elif format_type == 'csv':
-                        save_file = description_folder / f"{video_name}{length_suffix}_description.csv"
+                        save_file = description_folder / f"{video_name}_{description_length_english}.csv"
                         self._export_single_video_csv(result, video_path, save_file)
                     elif format_type == 'md':
-                        save_file = description_folder / f"{video_name}{length_suffix}_description.md"
+                        save_file = description_folder / f"{video_name}_{description_length_english}.md"
                         self._export_single_video_md(result, video_path, save_file)
                     
                     saved_count += 1
