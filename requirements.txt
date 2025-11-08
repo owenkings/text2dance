@@ -97,22 +97,22 @@ keyring>=23.8.0
 loguru
 
 # Pose 3D specific dependencies
-smplx==0.1.13
-chumpy
-yolov3
-git+https://github.com/mkocabas/multi-person-tracker.git
+#smplx==0.1.13
+#chumpy
+#yolov3
+#git+https://github.com/mkocabas/multi-person-tracker.git
 # multi-person-tracker安装步骤
 # git clone https://github.com/mkocabas/multi-person-tracker.git
 # cd multi-person-tracker
 # pip install .
 
 # 安装ViTPose
-mmcv-full-1.7.2
-git clone https://gitee.com/open-mmlab/mmcv.git 
-cd mmcv
-git checkout v1.3.9
-MMCV_WITH_OPS=1 pip install -e .
-cd ..
-git clone https://github.com/ViTAE-Transformer/ViTPose.git
-cd ViTPose
-pip install -v -e .
+#mmcv-full-1.7.2
+#git clone https://gitee.com/open-mmlab/mmcv.git 
+#cd mmcv
+#git checkout v1.3.9
+#MMCV_WITH_OPS=1 pip install -e .
+#cd ..
+#git clone https://github.com/ViTAE-Transformer/ViTPose.git
+#cd ViTPose
+#pip install -v -e .

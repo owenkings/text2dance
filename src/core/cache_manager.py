@@ -23,12 +23,29 @@ class ConfigManager:
         """加载配置文件"""
         try:
             if self.config_file.exists():
-                with open(self.config_file, 'r', encoding='utf-8') as f:
-                    for line in f:
-                        line = line.strip()
-                        if line and not line.startswith('#') and '=' in line:
-                            key, value = line.split('=', 1)
-                            self.config[key.strip()] = value.strip()
+                # 尝试多种编码方式读取文件
+                encodings = ['utf-8', 'utf-8-sig', 'gbk', 'gb2312', 'latin1']
+                content = None
+                
+                for encoding in encodings:
+                    try:
+                        with open(self.config_file, 'r', encoding=encoding) as f:
+                            content = f.read()
+                        break
+                    except UnicodeDecodeError:
+                        continue
+                
+                if content is None:
+                    print(f"警告: 无法读取配置文件 {self.config_file}，使用默认配置")
+                    self._create_default_config()
+                    return
+                
+                # 解析配置内容
+                for line in content.splitlines():
+                    line = line.strip()
+                    if line and not line.startswith('#') and '=' in line:
+                        key, value = line.split('=', 1)
+                        self.config[key.strip()] = value.strip()
             else:
                 # 创建默认配置
                 self._create_default_config()
@@ -159,8 +176,16 @@ action_filter_api_model=
             # 读取现有文件内容，保持注释和格式
             existing_lines = []
             if self.config_file.exists():
-                with open(self.config_file, 'r', encoding='utf-8') as f:
-                    existing_lines = f.readlines()
+                # 尝试多种编码方式读取文件
+                encodings = ['utf-8', 'utf-8-sig', 'gbk', 'gb2312', 'latin1']
+                
+                for encoding in encodings:
+                    try:
+                        with open(self.config_file, 'r', encoding=encoding) as f:
+                            existing_lines = f.readlines()
+                        break
+                    except UnicodeDecodeError:
+                        continue
             
             # 更新配置值，保持原有格式
             updated_lines = []

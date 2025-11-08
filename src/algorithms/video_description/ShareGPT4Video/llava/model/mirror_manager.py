@@ -47,8 +47,16 @@ class MirrorManager:
     def _load_config(self) -> Dict:
         """从 cache_config.txt 文件加载镜像配置"""
         try:
-            # 尝试使用新的UserConfigManager
-            from ......core.user_config_manager import get_user_config_manager
+            # 尝试使用新的UserConfigManager（优先绝对导入，确保不受相对路径影响）
+            try:
+                from src.core.user_config_manager import get_user_config_manager
+            except Exception:
+                # 回退一次：将项目根目录加入sys.path后再尝试绝对导入
+                project_root = Path(__file__).resolve().parents[6]
+                if str(project_root) not in sys.path:
+                    sys.path.append(str(project_root))
+                from src.core.user_config_manager import get_user_config_manager
+
             config_manager = get_user_config_manager()
             user_config = config_manager.config
             

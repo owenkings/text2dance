@@ -21,7 +21,7 @@ class RefilterDialog(QDialog):
     
     def _init_ui(self):
         """初始化UI"""
-        self.setWindowTitle("重新过滤 - 选择结果文件")
+        self.setWindowTitle("重新过滤 - 选择本地模型结果文件")
         self.setModal(True)
         self.resize(800, 600)
         
@@ -78,7 +78,7 @@ class RefilterDialog(QDialog):
         # 按钮区域
         button_layout = QHBoxLayout()
         
-        self.ok_btn = QPushButton("开始重新过滤")
+        self.ok_btn = QPushButton("开始重新过滤（仅本地模型）")
         self.ok_btn.setStyleSheet(
             "QPushButton {"
             "    background-color: #27ae60;"
@@ -170,6 +170,11 @@ class RefilterDialog(QDialog):
             with open(file_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             
+            # 首先检查是否为本地模型的结果
+            model_type = data.get('model_type', '')
+            if model_type != 'local':
+                return False  # 仅处理本地模型的结果
+            
             # 检查是否有描述内容
             if not data.get('description'):
                 return False
@@ -224,10 +229,10 @@ class RefilterDialog(QDialog):
     def _show_no_files_message(self):
         """显示无文件消息"""
         self.file_list.clear()
-        item = QListWidgetItem("未找到可重新过滤的结果文件")
+        item = QListWidgetItem("未找到可重新过滤的本地模型结果文件")
         item.setFlags(Qt.NoItemFlags)
         self.file_list.addItem(item)
-        self.stats_label.setText("未找到适合重新过滤的文件")
+        self.stats_label.setText("未找到适合重新过滤的本地模型文件")
     
     def _select_all(self):
         """全选"""

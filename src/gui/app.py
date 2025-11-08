@@ -22,7 +22,7 @@ from PyQt5.QtCore import (
     QLocale, QLibraryInfo, QSettings, QStandardPaths
 )
 from PyQt5.QtGui import (
-    QFont, QPixmap, QIcon, QPalette, QColor
+    QFont, QPixmap, QIcon, QPalette, QColor, QTextCursor
 )
 
 # 导入自定义模块
@@ -732,6 +732,33 @@ class Application(QApplication):
 
 def create_application(argv) -> Application:
     """创建应用程序实例"""
+    # 注册Qt元类型，解决QTextCursor信号连接问题 - 必须在任何Qt组件创建之前
+    try:
+        # 尝试使用 qRegisterMetaType
+        from PyQt5.QtCore import qRegisterMetaType
+        from PyQt5.QtGui import QTextCursor
+        qRegisterMetaType(QTextCursor)
+        print("QTextCursor 元类型注册成功")
+    except ImportError as e:
+        print(f"qRegisterMetaType 导入失败: {e}")
+        # 使用替代方案：直接导入QTextCursor确保其在Qt元对象系统中注册
+        try:
+            from PyQt5.QtGui import QTextCursor
+            # 创建一个临时实例来确保类型被注册
+            temp_cursor = QTextCursor()
+            print("QTextCursor 通过实例化方式注册成功")
+        except Exception as e2:
+            print(f"QTextCursor 替代注册方式失败: {e2}")
+    except Exception as e:
+        print(f"QTextCursor 元类型注册失败: {e}")
+        # 使用替代方案
+        try:
+            from PyQt5.QtGui import QTextCursor
+            temp_cursor = QTextCursor()
+            print("QTextCursor 通过实例化方式注册成功")
+        except Exception as e2:
+            print(f"QTextCursor 替代注册方式失败: {e2}")
+    
     # 设置高DPI支持
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)

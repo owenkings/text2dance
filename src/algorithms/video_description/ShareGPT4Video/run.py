@@ -387,11 +387,13 @@ def video_answer(prompt, model, processor, tokenizer, img_grid, do_sample=True,
         }
         
         # 只有当max_new_tokens不为None时才添加该参数
-        #if max_new_tokens is not None:
-        #   generate_params['max_new_tokens'] = max_new_tokens
-        #    logger.info(f"设置max_new_tokens限制: {max_new_tokens}")
-        #else:
-        #    logger.info("未设置max_new_tokens限制，模型将自由生成")
+        if max_new_tokens is not None:
+            generate_params['max_new_tokens'] = max_new_tokens
+            logger.info(f"设置max_new_tokens限制: {max_new_tokens}")
+        else:
+            # 设置合理的默认值，避免生成过长或不完整的描述
+            generate_params['max_new_tokens'] = 2048
+            logger.info("使用默认max_new_tokens限制: 2048")
         
         # 记录输入token数
         try:
@@ -673,7 +675,7 @@ def parse_arguments():
     parser.add_argument('--conv-mode', default='llava_llama_3', help='对话模式 (默认: llava_llama_3)')
     parser.add_argument('--query', default='Describe this video in detail.', help='查询内容')
     parser.add_argument('--device', default='cuda', choices=['cuda', 'cpu'], help='计算设备')
-    parser.add_argument('--output-format', choices=['plain', 'json'], default='plain',
+    parser.add_argument('--output-format', choices=['plain', 'json'], default='json',
                        help='输出格式 (默认: plain)')
     parser.add_argument('--log-level', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'], 
                        default='INFO', help='日志级别 (默认: INFO)')
@@ -691,8 +693,8 @@ def parse_arguments():
                        help='最大生成token数 (默认: 8192，支持超长描述生成)')
     parser.add_argument('--num_beams', type=int, default=1,
                        help='束搜索的束数 (默认: 1)')
-    parser.add_argument('--num_frames', type=int, default=16,
-                       help='视频采样帧数 (默认: 16)')
+    parser.add_argument('--num_frames', type=int, default=0,
+                       help='视频采样帧数 (默认: 0 自动)')
     
     return parser.parse_args()
 

@@ -180,6 +180,7 @@ config.yaml
 # Model files and cache
 model/
 huggingface/
+test_video/
 *.pth
 *.pth.tar
 *.weights

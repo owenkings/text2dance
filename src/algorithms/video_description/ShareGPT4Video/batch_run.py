@@ -369,8 +369,17 @@ class BatchVideoProcessor:
                     self.logger.error(f"自动帧数选择失败: {e}，使用默认16帧")
                     num_frames = 16
             
-            # 设置预查询提示
-            pre_query_prompt = "The provided image arranges keyframes from a video in a grid view, keyframes are separated with white bands. Answer concisely with overall content and context of the video, highlighting any significant events, characters, or objects that appear throughout the frames."
+            # 构建正确的提示词
+            # 将用户的描述要求作为指导性提示，而不是直接的查询
+            if query and query.strip():
+                # 如果用户提供了具体的描述要求，将其作为指导性提示
+                pre_query_prompt = f"The provided image arranges keyframes from a video in a grid view, keyframes are separated with white bands. Please describe this video following these specific requirements: {query}"
+                # 使用通用的描述查询
+                actual_query = "Please describe this video in detail."
+            else:
+                # 如果没有特定要求，使用默认提示
+                pre_query_prompt = "The provided image arranges keyframes from a video in a grid view, keyframes are separated with white bands. Answer concisely with overall content and context of the video, highlighting any significant events, characters, or objects that appear throughout the frames."
+                actual_query = "Please describe this video in detail."
             
             # 构建single_test参数
             test_params = {
@@ -378,7 +387,7 @@ class BatchVideoProcessor:
                 'processor': self.processor,
                 'tokenizer': self.tokenizer,
                 'vid_path': video_path,
-                'qs': query,
+                'qs': actual_query,
                 'pre_query_prompt': pre_query_prompt,
                 'num_frames': num_frames,
                 'conv_mode': self.conv_mode,
@@ -974,8 +983,8 @@ def parse_batch_arguments():
                        help='预处理线程数 (默认: 4)')
     
     # 生成参数
-    parser.add_argument('--num-frames', type=int, default=16,
-                       help='视频采样帧数 (默认: 16)')
+    parser.add_argument('--num-frames', type=int, default=0,
+                       help='视频采样帧数 (默认: 0 自动)')
     parser.add_argument('--do-sample', type=str, choices=['True', 'False'], default='True',
                        help='是否使用采样生成 (默认: True)')
     parser.add_argument('--top-p', type=float, default=0.9,
