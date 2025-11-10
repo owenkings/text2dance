@@ -231,10 +231,18 @@ class ResultsViewWidget(QWidget):
             QMessageBox.warning(self, "提示", "文件夹不存在或不可用")
             return
         exts = {".mp4", ".avi", ".mov", ".mkv", ".wmv", ".mpeg"}
+        # 排除生成结果目录（避免将 pose/pose3d 内的结果视频列入左侧列表）
+        exclude_dirs = {"pose", "pose3d"}
         videos: List[Path] = []
         try:
             for p in folder.rglob("*"):
                 if p.is_file() and p.suffix.lower() in exts:
+                    # 如果路径中包含被排除的目录名，则跳过
+                    try:
+                        if any(parent.name.lower() in exclude_dirs for parent in p.parents):
+                            continue
+                    except Exception:
+                        pass
                     videos.append(p)
         except Exception as e:
             QMessageBox.critical(self, "错误", f"遍历文件夹失败: {e}")
