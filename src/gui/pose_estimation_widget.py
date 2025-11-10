@@ -112,9 +112,9 @@ class PoseEstimationThread(QThread):
             # 第一步：运行 run_demo.py 生成 PKL 文件
             self.log_updated.emit(f"步骤1: 运行姿势估计生成PKL文件...")
             
-            # 构建输出目录 - 使用输入视频的同级目录下的pose文件夹
+            # 构建输出目录 - 使用输入视频的同级目录下的pose3d文件夹
             video_dir = os.path.dirname(video_path)
-            output_dir = os.path.join(video_dir, video_name, "pose")
+            output_dir = os.path.join(video_dir, video_name, "pose3d")
             os.makedirs(output_dir, exist_ok=True)
             
             # 项目根目录仍需要用于脚本路径

@@ -2413,6 +2413,12 @@ class VideoDescriptionThread(QThread):
     
     def _process_videos_batch(self):
         """批量处理所有视频"""
+        # 预先定义变量，避免 finally 中未绑定错误
+        process = None
+        config_file_created = False
+        config_path = ""
+        output_lines = []
+        user_canceled = False
         try:
             # 使用传入的设备设置
             device_setting = self.device
@@ -2561,7 +2567,8 @@ class VideoDescriptionThread(QThread):
                         self.log_updated.emit(f"终止进程时出错: {e}")
                     finally:
                         self.current_process = None
-                    return False, []
+                    user_canceled = True
+                    break
                 
                 line = process.stdout.readline()
                 
@@ -2586,10 +2593,11 @@ class VideoDescriptionThread(QThread):
                 time.sleep(0.01)
             
             self.log_updated.emit(f"批量处理命令执行完成，返回码: {process.returncode}")
-            
+
         except Exception as e:
             self.log_updated.emit(f"批量处理发生异常: {str(e)}")
-            return False, []
+            # 异常时不在 finally 中再次 return，留到函数末尾统一返回
+            process = process  # 保持作用域一致
         finally:
             # 清理进程引用
             self.current_process = None
@@ -2602,50 +2610,54 @@ class VideoDescriptionThread(QThread):
             except Exception as e:
                 self.log_updated.emit(f"清理临时配置文件失败: {str(e)}")
             
-            # 检查进程返回码
-            if process.returncode == 0:
-                # 尝试从输出中提取JSON结果
-                json_output = None
-                json_start = -1
-                json_end = -1
+        # 统一在此进行结果返回，避免在 finally 中 return 导致覆盖
+        if user_canceled:
+            return False, []
+        
+        # 检查进程返回码
+        if process and process.returncode == 0:
+            # 尝试从输出中提取JSON结果
+            json_output = None
+            json_start = -1
+            json_end = -1
+            
+            # 改进的JSON查找逻辑：查找包含完整JSON结构的行
+            self.log_updated.emit(f"开始解析输出，共 {len(output_lines)} 行")
+            
+            # 查找包含完整JSON的单行
+            json_line = None
+            json_line_index = -1
+            
+            for i, line in enumerate(output_lines):
+                line = line.strip()
+                if (line.startswith('{') and line.endswith('}') and 
+                    'summary' in line and 'results' in line):
+                    json_line = line
+                    json_line_index = i
+                    break
+            
+            if json_line:
+                self.log_updated.emit(f"找到JSON输出，在第 {json_line_index+1} 行")
                 
-                # 改进的JSON查找逻辑：查找包含完整JSON结构的行
-                self.log_updated.emit(f"开始解析输出，共 {len(output_lines)} 行")
-                
-                # 查找包含完整JSON的单行
-                json_line = None
-                json_line_index = -1
-                
-                for i, line in enumerate(output_lines):
-                    line = line.strip()
-                    if (line.startswith('{') and line.endswith('}') and 
-                        'summary' in line and 'results' in line):
-                        json_line = line
-                        json_line_index = i
-                        break
-                
-                if json_line:
-                    self.log_updated.emit(f"找到JSON输出，在第 {json_line_index+1} 行")
+                try:
+                    import json
+                    # 直接解析单行JSON
+                    json_output = json.loads(json_line)
+                    self.log_updated.emit("成功解析批量处理结果")
                     
-                    try:
-                        import json
-                        # 直接解析单行JSON
-                        json_output = json.loads(json_line)
-                        self.log_updated.emit("成功解析批量处理结果")
-                        
-                        # 提取结果列表
-                        if 'results' in json_output:
-                            results = json_output['results']
-                            self.log_updated.emit(f"批量处理完成，共处理 {len(results)} 个视频")
-                            return True, results
-                        else:
-                            self.log_updated.emit("JSON输出中未找到results字段")
-                            return False, []
-                            
-                    except json.JSONDecodeError as e:
-                        self.log_updated.emit(f"JSON解析失败: {str(e)}")
-                        self.log_updated.emit(f"尝试解析的JSON前200字符: {json_line[:200]}")
+                    # 提取结果列表
+                    if 'results' in json_output:
+                        results = json_output['results']
+                        self.log_updated.emit(f"批量处理完成，共处理 {len(results)} 个视频")
+                        return True, results
+                    else:
+                        self.log_updated.emit("JSON输出中未找到results字段")
                         return False, []
+                        
+                except json.JSONDecodeError as e:
+                    self.log_updated.emit(f"JSON解析失败: {str(e)}")
+                    self.log_updated.emit(f"尝试解析的JSON前200字符: {json_line[:200]}")
+                    return False, []
                 
                 # 如果没找到单行JSON，尝试多行JSON解析（向后兼容）
                 json_start = -1
@@ -2732,6 +2744,7 @@ class VideoDescriptionThread(QThread):
                             # 尝试为每个视频创建成功的结果记录
                             self.log_updated.emit("JSON解析失败，但批量处理成功完成，为所有视频创建成功记录")
                             fallback_results = []
+                            from datetime import datetime
                             for video_path in self.videos:
                                 fallback_results.append({
                                     'video_path': video_path,
@@ -2750,10 +2763,10 @@ class VideoDescriptionThread(QThread):
                     for i, line in enumerate(output_lines[-10:], len(output_lines)-9):
                         self.log_updated.emit(f"第{i}行: {line}")
                     return False, []
-            else:
-                error_msg = '\n'.join(output_lines) if output_lines else "未知错误"
-                self.log_updated.emit(f"批量处理命令执行失败: {error_msg}")
-                return False, []
+        else:
+            error_msg = '\n'.join(output_lines) if output_lines else "未知错误"
+            self.log_updated.emit(f"批量处理命令执行失败: {error_msg}")
+            return False, []
     
     def _filter_action_description(self, description):
         """使用API过滤动作描述
@@ -5279,10 +5292,10 @@ class VideoDescriptionWidget(QWidget):
             video_dir = Path(video_path).parent
             video_name = Path(video_path).stem
             
-            # 创建视频同名文件夹和description、pose子文件夹
+            # 创建视频同名文件夹和description、pose3d子文件夹
             video_folder = video_dir / video_name
             description_folder = video_folder / "description"
-            pose_folder = video_folder / "pose"  # 为未来功能预留
+            pose_folder = video_folder / "pose3d"  # 为未来功能预留
             
             # 确保目录存在
             description_folder.mkdir(parents=True, exist_ok=True)
@@ -7024,7 +7037,7 @@ class VideoDescriptionWidget(QWidget):
                 # 创建视频同名文件夹和description子文件夹
                 video_folder = video_dir / video_name
                 description_folder = video_folder / "description"
-                pose_folder = video_folder / "pose"  # 为未来功能预留
+                pose_folder = video_folder / "pose3d"  # 为未来功能预留
                 
                 # 确保目录存在
                 description_folder.mkdir(parents=True, exist_ok=True)
@@ -7287,7 +7300,7 @@ class VideoDescriptionWidget(QWidget):
         # 创建视频同名文件夹和description子文件夹
         video_folder = video_dir / video_name
         description_folder = video_folder / "description"
-        pose_folder = video_folder / "pose"  # 为未来功能预留
+        pose_folder = video_folder / "pose3d"  # 为未来功能预留
         
         # 确保目录存在
         description_folder.mkdir(parents=True, exist_ok=True)
@@ -7330,7 +7343,7 @@ class VideoDescriptionWidget(QWidget):
         # 创建视频同名文件夹和description子文件夹
         video_folder = video_dir / video_name
         description_folder = video_folder / "description"
-        pose_folder = video_folder / "pose"  # 为未来功能预留
+        pose_folder = video_folder / "pose3d"  # 为未来功能预留
         
         # 确保目录存在
         description_folder.mkdir(parents=True, exist_ok=True)
@@ -7496,7 +7509,7 @@ class VideoDescriptionWidget(QWidget):
                     # 创建视频同名文件夹和description子文件夹
                     video_folder = video_dir / video_name
                     description_folder = video_folder / "description"
-                    pose_folder = video_folder / "pose"  # 为未来功能预留
+                    pose_folder = video_folder / "pose3d"  # 为未来功能预留
                     
                     # 确保目录存在
                     description_folder.mkdir(parents=True, exist_ok=True)

@@ -44,6 +44,7 @@ class MainWindow(QMainWindow):
         self.video_processing_widget = None
         self.video_description_widget = None
         self.pose_estimation_widget = None
+        self.results_view_widget = None
         self.algorithm_widget = None
         self.config_widget = None
         self.plugin_widget = None
@@ -80,6 +81,8 @@ class MainWindow(QMainWindow):
             self.video_description_widget.config_manager = config_manager
         if hasattr(self, 'pose_estimation_widget') and self.pose_estimation_widget:
             self.pose_estimation_widget.config_manager = config_manager
+        if hasattr(self, 'results_view_widget') and self.results_view_widget:
+            self.results_view_widget.config_manager = config_manager
         if hasattr(self, 'config_widget') and self.config_widget:
             self.config_widget.config_manager = config_manager
         if hasattr(self, 'log_widget') and self.log_widget:
@@ -130,6 +133,8 @@ class MainWindow(QMainWindow):
         self.tab_widget.addTab(self.video_edit_widget, "🎬 视频编辑")
         self.tab_widget.addTab(self.video_description_widget, "📝 视频描述")
         self.tab_widget.addTab(self.pose_estimation_widget, "🤸 姿势估计")
+        if self.results_view_widget:
+            self.tab_widget.addTab(self.results_view_widget, "🔎 查看结果")
         self.tab_widget.addTab(self.config_widget, "⚙️ 配置")
         
         # 任务管理器
@@ -164,6 +169,14 @@ class MainWindow(QMainWindow):
             # 姿势估计模块
             from .pose_estimation_widget import PoseEstimationWidget
             self.pose_estimation_widget = PoseEstimationWidget(self.config_manager)
+
+            # 查看结果模块
+            try:
+                from .results_view_widget import ResultsViewWidget
+                self.results_view_widget = ResultsViewWidget(self.config_manager)
+            except Exception as e:
+                print(f"加载查看结果模块失败: {e}")
+                self.results_view_widget = None
             
             # 配置模块
             self.config_widget = ConfigWidget(self.config_manager)
