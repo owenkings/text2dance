@@ -2814,23 +2814,28 @@ class VideoDescriptionThread(QThread):
             elif description_length_level == "极长":
                 length_instruction = "输出应该非常详细，全面分析所有动作，包含丰富的动作描述。"
             
-            # 构建请求数据 - 先翻译再过滤动作描述，根据长度等级调整详细程度
-            prompt = f"""请帮我处理这段话，严格按照以下要求：
+            # 构建请求数据 - 过滤动作描述并要求结构化JSON输出（包含总结与解释）
+            # 注意：避免在f-string中直接包含JSON大括号，改为拼接字符串以防止格式说明错误
+            prompt_head = f"""请根据以下规则处理文本，并严格只输出一个JSON对象：
 
-1. 如果原文是英文，请先将其翻译为中文
-2. 只保留与身体动作、姿态、运动相关的描述
-3. 去除环境、背景、人物衣着、外貌、物品等与动作描述无关内容
-4. 输出必须是完整的句子，包含明确的主语（如"男子"、"女子"、"运动员"、"舞者"等）
-5. 保持自然的语言表达，按照{description_length_level}等级对动作描述进行缩写或者扩写，输出相应详细程度的内容
-6. 不要添加任何原文中没有出现的动作的相关描述，除非原文中明确提到某个动作
-7. 如果某句话包含动作和非动作内容，只需保留动作部分
+规则：
+1. 若原文为英文，先翻译为中文。
+2. 仅保留与身体动作、姿态、运动相关的内容，删除环境/背景/服饰/外貌/物品等无关信息。
+3. 输出应为完整句子，包含明确主语（如“男子”“女子”“舞者”等）。
+4. 按照{description_length_level}等级调整详细程度：{length_instruction}
+5. 不要编造原文未出现的动作。
+6. 若句子同时包含动作与非动作内容，仅保留动作部分。
 
-当前描述长度等级：{description_length_level}
-
-原文：
-{description}
-
-请直接输出过滤后的内容，不要添加任何解释或说明。"""
+请以标准JSON格式输出，且不要添加任何额外文本：
+"""
+            json_spec = """{
+  "description": "过滤后的动作内容（中文）",
+  "action_summary": "对动作内容的10字以内总结",
+  "action_explanation": "对该动作的具体说明（解释该动作是什么）",
+  "filter_success": true
+}
+"""
+            prompt = f"{prompt_head}{json_spec}\n原文：\n{description}"
             
             data = {
                 'model': filter_api_config['api_model'],
@@ -2886,12 +2891,37 @@ class VideoDescriptionThread(QThread):
             if response.status_code == 200:
                 result = response.json()
                 if 'choices' in result and len(result['choices']) > 0:
-                    filtered_description = result['choices'][0]['message']['content'].strip()
-                    self.log_updated.emit("动作描述过滤完成")
-                    return {'description': filtered_description, 'filter_success': True}
+                    content = result['choices'][0]['message']['content'].strip()
+                    # 尝试解析为JSON结构
+                    try:
+                        parsed = json.loads(content)
+                        filtered_description = str(parsed.get('description', '')).strip()
+                        action_summary = str(parsed.get('action_summary', '')).strip()
+                        action_explanation = str(parsed.get('action_explanation', '')).strip()
+                        filter_success = bool(parsed.get('filter_success', True)) and bool(filtered_description)
+                        # 控制总结长度（最多10字）
+                        if action_summary and len(action_summary) > 10:
+                            action_summary = action_summary[:10]
+                        self.log_updated.emit("动作描述过滤完成（JSON解析）")
+                        return {
+                            'description': filtered_description,
+                            'filter_success': filter_success,
+                            'action_summary': action_summary,
+                            'action_explanation': action_explanation
+                        }
+                    except Exception:
+                        # 兼容旧格式：直接返回文本作为过滤结果
+                        filtered_description = content
+                        self.log_updated.emit("动作描述过滤完成（纯文本）")
+                        return {
+                            'description': filtered_description,
+                            'filter_success': True,
+                            'action_summary': '',
+                            'action_explanation': ''
+                        }
                 else:
                     self.log_updated.emit("API响应格式异常，使用原始描述")
-                    return {'description': description, 'filter_success': False}
+                    return {'description': description, 'filter_success': False, 'action_summary': '', 'action_explanation': ''}
             else:
                 self.log_updated.emit(f"API调用失败 (状态码: {response.status_code})，使用原始描述")
                 return {'description': description, 'filter_success': False}
@@ -3084,6 +3114,7 @@ class VideoDescriptionWidget(QWidget):
         self.current_videos = []
         self.video_durations = {}  # 缓存各视频的时长（秒），用于排序/分桶
         self.video_results = {}  # 存储视频处理结果
+        self.current_view_model_type_map = {}
         self.processing_thread = None
         self.is_all_selected = False  # 全选状态标记
         
@@ -5608,6 +5639,8 @@ class VideoDescriptionWidget(QWidget):
         
         # 显示指定模型类型的结果
         self._show_video_result(video_path, model_type=model_type)
+        # 记录当前视频的已查看模型类型
+        self.current_view_model_type_map[video_path] = model_type
         
         # 根据切换的模型类型更新UI状态
         if model_type == 'api':
@@ -5641,6 +5674,9 @@ class VideoDescriptionWidget(QWidget):
         else:
             # 指定了模型类型，直接加载对应的结果文件
             result_file = self._get_compatible_result_file_path(video_path, model_type=model_type)
+        # 记录当前视频的已查看模型类型（如果已确定）
+        if model_type in ('local', 'api'):
+            self.current_view_model_type_map[video_path] = model_type
         
         if result_file.exists():
             try:
@@ -6697,23 +6733,28 @@ class VideoDescriptionWidget(QWidget):
             elif description_length_level == "极长":
                 length_instruction = "输出应该非常详细，全面分析所有动作，包含丰富的动作描述。"
             
-            # 构建请求数据 - 先翻译再过滤动作描述，根据长度等级调整详细程度
-            prompt = f"""请帮我处理这段话，严格按照以下要求：
+            # 构建请求数据 - 过滤并要求结构化JSON输出（包含总结与解释）
+            # 注意：避免f-string中直接嵌入JSON大括号，使用字符串拼接
+            prompt_head = f"""请根据以下规则处理文本，并严格只输出一个JSON对象：
 
-1. 如果原文是英文，请先将其翻译为中文
-2. 只保留与身体动作、姿态、运动相关的描述
-3. 去除环境、背景、人物衣着、外貌、物品等与动作描述无关内容
-4. 输出必须是完整的句子，包含明确的主语（如"男子"、"女子"、"运动员"、"舞者"等）
-5. 保持自然的语言表达，按照{description_length_level}等级对动作描述进行缩写或者扩写，输出相应详细程度的内容
-6. 不要添加任何原文中没有出现的动作的相关描述，除非原文中明确提到某个动作
-7. 如果某句话包含动作和非动作内容，只需保留动作部分
+规则：
+1. 若原文为英文，先翻译为中文。
+2. 仅保留与身体动作、姿态、运动相关的内容，删除环境/背景/服饰/外貌/物品等无关信息。
+3. 输出应为完整句子，包含明确主语（如“男子”“女子”“舞者”等）。
+4. 按照{description_length_level}等级调整详细程度：{length_instruction}
+5. 不要编造原文未出现的动作。
+6. 若句子同时包含动作与非动作内容，仅保留动作部分。
 
-当前描述长度等级：{description_length_level}
-
-原文：
-{description}
-
-请直接输出过滤后的内容，不要添加任何解释或说明。"""
+请以标准JSON格式输出，且不要添加任何额外文本：
+"""
+            json_spec = """{
+  "description": "过滤后的动作内容（中文）",
+  "action_summary": "对动作内容的10字以内总结",
+  "action_explanation": "对该动作的具体说明（解释该动作是什么）",
+  "filter_success": true
+}
+"""
+            prompt = f"{prompt_head}{json_spec}\n原文：\n{description}"
             
             data = {
                 'model': filter_api_config['api_model'],
@@ -6769,12 +6810,36 @@ class VideoDescriptionWidget(QWidget):
             if response.status_code == 200:
                 result = response.json()
                 if 'choices' in result and len(result['choices']) > 0:
-                    filtered_description = result['choices'][0]['message']['content'].strip()
-                    self._log_message("动作描述过滤完成")
-                    return {'description': filtered_description, 'filter_success': True}
+                    content = result['choices'][0]['message']['content'].strip()
+                    # 尝试解析JSON
+                    try:
+                        parsed = json.loads(content)
+                        filtered_description = str(parsed.get('description', '')).strip()
+                        action_summary = str(parsed.get('action_summary', '')).strip()
+                        action_explanation = str(parsed.get('action_explanation', '')).strip()
+                        filter_success = bool(parsed.get('filter_success', True)) and bool(filtered_description)
+                        if action_summary and len(action_summary) > 10:
+                            action_summary = action_summary[:10]
+                        self._log_message("动作描述过滤完成（JSON解析）")
+                        return {
+                            'description': filtered_description,
+                            'filter_success': filter_success,
+                            'action_summary': action_summary,
+                            'action_explanation': action_explanation
+                        }
+                    except Exception:
+                        # 兼容旧格式
+                        filtered_description = content
+                        self._log_message("动作描述过滤完成（纯文本）")
+                        return {
+                            'description': filtered_description,
+                            'filter_success': True,
+                            'action_summary': '',
+                            'action_explanation': ''
+                        }
                 else:
                     self._log_message("API响应格式异常，使用原始描述")
-                    return {'description': description, 'filter_success': False}
+                    return {'description': description, 'filter_success': False, 'action_summary': '', 'action_explanation': ''}
             else:
                 self._log_message(f"API调用失败 (状态码: {response.status_code})，使用原始描述")
                 return {'description': description, 'filter_success': False}
@@ -7050,12 +7115,20 @@ class VideoDescriptionWidget(QWidget):
                 user_result_file = self._get_user_result_file_path(video_path)
                 
                 result_file = None
-                if local_cache_file.exists():
-                    result_file = local_cache_file
-                elif api_cache_file.exists():
-                    result_file = api_cache_file
-                elif user_result_file.exists():
-                    result_file = user_result_file
+                # 优先使用用户当前查看的模型类型（如果该视频有记录）
+                preferred_type = self.current_view_model_type_map.get(video_path)
+                if preferred_type:
+                    preferred_file = self._get_compatible_result_file_path(video_path, model_type=preferred_type)
+                    if preferred_file.exists():
+                        result_file = preferred_file
+                # 若没有记录或文件不存在，则回退到原有优先级
+                if not result_file:
+                    if local_cache_file.exists():
+                        result_file = local_cache_file
+                    elif api_cache_file.exists():
+                        result_file = api_cache_file
+                    elif user_result_file.exists():
+                        result_file = user_result_file
                 
                 # 导出统一的描述文件
                 if result_file and result_file.exists():
@@ -7309,6 +7382,8 @@ class VideoDescriptionWidget(QWidget):
         # 获取描述长度等级用于文件命名（转换为英文格式，与手动导出保持一致）
         description_length_text = self.center_description_length_combo.currentText()
         description_length_english = self._get_length_text_english(description_length_text)
+        # 获取模型标记
+        model_suffix = self._get_model_suffix_from_result(result)
         
         saved_count = 0
         format_names = {"json": "JSON", "txt": "TXT", "csv": "CSV", "md": "MD"}
@@ -7316,16 +7391,16 @@ class VideoDescriptionWidget(QWidget):
         for format_type in formats:
             try:
                 if format_type == 'json':
-                    save_file = description_folder / f"{video_name}_{description_length_english}.json"
+                    save_file = description_folder / f"{video_name}_{description_length_english}_{model_suffix}.json"
                     self._export_single_video_json(result, video_path, save_file)
                 elif format_type == 'txt':
-                    save_file = description_folder / f"{video_name}_{description_length_english}.txt"
+                    save_file = description_folder / f"{video_name}_{description_length_english}_{model_suffix}.txt"
                     self._export_single_video_txt(result, video_path, save_file)
                 elif format_type == 'csv':
-                    save_file = description_folder / f"{video_name}_{description_length_english}.csv"
+                    save_file = description_folder / f"{video_name}_{description_length_english}_{model_suffix}.csv"
                     self._export_single_video_csv(result, video_path, save_file)
                 elif format_type == 'md':
-                    save_file = description_folder / f"{video_name}_{description_length_english}.md"
+                    save_file = description_folder / f"{video_name}_{description_length_english}_{model_suffix}.md"
                     self._export_single_video_md(result, video_path, save_file)
                 
                 saved_count += 1
@@ -7352,19 +7427,21 @@ class VideoDescriptionWidget(QWidget):
         # 获取描述长度等级用于文件命名（转换为英文格式，与手动导出保持一致）
         description_length_text = self.center_description_length_combo.currentText()
         description_length_english = self._get_length_text_english(description_length_text)
+        # 获取模型标记
+        model_suffix = self._get_model_suffix_from_result(result)
         
         try:
             if format_type == 'json':
-                save_file = description_folder / f"{video_name}_{description_length_english}.json"
+                save_file = description_folder / f"{video_name}_{description_length_english}_{model_suffix}.json"
                 self._export_single_video_json(result, video_path, save_file)
             elif format_type == 'txt':
-                save_file = description_folder / f"{video_name}_{description_length_english}.txt"
+                save_file = description_folder / f"{video_name}_{description_length_english}_{model_suffix}.txt"
                 self._export_single_video_txt(result, video_path, save_file)
             elif format_type == 'csv':
-                save_file = description_folder / f"{video_name}_{description_length_english}.csv"
+                save_file = description_folder / f"{video_name}_{description_length_english}_{model_suffix}.csv"
                 self._export_single_video_csv(result, video_path, save_file)
             elif format_type == 'md':
-                save_file = description_folder / f"{video_name}_{description_length_english}.md"
+                save_file = description_folder / f"{video_name}_{description_length_english}_{model_suffix}.md"
                 self._export_single_video_md(result, video_path, save_file)
             
             self._log_message(f"视频 {os.path.basename(video_path)} 成功保存{format_type.upper()}格式到description文件夹")
@@ -7421,10 +7498,13 @@ class VideoDescriptionWidget(QWidget):
                     result = self.video_results[video_path]
                     video_name = Path(video_path).stem
                     
-                    # 创建description文件夹
+                    # 创建视频同名文件夹及子目录
                     video_dir = Path(video_path).parent
-                    description_folder = video_dir / "description"
-                    description_folder.mkdir(exist_ok=True)
+                    video_folder = video_dir / video_name
+                    description_folder = video_folder / "description"
+                    pose_folder = video_folder / "pose3d"
+                    description_folder.mkdir(parents=True, exist_ok=True)
+                    pose_folder.mkdir(parents=True, exist_ok=True)
                     
                     # 获取描述长度等级用于文件命名
                     description_length_text = self.center_description_length_combo.currentText()

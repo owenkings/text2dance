@@ -207,8 +207,11 @@ class RefilterThread(QThread):
                 try:
                     if hasattr(self.parent_widget, '_filter_action_description'):
                         filter_result = self.parent_widget._filter_action_description(original_description)
-                        filtered_description = filter_result['description']
-                        filter_success = filter_result['filter_success']
+                        filtered_description = filter_result.get('description', '')
+                        # 新增的两个字段（可能为空）
+                        action_summary = filter_result.get('action_summary', '')
+                        action_explanation = filter_result.get('action_explanation', '')
+                        filter_success = filter_result.get('filter_success', False)
                     else:
                         self.log_message.emit("❌ 父组件缺少 _filter_action_description 方法")
                         return False, "父组件缺少 _filter_action_description 方法"
@@ -219,6 +222,9 @@ class RefilterThread(QThread):
                 # 更新结果文件的action_description字段
                 if filter_success:
                     result_data['action_description'] = filtered_description
+                    # 写入新增字段
+                    result_data['action_summary'] = action_summary
+                    result_data['action_explanation'] = action_explanation
                     result_data['action_filter_applied'] = True
                     result_data['filter_updated_at'] = time.strftime('%Y-%m-%d %H:%M:%S')
                     
@@ -226,6 +232,8 @@ class RefilterThread(QThread):
                     self.log_message.emit(f"过滤后描述: {filtered_description[:100]}...")
                 else:
                     result_data['action_description'] = ""
+                    result_data['action_summary'] = ""
+                    result_data['action_explanation'] = ""
                     result_data['action_filter_applied'] = False
                     result_data['filter_updated_at'] = time.strftime('%Y-%m-%d %H:%M:%S')
                     
@@ -247,6 +255,10 @@ class RefilterThread(QThread):
                         f.write(f"{result_data.get('description', '')}\n")
                         if result_data.get('action_description'):
                             f.write(f"{result_data.get('action_description', '')}\n")
+                        if result_data.get('action_summary'):
+                            f.write(f"总结(<=10字): {result_data.get('action_summary', '')}\n")
+                        if result_data.get('action_explanation'):
+                            f.write(f"解释: {result_data.get('action_explanation', '')}\n")
                 else:
                     return False, f"不支持保存到文件格式: {file_ext}"
                 
@@ -479,9 +491,11 @@ class RefilterThread(QThread):
                         except:
                             existing_data = {}
                         
-                        # 更新字段
+                        # 更新字段（包含新增的summary和explanation）
                         existing_data.update({
                             'action_description': result_data.get('action_description', ''),
+                            'action_summary': result_data.get('action_summary', ''),
+                            'action_explanation': result_data.get('action_explanation', ''),
                             'action_filter_applied': result_data.get('action_filter_applied', False),
                             'filter_updated_at': result_data.get('filter_updated_at', '')
                         })
@@ -501,6 +515,10 @@ class RefilterThread(QThread):
                             f.write(f"{result_data.get('description', '')}\n")
                             if result_data.get('action_description'):
                                 f.write(f"{result_data.get('action_description', '')}\n")
+                            if result_data.get('action_summary'):
+                                f.write(f"总结(<=10字): {result_data.get('action_summary', '')}\n")
+                            if result_data.get('action_explanation'):
+                                f.write(f"解释: {result_data.get('action_explanation', '')}\n")
                     
                     updated_count += 1
                     
